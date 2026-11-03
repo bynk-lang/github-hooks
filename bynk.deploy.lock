@@ -1,0 +1,14 @@
+version = 1
+
+[environments.default.kv]
+
+[environments.default.d1_instances.github-hooks.D1_DELIVERIES]
+name = "github-hooks-deliveries"
+id = "a1887c06-f07d-4cd3-aec7-d0c5dda02c7f"
+
+[environments.default.workers.github-hooks]
+deployed = true
+
+[environments.default.workers.github-hooks.contracts]
+
+[environments.default.workers.github-hooks.expects]
