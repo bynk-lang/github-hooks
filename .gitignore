@@ -1,0 +1,8 @@
+# Build output `bynk dev` writes (compiled workers + local wrangler state).
+/.bynk
+# Build output `bynk test` writes.
+/out
+/out-js
+# Deploy-time secret values. Never commit these.
+*.secrets.env
+.secrets.env
