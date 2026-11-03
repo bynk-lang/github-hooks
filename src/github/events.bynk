@@ -41,6 +41,10 @@ because some events leave it out: a `ping` has no `action`, a `push` has no
 `action` either, and an `installation` event has no `repository`. Every other key
 in the payload is ignored on decode, so a 25 MB `push` decodes into this small
 record.
+
+`deleted` is set only on a `push`, and is `true` when the push deleted a branch
+or tag: GitHub sends such a push beside the `delete` event, so counting pushes
+has to leave those out.
 ---
 type Envelope = {
 	action: Option[String],
@@ -48,6 +52,7 @@ type Envelope = {
 	sender: Option[AccountRef],
 	organization: Option[AccountRef],
 	installation: Option[InstallationRef],
+	deleted: Option[Bool],
 }
 
 ---
@@ -62,6 +67,7 @@ type Delivery = {
 	sender: Option[String],
 	org: Option[String],
 	installation: Option[Int],
+	deleted: Option[Bool],
 	size: Int,
 }
 
@@ -92,6 +98,7 @@ fn read(
 		sender: env.sender.map((s) => s.login),
 		org: orgOf(e, env),
 		installation: env.installation.map((i) => i.id),
+		deleted: env.deleted,
 		size: body.length(),
 	})
 }

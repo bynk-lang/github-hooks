@@ -18,7 +18,7 @@ It is two things at once:
 | Phase | What | State |
 |---|---|---|
 | 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
-| 2 | Read API over recorded activity, daily digest, retention | planned |
+| 2 | Read API over recorded activity, daily digest, retention | read API and digest in progress ([#6](https://github.com/bynk-lang/github-hooks/issues/6)); retention after the load test |
 | 3 | Act on events through the App's installation token | planned |
 
 ## How it works
@@ -65,8 +65,10 @@ bynk test             # every suite: unit, integration and system
 
 `tests/events.bynk` tests the pure decoding. `tests/hooks.bynk` runs the
 handler against an in-memory SQLite D1 with the schema applied.
-`tests/seam.bynk` runs the deployable Worker itself, so the generated signature
-check sees real signed, unsigned and forged requests.
+`tests/read.bynk` covers the read API against seeded rows, and
+`tests/activity.bynk` the digest. `tests/seam.bynk` runs the deployable Worker
+itself, so the generated signature and token checks see real signed, unsigned,
+forged and tokenless requests.
 
 ### Run it locally
 
@@ -89,6 +91,15 @@ ok   an unsigned delivery is refused (401)
 
 `bynk dev` applies the migrations to a local database first.
 
+To read what was recorded, also give the read API its secret, then mint a token
+and ask (see [docs/read-api.md](docs/read-api.md)):
+
+```sh
+bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret --var API_TOKEN_SECRET:dev-api
+curl -H "Authorization: Bearer $(API_TOKEN_SECRET=dev-api scripts/token.sh me)" \
+  localhost:8787/activity
+```
+
 ## Deploy
 
 [docs/github-app.md](docs/github-app.md) walks through the whole set-up in
@@ -98,25 +109,33 @@ install the GitHub App. The deploy itself is:
 ```sh
 npx wrangler login                    # or set CLOUDFLARE_API_TOKEN
 printf 'APP_WEBHOOK_SECRET=%s\n' "<the App's webhook secret>" > .secrets.env
+printf 'API_TOKEN_SECRET=%s\n' "$(openssl rand -hex 32)" >> .secrets.env
 bynk deploy --secrets-file .secrets.env
 ```
+
+Both secrets are declared by the code's actors, so a deploy missing either one
+fails, naming it.
 
 The first deploy creates the `github-hooks-deliveries` D1 database, applies the
 migrations, sets the secret and pushes the Worker. Commit the
 `bynk.deploy.lock` it writes. Check the result with
-`scripts/smoke.sh https://github-hooks.<subdomain>.workers.dev "<secret>"`;
-the smoke rows are recorded like any other delivery.
+`scripts/smoke.sh https://github-hooks.<subdomain>.workers.dev "<webhook secret>" "<api token secret>"`,
+which also checks the read API's token handling; the smoke rows are recorded
+like any other delivery.
 
 ## Layout
 
 ```text
 src/github/events.bynk   commons github.events: payload types and pure decoding
-src/github/hooks.bynk    context github.hooks: the Worker (actor, D1, routes)
+src/github/activity.bynk commons github.activity: read API types and the digest
+src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, routes)
 migrations/              D1 schema, applied in tests, by bynk dev and by bynk deploy
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
+scripts/token.sh         mint a read API token
 .github/actions/         CI's Bynk install, pinned by version and SHA-256
 docs/github-app.md       registering and installing the GitHub App
+docs/read-api.md         the read API: tokens, routes, what the digest counts
 ```
 
 ## Licence

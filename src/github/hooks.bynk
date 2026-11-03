@@ -1,6 +1,7 @@
 context github.hooks
 
 uses github.events
+uses github.activity
 consumes bynk { Logger }
 consumes bynk.cloudflare { D1 }
 
@@ -23,6 +24,19 @@ without being recorded twice.
 ---
 actor GitHub { auth = Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-Signature-256") }
 
+---
+Who may read recorded activity: a caller presenting a JWT signed (HS256) with
+`API_TOKEN_SECRET`. The compiler generates the check, including `exp` and
+`nbf`, and answers `401` to a missing, forged or expired token.
+`scripts/token.sh` mints one. The token's `sub` names the reader, for logs.
+---
+actor Reader { auth = Bearer(secret = "API_TOKEN_SECRET"), identity = ReaderId }
+
+---
+A reader's name, from their token's `sub`.
+---
+type ReaderId = String where NonEmpty
+
 service api from http {
 	// GitHub caps a delivery's payload at 25 MB (25,000,000 bytes). This cap is
 	// 25 MiB (26,214,400 bytes), so a delivery at GitHub's limit still fits.
@@ -32,6 +46,77 @@ service api from http {
 
 	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
 		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
+	}
+
+	// The 50 most recent deliveries, across every repository.
+	on GET("/activity") () -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
+		let Ok(rows) <- Deliveries.all(
+			"""
+			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
+			FROM deliveries
+			ORDER BY received_at DESC, rowid DESC
+			LIMIT 50
+			""",
+			[]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not list activity: \(sqlError(e))")
+				ServerError("could not read recorded activity")
+			},
+		}
+		let _ <- Logger.info("\(reader.identity) listed activity")
+		activities(rows)
+	}
+
+	// The 50 most recent deliveries for one repository, `/activity/bynk-lang/bynk`.
+	on GET("/activity/:owner/:name") (
+		owner: String,
+		name: String
+	) -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
+		let Ok(rows) <- Deliveries.all(
+			"""
+			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
+			FROM deliveries
+			WHERE repo = ?1
+			ORDER BY received_at DESC, rowid DESC
+			LIMIT 50
+			""",
+			[Text("\(owner)/\(name)")]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not list \(owner)/\(name) activity: \(sqlError(e))")
+				ServerError("could not read recorded activity")
+			},
+		}
+		let _ <- Logger.info("\(reader.identity) listed \(owner)/\(name) activity")
+		activities(rows)
+	}
+
+	// One UTC day's activity, counted by repository, event and action.
+	on GET("/digest/:day") (
+		day: Day
+	) -> Effect[HttpResult[Digest]] by reader: Reader given Deliveries, Logger {
+		let Ok(rows) <- Deliveries.all(
+			"""
+			SELECT repo, event, action, count(*) AS deliveries
+			FROM deliveries
+			WHERE received_at >= ?1 AND received_at < ?2
+			  AND NOT (event = 'push' AND deleted IS 1)
+			GROUP BY repo, event, action
+			ORDER BY deliveries DESC, repo, event, action
+			""",
+			[Text(day), Text(dayEnd(day))]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not count \(day): \(sqlError(e))")
+				ServerError("could not read recorded activity")
+			},
+		}
+		let Ok(tallies) = Json.decodeSql[List[Tally]](rows) else {
+			ServerError("the digest did not decode")
+		}
+		let _ <- Logger.info("\(reader.identity) read the \(day) digest")
+		Ok(digest(day, tallies))
 	}
 
 	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
@@ -53,8 +138,8 @@ service api from http {
 		// 500, so GitHub can redeliver it.
 		let Ok(r) <- Deliveries.run(
 			"""
-			INSERT INTO deliveries (id, event, action, repo, sender, org, installation, size)
-			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+			INSERT INTO deliveries (id, event, action, repo, sender, org, installation, deleted, size)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 			ON CONFLICT (id) DO NOTHING
 			""",
 			[
@@ -65,6 +150,7 @@ service api from http {
 				text(d.sender),
 				text(d.org),
 				integer(d.installation),
+				boolean(d.deleted),
 				Integer(d.size),
 			]
 		) else match {
@@ -104,5 +190,22 @@ fn integer(n: Option[Int]) -> SqlValue {
 	match n {
 		Some(v) => Integer(v),
 		None => Null,
+	}
+}
+
+fn boolean(b: Option[Bool]) -> SqlValue {
+	match b {
+		Some(v) => Boolean(v),
+		None => Null,
+	}
+}
+
+---
+Rows of `deliveries` as the read API's response.
+---
+fn activities(rows: String) -> HttpResult[List[Activity]] {
+	match Json.decodeSql[List[Activity]](rows) {
+		Ok(list) => Ok(list),
+		Err(_) => ServerError("recorded activity did not decode"),
 	}
 }

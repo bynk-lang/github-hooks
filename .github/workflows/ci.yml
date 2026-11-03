@@ -36,14 +36,14 @@ jobs:
       - uses: ./.github/actions/setup-bynk
       - name: Serve the Worker
         run: |
-          bynk dev -- --var APP_WEBHOOK_SECRET:ci-secret > dev.log 2>&1 &
+          bynk dev -- --var APP_WEBHOOK_SECRET:ci-secret --var API_TOKEN_SECRET:ci-api > dev.log 2>&1 &
           for _ in $(seq 1 90); do
             curl -sf -o /dev/null http://localhost:8787/ && exit 0
             sleep 2
           done
           cat dev.log
           exit 1
-      - run: scripts/smoke.sh http://localhost:8787 ci-secret
+      - run: scripts/smoke.sh http://localhost:8787 ci-secret ci-api
       - name: Worker log
         if: always()
         run: cat dev.log

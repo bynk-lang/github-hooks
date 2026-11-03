@@ -1,0 +1,33 @@
+suite github.activity
+
+case "a digest totals its tallies" {
+	let d = digest(
+		"2026-11-01",
+		[
+			Tally {
+				repo: Some("bynk-lang/bynk"),
+				event: "push",
+				action: None,
+				deliveries: 3,
+			},
+			Tally {
+				repo: None,
+				event: "ping",
+				action: None,
+				deliveries: 1,
+			},
+		]
+	)
+	expect d.total == 4
+	expect d.tallies.length() == 2
+}
+
+case "an empty day totals zero" {
+	expect digest("2026-11-01", []).total == 0
+}
+
+case "a day's range ends just after every timestamp of that day" {
+	expect dayEnd("2026-11-01") == "2026-11-01U"
+	expect "2026-11-01T23:59:59.999Z" < dayEnd("2026-11-01")
+	expect "2026-11-02T00:00:00.000Z" > dayEnd("2026-11-01")
+}

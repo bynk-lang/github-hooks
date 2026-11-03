@@ -1,0 +1,96 @@
+// The read API, against an in-memory D1 with the migrations applied. Each case
+// seeds the rows it reads with explicit `received_at` times.
+suite github.hooks
+
+case "activity lists the newest deliveries first" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, repo, size, received_at) VALUES
+		  ('a', 'push',   'bynk-lang/bynk', 1, '2026-11-01T10:00:00.000Z'),
+		  ('b', 'issues', 'bynk-lang/bynk', 1, '2026-11-01T11:00:00.000Z'),
+		  ('c', 'ping',   NULL,             1, '2026-11-01T12:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- api.GET("/activity") by Reader("me")
+	let Ok(list) = r else {
+		expect false
+	}
+	expect list.map((a) => a.id) == ["c", "b", "a"]
+	expect Logger.info called once with msg == "me listed activity"
+}
+
+case "a repository's activity leaves out other repositories" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, repo, size, received_at) VALUES
+		  ('a', 'push', 'bynk-lang/bynk',         1, '2026-11-01T10:00:00.000Z'),
+		  ('b', 'push', 'bynk-lang/github-hooks', 1, '2026-11-01T11:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- api.GET("/activity/:owner/:name", "bynk-lang", "github-hooks") by Reader("me")
+	let Ok(list) = r else {
+		expect false
+	}
+	expect list.map((a) => a.id) == ["b"]
+}
+
+case "a recorded delivery comes back with its fields" {
+	let h = RequestHeaders.of(["X-GitHub-Event: push", "X-GitHub-Delivery: d-1"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "deleted": true, "repository": { "full_name": "bynk-lang/bynk" }, "sender": { "login": "octocat" } }
+			"""
+		)
+	) by GitHub
+	let r <- api.GET("/activity") by Reader("me")
+	let Ok(list) = r else {
+		expect false
+	}
+	expect list.length() == 1
+	expect list.map((a) => a.deleted) == [Some(true)]
+	expect list.map((a) => a.sender) == [Some("octocat")]
+}
+
+case "the digest counts one day and leaves out deleting pushes" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, repo, deleted, size, received_at) VALUES
+		  ('p1', 'push',   NULL,     'bynk-lang/bynk', 0,    1, '2026-11-01T09:00:00.000Z'),
+		  ('p2', 'push',   NULL,     'bynk-lang/bynk', 1,    1, '2026-11-01T09:00:01.000Z'),
+		  ('d1', 'delete', NULL,     'bynk-lang/bynk', NULL, 1, '2026-11-01T09:00:01.000Z'),
+		  ('i1', 'issues', 'opened', 'bynk-lang/bynk', NULL, 1, '2026-11-01T10:00:00.000Z'),
+		  ('i2', 'issues', 'opened', 'bynk-lang/bynk', NULL, 1, '2026-11-01T23:59:59.999Z'),
+		  ('x1', 'issues', 'opened', 'bynk-lang/bynk', NULL, 1, '2026-11-02T00:00:00.000Z'),
+		  ('y1', 'issues', 'opened', 'bynk-lang/bynk', NULL, 1, '2026-10-31T23:59:59.999Z')
+		""",
+		[]
+	)
+	let r <- api.GET("/digest/:day", "2026-11-01") by Reader("me")
+	let Ok(d) = r else {
+		expect false
+	}
+	expect d.total == 4
+	expect d.tallies.map((t) => t.event) == ["issues", "delete", "push"]
+	expect d.tallies.map((t) => t.deliveries) == [2, 1, 1]
+	expect Logger.info called once with msg == "me read the 2026-11-01 digest"
+}
+
+case "a day with nothing recorded is an empty digest" {
+	let r <- api.GET("/digest/:day", "2026-01-01") by Reader("me")
+	let Ok(d) = r else {
+		expect false
+	}
+	expect d.total == 0
+}
+
+case "a database failure while reading is logged and is a server error" {
+	stub Deliveries.all(_, _) returns Err(Failed("disk full"))
+	let r <- api.GET("/activity") by Reader("me")
+	expect r is ServerError(_)
+	expect Logger.error called once with msg == "could not list activity: disk full"
+}
