@@ -41,45 +41,46 @@ service api from http {
 		headers: RequestHeaders,
 		body: Bytes
 	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger {
-		match read(headers.get("X-GitHub-Event"), headers.get("X-GitHub-Delivery"), body) {
+		let Ok(d) = read(
+			headers.get("X-GitHub-Event"),
+			headers.get("X-GitHub-Delivery"),
+			body
+		) else match {
 			Err(why) => BadRequest(describe(why)),
-			Ok(d) => {
-				let ins <- Deliveries.run(
-					"""
-					INSERT INTO deliveries (id, event, action, repo, sender, org, installation, size)
-					VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-					ON CONFLICT (id) DO NOTHING
-					""",
-					[
-						Text(d.id),
-						Text(d.event),
-						text(d.action),
-						text(d.repo),
-						text(d.sender),
-						text(d.org),
-						integer(d.installation),
-						Integer(d.size),
-					]
+		}
+		// Only a conflict on the delivery id is a redelivery: it inserts nothing.
+		// Any other failure, including a constraint a later migration adds, is a
+		// 500, so GitHub can redeliver it.
+		let Ok(r) <- Deliveries.run(
+			"""
+			INSERT INTO deliveries (id, event, action, repo, sender, org, installation, size)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+			ON CONFLICT (id) DO NOTHING
+			""",
+			[
+				Text(d.id),
+				Text(d.event),
+				text(d.action),
+				text(d.repo),
+				text(d.sender),
+				text(d.org),
+				integer(d.installation),
+				Integer(d.size),
+			]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error(
+					"could not record delivery \(d.id) (\(d.event)): \(sqlError(e))"
 				)
-				// Only a conflict on the delivery id is a redelivery: it inserts
-				// nothing. Any other failure, including a constraint a later
-				// migration adds, is a 500, so GitHub can redeliver it.
-				match ins {
-					Ok(r) => if r.changes == 0 {
-						let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
-						Ok("duplicate")
-					} else {
-						let _ <- Logger.info("delivery \(d.id) (\(d.event))")
-						Accepted("recorded")
-					},
-					Err(e) => {
-						let _ <- Logger.error(
-							"could not record delivery \(d.id) (\(d.event)): \(sqlError(e))"
-						)
-						ServerError("could not record the delivery")
-					},
-				}
+				ServerError("could not record the delivery")
 			},
+		}
+		if r.changes == 0 {
+			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
+			Ok("duplicate")
+		} else {
+			let _ <- Logger.info("delivery \(d.id) (\(d.event))")
+			Accepted("recorded")
 		}
 	}
 }
