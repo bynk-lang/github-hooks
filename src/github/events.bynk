@@ -105,13 +105,13 @@ installation events would record the user's login here. Every other event
 without an `organization` (one in a user's own repository) records none.
 ---
 fn orgOf(event: String, env: Envelope) -> Option[String] {
-	let None = env.organization else match {
+	match env.organization {
 		Some(o) => Some(o.login),
-	}
-	if event == "installation" || event == "installation_repositories" {
-		env.installation.andThen((i) => i.account).andThen((a) => a.login)
-	} else {
-		None
+		None => if event == "installation" || event == "installation_repositories" {
+			env.installation.andThen((i) => i.account).andThen((a) => a.login)
+		} else {
+			None
+		},
 	}
 }
 
