@@ -16,11 +16,23 @@ type AccountRef = {
 }
 
 ---
+The account a GitHub App is installed on. Its `login` is optional so an account
+of another shape (an enterprise is described by `slug` and `name`) decodes with
+no login instead of failing the whole delivery.
+---
+type InstallationAccount = {
+	login: Option[String],
+}
+
+---
 The GitHub App installation a delivery was sent for. Phase 3 exchanges this id
-for an installation token when it acts on an event.
+for an installation token when it acts on an event. `account` is the account
+the App is installed on; GitHub sends it in `installation` and
+`installation_repositories` events, which have no top-level `organization`.
 ---
 type InstallationRef = {
 	id: Int,
+	account: Option[InstallationAccount],
 }
 
 ---
@@ -82,12 +94,37 @@ fn read(
 						action: env.action,
 						repo: env.repository.map((r) => r.full_name),
 						sender: env.sender.map((s) => s.login),
-						org: env.organization.map((o) => o.login),
+						org: orgOf(e, env),
 						installation: env.installation.map((i) => i.id),
 						size: body.length(),
 					}),
 				},
 			},
+		},
+	}
+}
+
+---
+The organisation an event happened in: the payload's `organization`. The two
+installation events have none, so for those alone it is the login of the
+account the App is installed on. That is the organisation while the App is
+installed only on `bynk-lang`; were it ever installed on a user, their
+installation events would record the user's login here. Every other event
+without an `organization` (one in a user's own repository) records none.
+---
+fn orgOf(event: String, env: Envelope) -> Option[String] {
+	match env.organization {
+		Some(o) => Some(o.login),
+		None => if event == "installation" || event == "installation_repositories" {
+			match env.installation {
+				Some(i) => match i.account {
+					Some(a) => a.login,
+					None => None,
+				},
+				None => None,
+			}
+		} else {
+			None
 		},
 	}
 }
