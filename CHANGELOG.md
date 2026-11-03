@@ -10,7 +10,9 @@ All notable changes to github-hooks. The format follows
 
 - `installation` and `installation_repositories` deliveries now record the
   organisation, from the installation's `account`. Those events have no
-  top-level `organization`, so the `org` column was empty for them.
+  top-level `organization`, so the `org` column was empty for them. No other
+  event uses the installation's account, and an account without a `login` is
+  recorded with an empty `org` rather than refused.
 
 ## [0.1.0] - 2026-11-03
 

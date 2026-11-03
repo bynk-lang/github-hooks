@@ -100,12 +100,65 @@ case "a top-level organization wins over the installation's account" {
 }
 
 case "an installation without an account leaves the organisation empty" {
-	let r = read(Some("issues"), Some("d-none"), Bytes.fromUtf8("{\"installation\": {\"id\": 42}}"))
+	let r = read(
+		Some("installation"),
+		Some("d-none"),
+		Bytes.fromUtf8("{\"installation\": {\"id\": 42}}")
+	)
 	match r {
 		Ok(d) => {
 			expect d.org == None
 			expect d.installation == Some(42)
 		},
+		Err(_) => expect false,
+	}
+}
+
+case "an installation account without a login still decodes, with no organisation" {
+	let r = read(
+		Some("installation"),
+		Some("d-ent"),
+		Bytes.fromUtf8(
+			"""
+			{ "action": "created", "installation": { "id": 42, "account": { "slug": "acme", "name": "Acme" } } }
+			"""
+		)
+	)
+	match r {
+		Ok(d) => {
+			expect d.org == None
+			expect d.installation == Some(42)
+		},
+		Err(_) => expect false,
+	}
+}
+
+case "an event other than an installation event ignores the installation account" {
+	let r = read(
+		Some("issues"),
+		Some("d-user"),
+		Bytes.fromUtf8(
+			"""
+			{ "repository": { "full_name": "someone/repo" }, "installation": { "id": 42, "account": { "login": "someone" } } }
+			"""
+		)
+	)
+	match r {
+		Ok(d) => expect d.org == None,
+		Err(_) => expect false,
+	}
+}
+
+case "installation_repositories takes the organisation from the installation account" {
+	let r = read(
+		Some("installation_repositories"),
+		Some("d-repos"),
+		Bytes.fromUtf8("""
+		{ "action": "added", "installation": { "id": 42, "account": { "login": "bynk-lang" } } }
+		""")
+	)
+	match r {
+		Ok(d) => expect d.org == Some("bynk-lang"),
 		Err(_) => expect false,
 	}
 }
