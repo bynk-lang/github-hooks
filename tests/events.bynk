@@ -64,7 +64,11 @@ case "an installation event carries the installation but no repository" {
 		Some("installation"),
 		Some("d-inst"),
 		Bytes.fromUtf8("""
-		{ "action": "created", "installation": { "id": 42 }, "sender": { "login": "mhgibbons" } }
+		{
+		  "action": "created",
+		  "installation": { "id": 42, "account": { "login": "bynk-lang", "type": "Organization" } },
+		  "sender": { "login": "octocat" }
+		}
 		""")
 	)
 	match r {
@@ -72,6 +76,35 @@ case "an installation event carries the installation but no repository" {
 			expect d.installation == Some(42)
 			expect d.repo == None
 			expect d.action == Some("created")
+			expect d.org == Some("bynk-lang")
+		},
+		Err(_) => expect false,
+	}
+}
+
+case "a top-level organization wins over the installation's account" {
+	let r = read(
+		Some("issues"),
+		Some("d-both"),
+		Bytes.fromUtf8("""
+		{
+		  "organization": { "login": "bynk-lang" },
+		  "installation": { "id": 42, "account": { "login": "someone-else" } }
+		}
+		""")
+	)
+	match r {
+		Ok(d) => expect d.org == Some("bynk-lang"),
+		Err(_) => expect false,
+	}
+}
+
+case "an installation without an account leaves the organisation empty" {
+	let r = read(Some("issues"), Some("d-none"), Bytes.fromUtf8("{\"installation\": {\"id\": 42}}"))
+	match r {
+		Ok(d) => {
+			expect d.org == None
+			expect d.installation == Some(42)
 		},
 		Err(_) => expect false,
 	}

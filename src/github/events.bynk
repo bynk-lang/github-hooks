@@ -17,10 +17,14 @@ type AccountRef = {
 
 ---
 The GitHub App installation a delivery was sent for. Phase 3 exchanges this id
-for an installation token when it acts on an event.
+for an installation token when it acts on an event. `account` is the
+organisation (or user) the App is installed on; GitHub sends it in
+`installation` and `installation_repositories` events, which have no top-level
+`organization`.
 ---
 type InstallationRef = {
 	id: Int,
+	account: Option[AccountRef],
 }
 
 ---
@@ -82,12 +86,26 @@ fn read(
 						action: env.action,
 						repo: env.repository.map((r) => r.full_name),
 						sender: env.sender.map((s) => s.login),
-						org: env.organization.map((o) => o.login),
+						org: orgOf(env),
 						installation: env.installation.map((i) => i.id),
 						size: body.length(),
 					}),
 				},
 			},
+		},
+	}
+}
+
+---
+The organisation an event happened in: the payload's `organization`, or, for
+the installation events that have none, the account the App is installed on.
+---
+fn orgOf(env: Envelope) -> Option[String] {
+	match env.organization {
+		Some(o) => Some(o.login),
+		None => match env.installation {
+			Some(i) => i.account.map((a) => a.login),
+			None => None,
 		},
 	}
 }

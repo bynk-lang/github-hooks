@@ -6,6 +6,12 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `installation` and `installation_repositories` deliveries now record the
+  organisation, from the installation's `account`. Those events have no
+  top-level `organization`, so the `org` column was empty for them.
+
 ## [0.1.0] - 2026-11-03
 
 Phase 1: receive, verify and record every delivery from the `bynk-lang` GitHub
