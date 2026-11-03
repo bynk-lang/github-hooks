@@ -1,0 +1,90 @@
+context github.hooks
+
+uses github.events
+consumes bynk { Logger }
+consumes bynk.cloudflare { D1 }
+
+---
+Every delivery this service has accepted, one row each, keyed by GitHub's
+delivery id. The key is what makes a redelivery harmless.
+---
+capability Deliveries = D1
+
+---
+The `bynk-lang` GitHub App. GitHub signs every delivery with HMAC-SHA256 of the
+raw body under the App's webhook secret and sends it as
+`X-Hub-Signature-256: sha256=<hex>`. The compiler generates the check: it runs
+before the handler, compares in constant time, and answers `401` to anything
+unsigned or forged.
+
+GitHub signs no timestamp, so there is no replay window here. A replayed
+delivery carries a delivery id we have already recorded, and is acknowledged
+without being recorded twice.
+---
+actor GitHub { auth = Signature(secret = "GITHUB_WEBHOOK_SECRET", header = "X-Hub-Signature-256") }
+
+service api from http {
+	// GitHub caps a delivery's payload at 25 MB.
+	limits {
+		maxBody: 26_214_400,
+	}
+
+	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
+		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
+	}
+
+	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
+	// records the delivery and answers; work done in response belongs elsewhere.
+	@raw(contentType: "application/json")
+	on POST("/github") (
+		headers: RequestHeaders,
+		body: Bytes
+	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger {
+		match read(headers.get("X-GitHub-Event"), headers.get("X-GitHub-Delivery"), body) {
+			Err(why) => BadRequest(describe(why)),
+			Ok(d) => {
+				let ins <- Deliveries.run(
+					"""
+					INSERT INTO deliveries (id, event, action, repo, sender, org, installation, size)
+					VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+					""",
+					[
+						Text(d.id),
+						Text(d.event),
+						text(d.action),
+						text(d.repo),
+						text(d.sender),
+						text(d.org),
+						integer(d.installation),
+						Integer(d.size),
+					]
+				)
+				match ins {
+					Err(Constraint(_)) => {
+						let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
+						Ok("duplicate")
+					},
+					Err(_) => ServerError("could not record the delivery"),
+					Ok(_) => {
+						let _ <- Logger.info("delivery \(d.id) (\(d.event))")
+						Accepted("recorded")
+					},
+				}
+			},
+		}
+	}
+}
+
+fn text(s: Option[String]) -> SqlValue {
+	match s {
+		Some(v) => Text(v),
+		None => Null,
+	}
+}
+
+fn integer(n: Option[Int]) -> SqlValue {
+	match n {
+		Some(v) => Integer(v),
+		None => Null,
+	}
+}

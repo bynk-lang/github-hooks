@@ -1,0 +1,34 @@
+// These cases run the deployable Worker itself, so the generated signature
+// check sees every request exactly as it would from GitHub.
+suite github.hooks as system {
+	env {
+		GITHUB_WEBHOOK_SECRET = "test-webhook-secret"
+	}
+
+	case "a signed delivery is accepted" {
+		let h = RequestHeaders.of(["X-GitHub-Event: ping", "X-GitHub-Delivery: s-1"])
+		let r <- api.POST("/github", h, Bytes.fromUtf8("{\"zen\": \"Design for failure.\"}"))
+		expect r == Accepted("recorded")
+	}
+
+	case "a signed redelivery is acknowledged" {
+		let h = RequestHeaders.of(["X-GitHub-Event: ping", "X-GitHub-Delivery: s-2"])
+		let a <- api.POST("/github", h, Bytes.fromUtf8("{}"))
+		let b <- api.POST("/github", h, Bytes.fromUtf8("{}"))
+		expect a == Accepted("recorded")
+		expect b == Ok("duplicate")
+	}
+
+	case "unsigned and forged deliveries are refused before the handler runs" {
+		let h = RequestHeaders.of(["X-GitHub-Event: ping", "X-GitHub-Delivery: s-3"])
+		let none <- api.POST("/github", h, Bytes.fromUtf8("{}")) by Nobody
+		let forged <- api.POST("/github", h, Bytes.fromUtf8("{}")) by Forged
+		expect none is Rejected(Unauthorized)
+		expect forged is Rejected(Unauthorized)
+	}
+
+	case "the root is public" {
+		let r <- api.GET("/")
+		expect r is Ok(_)
+	}
+}

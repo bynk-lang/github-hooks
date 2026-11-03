@@ -1,0 +1,105 @@
+commons github.events
+
+---
+A repository, as GitHub names it in every repository-scoped payload.
+---
+type RepoRef = {
+	full_name: String,
+}
+
+---
+A GitHub account: the user (or bot) that caused the event, or the organisation it
+happened in.
+---
+type AccountRef = {
+	login: String,
+}
+
+---
+The GitHub App installation a delivery was sent for. Phase 3 exchanges this id
+for an installation token when it acts on an event.
+---
+type InstallationRef = {
+	id: Int,
+}
+
+---
+The fields GitHub's org-level event payloads have in common. Each is optional
+because some events leave it out: a `ping` has no `action`, a `push` has no
+`action` either, and an `installation` event has no `repository`. Every other key
+in the payload is ignored on decode, so a 25 MB `push` decodes into this small
+record.
+---
+type Envelope = {
+	action: Option[String],
+	repository: Option[RepoRef],
+	sender: Option[AccountRef],
+	organization: Option[AccountRef],
+	installation: Option[InstallationRef],
+}
+
+---
+One delivery as this service records it: GitHub's delivery id and event name
+from the request headers, plus the envelope's fields flattened.
+---
+type Delivery = {
+	id: String,
+	event: String,
+	action: Option[String],
+	repo: Option[String],
+	sender: Option[String],
+	org: Option[String],
+	installation: Option[Int],
+	size: Int,
+}
+
+---
+Why a request that passed the signature check still isn't a delivery we can
+record.
+---
+type Rejection = enum { MissingEvent, MissingDelivery, NotUtf8, NotJson }
+
+---
+Read a delivery from its headers' values and the raw body GitHub signed. Pure,
+so every case of it is a unit test.
+---
+fn read(
+	event: Option[String],
+	delivery: Option[String],
+	body: Bytes
+) -> Result[Delivery, Rejection] {
+	match event {
+		None => Err(MissingEvent),
+		Some(e) => match delivery {
+			None => Err(MissingDelivery),
+			Some(d) => match body.decodeUtf8() {
+				None => Err(NotUtf8),
+				Some(text) => match Json.decode[Envelope](text) {
+					Err(_) => Err(NotJson),
+					Ok(env) => Ok(Delivery {
+						id: d,
+						event: e,
+						action: env.action,
+						repo: env.repository.map((r) => r.full_name),
+						sender: env.sender.map((s) => s.login),
+						org: env.organization.map((o) => o.login),
+						installation: env.installation.map((i) => i.id),
+						size: body.length(),
+					}),
+				},
+			},
+		},
+	}
+}
+
+---
+The message a rejected delivery is answered with.
+---
+fn describe(r: Rejection) -> String {
+	match r {
+		MissingEvent => "missing X-GitHub-Event header",
+		MissingDelivery => "missing X-GitHub-Delivery header",
+		NotUtf8 => "payload is not UTF-8",
+		NotJson => "payload is not a JSON object GitHub would send",
+	}
+}

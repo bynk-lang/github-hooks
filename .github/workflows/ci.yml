@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Bynk release this project is built and tested with. Bump deliberately.
+  BYNK_VERSION: v0.492.1
+
+jobs:
+  test:
+    name: check, format and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version: 22
+      - name: Install Bynk
+        run: |
+          curl -fsSL "https://github.com/bynk-lang/bynk/releases/download/${BYNK_VERSION}/install.sh" \
+            | BYNK_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: bynk doctor
+      - run: bynk fmt --check .
+      - run: bynk check
+      - run: bynk test
+
+  smoke:
+    name: signed deliveries against the local Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version: 22
+      - name: Install Bynk
+        run: |
+          curl -fsSL "https://github.com/bynk-lang/bynk/releases/download/${BYNK_VERSION}/install.sh" \
+            | BYNK_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Serve the Worker
+        run: |
+          bynk dev -- --var GITHUB_WEBHOOK_SECRET:ci-secret > dev.log 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -sf -o /dev/null http://localhost:8787/ && exit 0
+            sleep 2
+          done
+          cat dev.log
+          exit 1
+      - run: scripts/smoke.sh http://localhost:8787 ci-secret
+      - name: Worker log
+        if: always()
+        run: cat dev.log
