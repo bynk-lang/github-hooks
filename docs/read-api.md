@@ -17,7 +17,8 @@ Mint one with:
 API_TOKEN_SECRET=… scripts/token.sh <reader-name> [lifetime-seconds]   # default 30 days
 ```
 
-and send it as `Authorization: Bearer <token>`. Anyone holding the secret can
+The script reads the secret from the environment and signs with Node, so the
+secret never appears in a process's arguments. Send the token as `Authorization: Bearer <token>`. Anyone holding the secret can
 mint tokens, so keep it as you would the webhook secret. To revoke every token
 at once, rotate the secret and redeploy.
 
@@ -38,8 +39,13 @@ curl -H "Authorization: Bearer $TOKEN" $BASE/activity/bynk-lang/bynk
 curl -H "Authorization: Bearer $TOKEN" $BASE/digest/2026-11-03
 ```
 
-A `:day` that isn't `YYYY-MM-DD` (`/digest/yesterday`) is refused with `400` at
-the boundary, by the `Day` type's refinement.
+A `:day` that isn't a `YYYY-MM-DD` date is refused with `400`: one that doesn't
+fit the pattern (`/digest/yesterday`, `/digest/2026-13-01`) at the boundary, by
+the `Day` type's refinement, and one that fits but doesn't exist
+(`/digest/2026-02-30`) by the handler, before it reads anything.
+
+Owner and repository names match whatever their case, as on GitHub:
+`/activity/Bynk-Lang/bynk` is `/activity/bynk-lang/bynk`.
 
 ### `GET /activity`, `GET /activity/:owner/:name`
 
@@ -61,7 +67,8 @@ A list of deliveries, each a row of the `deliveries` table:
 ```
 
 Optional fields use Bynk's tagged JSON form, `{"kind": "Some", "value": …}` or
-`{"kind": "None"}`. `deleted` is set only on a `push`: `true` when the push
+`{"kind": "None"}` (plain values and `null` are proposed in
+bynk-lang/bynk#2858). `deleted` is set only on a `push`: `true` when the push
 deleted a branch or tag.
 
 ### `GET /digest/:day`

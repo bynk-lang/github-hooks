@@ -94,3 +94,31 @@ case "a database failure while reading is logged and is a server error" {
 	expect r is ServerError(_)
 	expect Logger.error called once with msg == "could not list activity: disk full"
 }
+
+case "a repository is matched whatever the case of its name" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, repo, size, received_at) VALUES
+		  ('a', 'push', 'bynk-lang/github-hooks', 1, '2026-11-01T10:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- api.GET("/activity/:owner/:name", "Bynk-Lang", "GitHub-Hooks") by Reader("me")
+	let Ok(list) = r else {
+		expect false
+	}
+	expect list.map((a) => a.id) == ["a"]
+}
+
+case "a digest for a date that doesn't exist is a bad request" {
+	let r <- api.GET("/digest/:day", "2026-02-30") by Reader("me")
+	expect r is BadRequest("2026-02-30 is not a date")
+	expect Deliveries.all never called
+}
+
+case "rows that don't decode are logged and are a server error" {
+	stub Deliveries.all(_, _) returns Ok("[{\"id\": 7}]")
+	let r <- api.GET("/activity") by Reader("me")
+	expect r is ServerError(_)
+	expect Logger.error called once with msg == "could not decode activity rows"
+}

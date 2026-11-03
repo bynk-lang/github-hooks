@@ -43,7 +43,10 @@ jobs:
           done
           cat dev.log
           exit 1
-      - run: scripts/smoke.sh http://localhost:8787 ci-secret ci-api
+      - run: scripts/smoke.sh http://localhost:8787
+        env:
+          APP_WEBHOOK_SECRET: ci-secret
+          API_TOKEN_SECRET: ci-api
       - name: Worker log
         if: always()
         run: cat dev.log

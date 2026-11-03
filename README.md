@@ -91,13 +91,19 @@ ok   an unsigned delivery is refused (401)
 
 `bynk dev` applies the migrations to a local database first.
 
-To read what was recorded, also give the read API its secret, then mint a token
-and ask (see [docs/read-api.md](docs/read-api.md)):
+To read what was recorded, also give the read API its secret:
 
 ```sh
 bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret --var API_TOKEN_SECRET:dev-api
+```
+
+then, in another terminal, mint a token and ask (see
+[docs/read-api.md](docs/read-api.md)), or run the smoke test with both secrets:
+
+```sh
 curl -H "Authorization: Bearer $(API_TOKEN_SECRET=dev-api scripts/token.sh me)" \
   localhost:8787/activity
+API_TOKEN_SECRET=dev-api scripts/smoke.sh
 ```
 
 ## Deploy
@@ -119,9 +125,10 @@ fails, naming it.
 The first deploy creates the `github-hooks-deliveries` D1 database, applies the
 migrations, sets the secret and pushes the Worker. Commit the
 `bynk.deploy.lock` it writes. Check the result with
-`scripts/smoke.sh https://github-hooks.<subdomain>.workers.dev "<webhook secret>" "<api token secret>"`,
+`APP_WEBHOOK_SECRET=… API_TOKEN_SECRET=… scripts/smoke.sh https://github-hooks.<subdomain>.workers.dev`,
 which also checks the read API's token handling; the smoke rows are recorded
-like any other delivery.
+like any other delivery. The scripts read secrets from the environment so they
+never appear in a process's arguments.
 
 ## Layout
 

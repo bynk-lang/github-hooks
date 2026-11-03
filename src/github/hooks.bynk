@@ -64,8 +64,12 @@ service api from http {
 				ServerError("could not read recorded activity")
 			},
 		}
+		let Ok(list) = Json.decodeSql[List[Activity]](rows) else {
+			let _ <- Logger.error("could not decode activity rows")
+			ServerError("recorded activity did not decode")
+		}
 		let _ <- Logger.info("\(reader.identity) listed activity")
-		activities(rows)
+		Ok(list)
 	}
 
 	// The 50 most recent deliveries for one repository, `/activity/bynk-lang/bynk`.
@@ -77,7 +81,7 @@ service api from http {
 			"""
 			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
 			FROM deliveries
-			WHERE repo = ?1
+			WHERE repo = ?1 COLLATE NOCASE
 			ORDER BY received_at DESC, rowid DESC
 			LIMIT 50
 			""",
@@ -88,14 +92,19 @@ service api from http {
 				ServerError("could not read recorded activity")
 			},
 		}
+		let Ok(list) = Json.decodeSql[List[Activity]](rows) else {
+			let _ <- Logger.error("could not decode \(owner)/\(name) activity rows")
+			ServerError("recorded activity did not decode")
+		}
 		let _ <- Logger.info("\(reader.identity) listed \(owner)/\(name) activity")
-		activities(rows)
+		Ok(list)
 	}
 
 	// One UTC day's activity, counted by repository, event and action.
 	on GET("/digest/:day") (
 		day: Day
 	) -> Effect[HttpResult[Digest]] by reader: Reader given Deliveries, Logger {
+		let true = isRealDay(day) else { BadRequest("\(day) is not a date") }
 		let Ok(rows) <- Deliveries.all(
 			"""
 			SELECT repo, event, action, count(*) AS deliveries
@@ -113,6 +122,7 @@ service api from http {
 			},
 		}
 		let Ok(tallies) = Json.decodeSql[List[Tally]](rows) else {
+			let _ <- Logger.error("could not decode the \(day) digest rows")
 			ServerError("the digest did not decode")
 		}
 		let _ <- Logger.info("\(reader.identity) read the \(day) digest")
@@ -197,15 +207,5 @@ fn boolean(b: Option[Bool]) -> SqlValue {
 	match b {
 		Some(v) => Boolean(v),
 		None => Null,
-	}
-}
-
----
-Rows of `deliveries` as the read API's response.
----
-fn activities(rows: String) -> HttpResult[List[Activity]] {
-	match Json.decodeSql[List[Activity]](rows) {
-		Ok(list) => Ok(list),
-		Err(_) => ServerError("recorded activity did not decode"),
 	}
 }

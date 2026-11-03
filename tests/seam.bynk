@@ -44,7 +44,11 @@ suite github.hooks as system {
 	}
 
 	case "a digest day that is not YYYY-MM-DD is refused at the boundary" {
-		let r <- api.GET("/digest/:day", Wire("yesterday")) by Reader("ci")
-		expect r is Rejected(_)
+		let word <- api.GET("/digest/:day", Wire("yesterday")) by Reader("ci")
+		let month <- api.GET("/digest/:day", Wire("2026-13-01")) by Reader("ci")
+		let day <- api.GET("/digest/:day", Wire("2026-01-32")) by Reader("ci")
+		expect word is Rejected(_)
+		expect month is Rejected(_)
+		expect day is Rejected(_)
 	}
 }

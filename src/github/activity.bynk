@@ -2,10 +2,34 @@ commons github.activity
 
 ---
 A calendar day in UTC, `YYYY-MM-DD`, as `received_at` begins. A path parameter
-of this type is checked at the boundary, so `GET /digest/yesterday` is a `400`
-before the handler runs.
+of this type is checked at the boundary, so `GET /digest/yesterday` or
+`/digest/2026-13-45` is a `400` before the handler runs. The pattern bounds the
+month to 01–12 and the day to 01–31; `isRealDay` rejects the rest (`02-30`).
 ---
-type Day = String where Matches("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+type Day = String where Matches("^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
+
+---
+Whether a `Day` names a date that exists: the day is within its month's length,
+counting 29 February in leap years only.
+---
+fn isRealDay(day: Day) -> Bool {
+	let Some(y) = Int.parse(day.slice(0, 4)) else { false }
+	let Some(m) = Int.parse(day.slice(5, 7)) else { false }
+	let Some(d) = Int.parse(day.slice(8, 10)) else { false }
+	d <= daysIn(y, m)
+}
+
+fn daysIn(year: Int, month: Int) -> Int {
+	match month {
+		2 => if isLeap(year) { 29 } else { 28 },
+		4 | 6 | 9 | 11 => 30,
+		_ => 31,
+	}
+}
+
+fn isLeap(year: Int) -> Bool {
+	(year.rem(4) == 0 && year.rem(100) != 0) || year.rem(400) == 0
+}
 
 ---
 One recorded delivery, as the read API returns it: a row of `deliveries`.

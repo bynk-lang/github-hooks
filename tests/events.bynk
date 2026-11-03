@@ -198,6 +198,17 @@ case "an event without the flag records none" {
 	expect d.deleted == None
 }
 
+case "a deleted key on an event other than a push is not recorded" {
+	let Ok(d) = read(
+		Some("issues"),
+		Some("d-iss-del"),
+		Bytes.fromUtf8("{\"action\": \"deleted\", \"deleted\": true}")
+	) else {
+		expect false
+	}
+	expect d.deleted == None
+}
+
 case "the event and delivery headers are required" {
 	let body = Bytes.fromUtf8("{}")
 	expect read(None, Some("d"), body) == Err(MissingEvent)
