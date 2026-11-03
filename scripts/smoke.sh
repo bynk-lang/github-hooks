@@ -5,7 +5,7 @@
 #
 #   scripts/smoke.sh [base-url] [secret]
 #
-# Defaults suit `bynk dev -- --var GITHUB_WEBHOOK_SECRET:dev-secret`.
+# Defaults suit `bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret`.
 set -eu
 
 BASE=${1:-http://localhost:8787}

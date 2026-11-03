@@ -36,7 +36,7 @@ jobs:
       - uses: ./.github/actions/setup-bynk
       - name: Serve the Worker
         run: |
-          bynk dev -- --var GITHUB_WEBHOOK_SECRET:ci-secret > dev.log 2>&1 &
+          bynk dev -- --var APP_WEBHOOK_SECRET:ci-secret > dev.log 2>&1 &
           for _ in $(seq 1 90); do
             curl -sf -o /dev/null http://localhost:8787/ && exit 0
             sleep 2

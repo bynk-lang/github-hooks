@@ -2,7 +2,7 @@
 // check sees every request exactly as it would from GitHub.
 suite github.hooks as system {
 	env {
-		GITHUB_WEBHOOK_SECRET = "test-webhook-secret"
+		APP_WEBHOOK_SECRET = "test-webhook-secret"
 	}
 
 	case "a signed delivery is accepted" {

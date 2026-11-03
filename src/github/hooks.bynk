@@ -21,7 +21,7 @@ GitHub signs no timestamp, so there is no replay window here. A replayed
 delivery carries a delivery id we have already recorded, and is acknowledged
 without being recorded twice.
 ---
-actor GitHub { auth = Signature(secret = "GITHUB_WEBHOOK_SECRET", header = "X-Hub-Signature-256") }
+actor GitHub { auth = Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-Signature-256") }
 
 service api from http {
 	// GitHub caps a delivery's payload at 25 MB (25,000,000 bytes). This cap is

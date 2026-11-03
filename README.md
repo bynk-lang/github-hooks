@@ -29,7 +29,7 @@ GitHub App ──POST /github──▶ signature check ──▶ read headers + 
 ```
 
 1. **Verify.** The `GitHub` actor in [`src/github/hooks.bynk`](src/github/hooks.bynk)
-   declares `Signature(secret = "GITHUB_WEBHOOK_SECRET", header = "X-Hub-Signature-256")`.
+   declares `Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-Signature-256")`.
    The compiler generates the check: HMAC-SHA256 over the exact bytes received,
    compared in constant time, before the handler runs. Anything unsigned or
    forged gets `401`.
@@ -69,7 +69,7 @@ check sees real signed, unsigned and forged requests.
 ### Run it locally
 
 ```sh
-bynk dev -- --var GITHUB_WEBHOOK_SECRET:dev-secret
+bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret
 ```
 
 Then, in another terminal, send deliveries signed exactly as GitHub signs them:
@@ -95,7 +95,7 @@ install the GitHub App. The deploy itself is:
 
 ```sh
 npx wrangler login                    # or set CLOUDFLARE_API_TOKEN
-printf 'GITHUB_WEBHOOK_SECRET=%s\n' "<the App's webhook secret>" > .secrets.env
+printf 'APP_WEBHOOK_SECRET=%s\n' "<the App's webhook secret>" > .secrets.env
 bynk deploy --secrets-file .secrets.env
 ```
 
