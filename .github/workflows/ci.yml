@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The Bynk version (and its pinned checksum) lives in
+# .github/actions/setup-bynk/action.yml, so both jobs use the same toolchain.
+
+jobs:
+  test:
+    name: check, format and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bynk
+      - run: bynk fmt --check .
+      - run: bynk check
+      - run: bynk test
+
+  smoke:
+    name: signed deliveries against the local Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bynk
+      - name: Serve the Worker
+        run: |
+          bynk dev -- --var GITHUB_WEBHOOK_SECRET:ci-secret > dev.log 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -sf -o /dev/null http://localhost:8787/ && exit 0
+            sleep 2
+          done
+          cat dev.log
+          exit 1
+      - run: scripts/smoke.sh http://localhost:8787 ci-secret
+      - name: Worker log
+        if: always()
+        run: cat dev.log

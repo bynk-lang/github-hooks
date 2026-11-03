@@ -1,0 +1,114 @@
+suite github.events
+
+case "an issues event reads every envelope field" {
+	let body = Bytes.fromUtf8("""
+	{
+	  "action": "opened",
+	  "issue": { "number": 7, "title": "Suite-local helper functions" },
+	  "repository": { "id": 1, "full_name": "bynk-lang/bynk", "private": false },
+	  "organization": { "login": "bynk-lang", "id": 2 },
+	  "sender": { "login": "octocat", "id": 3, "type": "User" },
+	  "installation": { "id": 12345678, "node_id": "MDIz" }
+	}
+	""")
+	let r = read(Some("issues"), Some("72d3162e-cc78-11e3-81ab-4c9367dc0958"), body)
+	expect r == Ok(Delivery {
+		id: "72d3162e-cc78-11e3-81ab-4c9367dc0958",
+		event: "issues",
+		action: Some("opened"),
+		repo: Some("bynk-lang/bynk"),
+		sender: Some("octocat"),
+		org: Some("bynk-lang"),
+		installation: Some(12345678),
+		size: body.length(),
+	})
+}
+
+case "a ping has no action, repository or installation" {
+	let body = Bytes.fromUtf8("""
+	{ "zen": "Keep it logically awesome.", "hook_id": 1, "hook": { "type": "App", "app_id": 9 } }
+	""")
+	let r = read(Some("ping"), Some("d-ping"), body)
+	match r {
+		Ok(d) => {
+			expect d.event == "ping"
+			expect d.action == None
+			expect d.repo == None
+			expect d.installation == None
+		},
+		Err(_) => expect false,
+	}
+}
+
+case "a push has a repository but no action" {
+	let r = read(
+		Some("push"),
+		Some("d-push"),
+		Bytes.fromUtf8(
+			"""
+			{ "ref": "refs/heads/main", "commits": [], "repository": { "full_name": "bynk-lang/github-hooks" } }
+			"""
+		)
+	)
+	match r {
+		Ok(d) => {
+			expect d.action == None
+			expect d.repo == Some("bynk-lang/github-hooks")
+		},
+		Err(_) => expect false,
+	}
+}
+
+case "an installation event carries the installation but no repository" {
+	let r = read(
+		Some("installation"),
+		Some("d-inst"),
+		Bytes.fromUtf8("""
+		{ "action": "created", "installation": { "id": 42 }, "sender": { "login": "mhgibbons" } }
+		""")
+	)
+	match r {
+		Ok(d) => {
+			expect d.installation == Some(42)
+			expect d.repo == None
+			expect d.action == Some("created")
+		},
+		Err(_) => expect false,
+	}
+}
+
+case "the event and delivery headers are required" {
+	let body = Bytes.fromUtf8("{}")
+	expect read(None, Some("d"), body) == Err(MissingEvent)
+	expect read(Some("ping"), None, body) == Err(MissingDelivery)
+}
+
+case "an empty or blank header counts as missing" {
+	let body = Bytes.fromUtf8("{}")
+	expect read(Some(""), Some("d"), body) == Err(MissingEvent)
+	expect read(Some("ping"), Some(""), body) == Err(MissingDelivery)
+	expect read(Some("ping"), Some("   "), body) == Err(MissingDelivery)
+}
+
+case "a body that is not UTF-8 is refused" {
+	match Bytes.fromHex("ff") {
+		Some(b) => expect read(Some("ping"), Some("d"), b) == Err(NotUtf8),
+		None => expect false,
+	}
+}
+
+case "a body that is not a JSON object is refused" {
+	expect read(Some("ping"), Some("d"), Bytes.fromUtf8("not json")) == Err(NotJson)
+	expect read(Some("ping"), Some("d"), Bytes.fromUtf8("[1, 2]")) == Err(NotJson)
+}
+
+case "an envelope field of the wrong type is refused" {
+	expect read(Some("issues"), Some("d"), Bytes.fromUtf8("{\"action\": 7}")) == Err(NotJson)
+}
+
+case "every rejection has a message" {
+	expect describe(MissingEvent) == "missing or empty X-GitHub-Event header"
+	expect describe(MissingDelivery) == "missing or empty X-GitHub-Delivery header"
+	expect describe(NotUtf8) == "payload is not UTF-8"
+	expect describe(NotJson) == "payload is not a JSON object GitHub would send"
+}

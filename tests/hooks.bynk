@@ -1,0 +1,68 @@
+suite github.hooks
+
+case "the root describes the service" {
+	let r <- api.GET("/") by Visitor
+	expect r is Ok(_)
+}
+
+case "a delivery is recorded" {
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: d-1"])
+	let r <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/bynk" }, "sender": { "login": "octocat" } }
+			"""
+		)
+	) by GitHub
+	expect r == Accepted("recorded")
+	expect Deliveries.run called once
+	expect Logger.info called once with msg == "delivery d-1 (issues)"
+}
+
+case "a redelivery is acknowledged and not recorded twice" {
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: d-2"])
+	let a <- api.POST("/github", h, Bytes.fromUtf8("{}")) by GitHub
+	let b <- api.POST("/github", h, Bytes.fromUtf8("{}")) by GitHub
+	expect a == Accepted("recorded")
+	expect b == Ok("duplicate")
+	expect Logger.info called with msg == "redelivery d-2 (issues)"
+}
+
+case "a delivery without its headers is a bad request" {
+	let r <- api.POST("/github", RequestHeaders.empty(), Bytes.fromUtf8("{}")) by GitHub
+	expect r is BadRequest("missing or empty X-GitHub-Event header")
+	expect Deliveries.run never called
+}
+
+case "a payload that is not JSON is a bad request" {
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: d-3"])
+	let r <- api.POST("/github", h, Bytes.fromUtf8("nope")) by GitHub
+	expect r is BadRequest(_)
+	expect Deliveries.run never called
+}
+
+case "an empty delivery id is a bad request, not a key" {
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: "])
+	let r <- api.POST("/github", h, Bytes.fromUtf8("{}")) by GitHub
+	expect r is BadRequest("missing or empty X-GitHub-Delivery header")
+	expect Deliveries.run never called
+}
+
+case "a database failure is logged and is a server error, so GitHub retries" {
+	stub Deliveries.run(_, _) returns Err(Failed("disk full"))
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: d-4"])
+	let r <- api.POST("/github", h, Bytes.fromUtf8("{}")) by GitHub
+	expect r is ServerError(_)
+	expect Logger.error called once with msg == "could not record delivery d-4 (issues): disk full"
+}
+
+case "a constraint other than the delivery id is a failure, not a duplicate" {
+	stub Deliveries.run(_, _) returns Err(Constraint("CHECK constraint failed: size >= 0"))
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: d-5"])
+	let r <- api.POST("/github", h, Bytes.fromUtf8("{}")) by GitHub
+	expect r is ServerError(_)
+	expect Logger.info never called
+	expect Logger.error called once with msg == "could not record delivery d-5 (issues): constraint: CHECK constraint failed: size >= 0"
+}
