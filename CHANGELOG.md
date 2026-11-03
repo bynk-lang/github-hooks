@@ -4,6 +4,8 @@ All notable changes to github-hooks. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
 ## [0.1.0] - 2026-11-03
 
 Phase 1: receive, verify and record every delivery from the `bynk-lang` GitHub
@@ -14,7 +16,9 @@ App.
 - `POST /github` receives the App's webhook deliveries. The compiler-generated
   `Signature` check verifies `X-Hub-Signature-256` (HMAC-SHA256 over the raw
   body, compared in constant time) before the handler runs, and answers `401`
-  to anything unsigned or forged.
+  to anything unsigned or forged. The Worker reads the App's webhook secret
+  from `APP_WEBHOOK_SECRET` (not a `GITHUB_` name, which GitHub Actions
+  refuses for secrets).
 - Each delivery is recorded as one row in the `github-hooks-deliveries` D1
   database: GitHub's delivery id and event name, plus the `action`,
   repository, sender, organisation and installation every event shares, and
@@ -31,4 +35,5 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/bynk-lang/github-hooks/releases/tag/v0.1.0

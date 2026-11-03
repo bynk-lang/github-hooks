@@ -17,7 +17,7 @@ It is two things at once:
 
 | Phase | What | State |
 |---|---|---|
-| 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md) |
+| 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
 | 2 | Read API over recorded activity, daily digest, retention | planned |
 | 3 | Act on events through the App's installation token | planned |
 
