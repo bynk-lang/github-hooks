@@ -20,11 +20,16 @@ Deploy first, so the Worker is already verifying signatures when GitHub sends
 the App's first delivery:
 
 ```sh
-printf 'GITHUB_WEBHOOK_SECRET=%s\n' "<the secret from step 1>" > .secrets.env
+printf 'APP_WEBHOOK_SECRET=%s\n' "<the secret from step 1>" > .secrets.env
 bynk deploy --secrets-file .secrets.env
 ```
 
-`.secrets.env` is ignored by git. Delete it once the deploy has run. Note the
+`.secrets.env` is ignored by git. Delete it once the deploy has run.
+
+The name is `APP_WEBHOOK_SECRET` rather than anything starting `GITHUB_`
+because GitHub refuses Actions secret names with that prefix. Keeping the
+Worker's name and a future CI secret's name the same means a deploy from
+GitHub Actions can pass it straight through. Note the
 Worker's URL from the deploy output: `https://github-hooks.<subdomain>.workers.dev`.
 
 ## 3. Create the App
