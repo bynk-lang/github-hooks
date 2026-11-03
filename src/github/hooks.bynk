@@ -64,9 +64,11 @@ service api from http {
 				ServerError("could not read recorded activity")
 			},
 		}
-		let Ok(list) = Json.decodeSql[List[Activity]](rows) else {
-			let _ <- Logger.error("could not decode activity rows")
-			ServerError("recorded activity did not decode")
+		let Ok(list) = Json.decodeSql[List[Activity]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode activity rows: \(jsonError(e))")
+				ServerError("recorded activity did not decode")
+			},
 		}
 		let _ <- Logger.info("\(reader.identity) listed activity")
 		Ok(list)
@@ -92,9 +94,13 @@ service api from http {
 				ServerError("could not read recorded activity")
 			},
 		}
-		let Ok(list) = Json.decodeSql[List[Activity]](rows) else {
-			let _ <- Logger.error("could not decode \(owner)/\(name) activity rows")
-			ServerError("recorded activity did not decode")
+		let Ok(list) = Json.decodeSql[List[Activity]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error(
+					"could not decode \(owner)/\(name) activity rows: \(jsonError(e))"
+				)
+				ServerError("recorded activity did not decode")
+			},
 		}
 		let _ <- Logger.info("\(reader.identity) listed \(owner)/\(name) activity")
 		Ok(list)
@@ -121,9 +127,11 @@ service api from http {
 				ServerError("could not read recorded activity")
 			},
 		}
-		let Ok(tallies) = Json.decodeSql[List[Tally]](rows) else {
-			let _ <- Logger.error("could not decode the \(day) digest rows")
-			ServerError("the digest did not decode")
+		let Ok(tallies) = Json.decodeSql[List[Tally]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode the \(day) digest rows: \(jsonError(e))")
+				ServerError("the digest did not decode")
+			},
 		}
 		let _ <- Logger.info("\(reader.identity) read the \(day) digest")
 		Ok(digest(day, tallies))
@@ -179,6 +187,14 @@ service api from http {
 			Accepted("recorded")
 		}
 	}
+}
+
+---
+Why rows did not decode, for the log: `StructuralMismatch at $[0].size:
+expected number, got string`.
+---
+fn jsonError(e: JsonError) -> String {
+	"\(e.kind) at \(e.path): \(e.message)"
 }
 
 fn sqlError(e: SqlError) -> String {

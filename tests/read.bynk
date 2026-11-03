@@ -120,5 +120,19 @@ case "rows that don't decode are logged and are a server error" {
 	stub Deliveries.all(_, _) returns Ok("[{\"id\": 7}]")
 	let r <- api.GET("/activity") by Reader("me")
 	expect r is ServerError(_)
-	expect Logger.error called once with msg == "could not decode activity rows"
+	expect Logger.error called once with msg.startsWith("could not decode activity rows: StructuralMismatch at $[0]")
+}
+
+case "a repository's rows that don't decode are logged with the reason" {
+	stub Deliveries.all(_, _) returns Ok("[{\"id\": 7}]")
+	let r <- api.GET("/activity/:owner/:name", "bynk-lang", "bynk") by Reader("me")
+	expect r is ServerError(_)
+	expect Logger.error called once with msg.startsWith("could not decode bynk-lang/bynk activity rows: StructuralMismatch at $[0]")
+}
+
+case "a digest's rows that don't decode are logged with the reason" {
+	stub Deliveries.all(_, _) returns Ok("[{\"repo\": 7}]")
+	let r <- api.GET("/digest/:day", "2026-11-01") by Reader("me")
+	expect r is ServerError(_)
+	expect Logger.error called once with msg.startsWith("could not decode the 2026-11-01 digest rows: StructuralMismatch at $[0]")
 }
