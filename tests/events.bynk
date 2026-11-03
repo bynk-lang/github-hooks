@@ -20,6 +20,7 @@ case "an issues event reads every envelope field" {
 		sender: Some("octocat"),
 		org: Some("bynk-lang"),
 		installation: Some(12345678),
+		deleted: None,
 		size: body.length(),
 	})
 }
@@ -161,6 +162,51 @@ case "installation_repositories takes the organisation from the installation acc
 		Ok(d) => expect d.org == Some("bynk-lang"),
 		Err(_) => expect false,
 	}
+}
+
+case "a push that deleted a branch is flagged" {
+	let r = read(
+		Some("push"),
+		Some("d-del"),
+		Bytes.fromUtf8(
+			"""
+			{ "ref": "refs/heads/old", "deleted": true, "repository": { "full_name": "bynk-lang/github-hooks" } }
+			"""
+		)
+	)
+	let Ok(d) = r else {
+		expect false
+	}
+	expect d.deleted == Some(true)
+}
+
+case "an ordinary push is flagged as not deleting" {
+	let Ok(d) = read(Some("push"), Some("d-push2"), Bytes.fromUtf8("{\"deleted\": false}")) else {
+		expect false
+	}
+	expect d.deleted == Some(false)
+}
+
+case "an event without the flag records none" {
+	let Ok(d) = read(
+		Some("issues"),
+		Some("d-iss"),
+		Bytes.fromUtf8("{\"action\": \"opened\"}")
+	) else {
+		expect false
+	}
+	expect d.deleted == None
+}
+
+case "a deleted key on an event other than a push is not recorded" {
+	let Ok(d) = read(
+		Some("issues"),
+		Some("d-iss-del"),
+		Bytes.fromUtf8("{\"action\": \"deleted\", \"deleted\": true}")
+	) else {
+		expect false
+	}
+	expect d.deleted == None
 }
 
 case "the event and delivery headers are required" {

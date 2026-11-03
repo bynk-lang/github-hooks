@@ -6,6 +6,26 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A read API, behind a `Reader` actor that accepts an HS256 JWT signed with
+  the new `API_TOKEN_SECRET` (`scripts/token.sh` mints one):
+  `GET /activity` and `GET /activity/:owner/:name` list the 50 most recent
+  deliveries, and `GET /digest/:day` counts one UTC day's by repository, event
+  and action. Each read is logged with the reader's name. See
+  `docs/read-api.md`.
+- Each delivery records GitHub's `deleted` flag (migration `0002`), read only
+  from a `push`, so a push that deleted a branch or tag can be told apart; the
+  digest leaves those out.
+
+### Changed
+
+- `scripts/smoke.sh` reads `APP_WEBHOOK_SECRET` (and, to check the read API,
+  `API_TOKEN_SECRET`) from the environment instead of its arguments, and signs
+  with Node, so no secret appears in a process's arguments.
+- **Deploying needs `API_TOKEN_SECRET`** as well as `APP_WEBHOOK_SECRET`. A
+  deploy without it fails, naming it.
+
 ### Fixed
 
 - `installation` and `installation_repositories` deliveries now record the

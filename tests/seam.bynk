@@ -3,6 +3,7 @@
 suite github.hooks as system {
 	env {
 		APP_WEBHOOK_SECRET = "test-webhook-secret"
+		API_TOKEN_SECRET = "test-api-secret"
 	}
 
 	case "a signed delivery is accepted" {
@@ -30,5 +31,24 @@ suite github.hooks as system {
 	case "the root is public" {
 		let r <- api.GET("/")
 		expect r is Ok(_)
+	}
+
+	case "a reader with a valid token can read activity" {
+		let r <- api.GET("/activity") by Reader("ci")
+		expect r is Ok(_)
+	}
+
+	case "reading activity without a valid token is refused" {
+		let none <- api.GET("/activity") by Nobody
+		expect none is Rejected(Unauthorized)
+	}
+
+	case "a digest day that is not YYYY-MM-DD is refused at the boundary" {
+		let word <- api.GET("/digest/:day", Wire("yesterday")) by Reader("ci")
+		let month <- api.GET("/digest/:day", Wire("2026-13-01")) by Reader("ci")
+		let day <- api.GET("/digest/:day", Wire("2026-01-32")) by Reader("ci")
+		expect word is Rejected(_)
+		expect month is Rejected(_)
+		expect day is Rejected(_)
 	}
 }
