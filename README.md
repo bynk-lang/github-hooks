@@ -17,7 +17,7 @@ It is two things at once:
 
 | Phase | What | State |
 |---|---|---|
-| 1 | Receive, verify and record every delivery | **this** |
+| 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
 | 2 | Read API over recorded activity, daily digest, retention | planned |
 | 3 | Act on events through the App's installation token | planned |
 
@@ -49,6 +49,8 @@ GitHub App ──POST /github──▶ signature check ──▶ read headers + 
 
 GitHub signs no timestamp, so there is no replay window; the delivery-id key is
 what makes a replay harmless.
+
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Develop
 
