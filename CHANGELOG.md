@@ -20,6 +20,9 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- A read whose rows don't decode now logs why, from the `JsonError`'s kind,
+  path and message (`StructuralMismatch at $[0].size: …`), not only that it
+  failed.
 - `scripts/smoke.sh` reads `APP_WEBHOOK_SECRET` (and, to check the read API,
   `API_TOKEN_SECRET`) from the environment instead of its arguments, and signs
   with Node, so no secret appears in a process's arguments.
