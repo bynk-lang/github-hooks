@@ -12,9 +12,22 @@ the same signed POST either way, so phase 1 needs only the webhook secret.
 openssl rand -hex 32
 ```
 
-Keep it somewhere safe: it goes into both the App and the Worker.
+Keep it somewhere safe: it goes into both the Worker and the App.
 
-## 2. Create the App
+## 2. Deploy the Worker with the secret
+
+Deploy first, so the Worker is already verifying signatures when GitHub sends
+the App's first delivery:
+
+```sh
+printf 'GITHUB_WEBHOOK_SECRET=%s\n' "<the secret from step 1>" > .secrets.env
+bynk deploy --secrets-file .secrets.env
+```
+
+`.secrets.env` is ignored by git. Delete it once the deploy has run. Note the
+Worker's URL from the deploy output: `https://github-hooks.<subdomain>.workers.dev`.
+
+## 3. Create the App
 
 An organisation owner (or App manager) opens
 **github.com/organizations/bynk-lang/settings/apps → New GitHub App**:
@@ -31,50 +44,43 @@ An organisation owner (or App manager) opens
 
 Leave callback URLs, device flow and "Request user authorization" empty or off.
 
-## 3. Permissions and events
+## 4. Permissions and events
 
 GitHub only offers an event once the App has a permission that covers it, so
 choose permissions first. Phase 1 only reads, so every permission is
-**Read-only**:
+**Read-only**. From [GitHub's event list](https://docs.github.com/en/webhooks/webhook-events-and-payloads):
 
 | Permission (Repository) | Unlocks events such as |
 |---|---|
-| Metadata (mandatory) | `repository`, `star`, `fork`, `create`, `delete` (per GitHub's list) |
-| Contents | `push`, `release` |
+| Metadata (mandatory) | `repository`, `star`, `watch` |
+| Contents | `push`, `release`, `create`, `delete`, `fork` |
 | Issues | `issues`, `issue_comment` |
 | Pull requests | `pull_request`, `pull_request_review`, `pull_request_review_comment` |
 | Actions | `workflow_run`, `workflow_job` |
 | Discussions | `discussion`, `discussion_comment` |
 
-Then tick the events you want under **Subscribe to events**. `installation` and
-`installation_repositories` are sent without being ticked, and so is the
-`ping` GitHub sends when the webhook is created.
+Then tick the events you want under **Subscribe to events**. Every App receives
+`installation` and `installation_repositories` without subscribing, and GitHub
+sends a `ping` when the webhook is created.
 
 Phase 3 will need some of these raised to **Read and write** (Issues and Pull
 requests, for comments and labels). Changing an App's permissions asks an
 organisation owner to approve the change on the installation; nothing else has
 to move.
 
-## 4. Install it
+## 5. Install it
 
 From the App's page, **Install App → bynk-lang**, and choose all repositories or
 a selection. Repositories added later arrive as `installation_repositories`
 events.
 
-## 5. Give the Worker the secret
-
-```sh
-printf 'GITHUB_WEBHOOK_SECRET=%s\n' "<the secret from step 1>" > .secrets.env
-bynk deploy --secrets-file .secrets.env
-```
-
-`.secrets.env` is ignored by git. Delete it once the deploy has run.
-
 ## 6. Check it
 
 The App's **Advanced** tab lists recent deliveries with GitHub's request and
-the Worker's response. The first one is the `ping`, answered
-`202 recorded`. Any delivery can be redelivered from there, and a redelivery is
+the Worker's response. The first one is the `ping`, answered `202 recorded`.
+If it failed (the Worker wasn't deployed yet, or the secrets don't match), fix
+that and use **Redeliver**: a delivery that failed was never recorded, so the
+redelivery is answered `202 recorded`, and redelivering one that succeeded is
 answered `200 duplicate`.
 
 ## Later: the private key (phase 3)

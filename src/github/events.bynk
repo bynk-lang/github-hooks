@@ -68,9 +68,9 @@ fn read(
 	delivery: Option[String],
 	body: Bytes
 ) -> Result[Delivery, Rejection] {
-	match event {
+	match present(event) {
 		None => Err(MissingEvent),
-		Some(e) => match delivery {
+		Some(e) => match present(delivery) {
 			None => Err(MissingDelivery),
 			Some(d) => match body.decodeUtf8() {
 				None => Err(NotUtf8),
@@ -93,12 +93,23 @@ fn read(
 }
 
 ---
+A header's value, if it has one: a header sent empty counts as missing, so an
+empty delivery id can never become a key that later empty ids collide with.
+---
+fn present(value: Option[String]) -> Option[String] {
+	match value {
+		Some(v) => if v.trim() == "" { None } else { Some(v) },
+		None => None,
+	}
+}
+
+---
 The message a rejected delivery is answered with.
 ---
 fn describe(r: Rejection) -> String {
 	match r {
-		MissingEvent => "missing X-GitHub-Event header",
-		MissingDelivery => "missing X-GitHub-Delivery header",
+		MissingEvent => "missing or empty X-GitHub-Event header",
+		MissingDelivery => "missing or empty X-GitHub-Delivery header",
 		NotUtf8 => "payload is not UTF-8",
 		NotJson => "payload is not a JSON object GitHub would send",
 	}

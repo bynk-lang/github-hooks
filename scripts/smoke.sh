@@ -18,13 +18,15 @@ sign() {
 }
 
 # post <expected-status> <description> <signature> [<delivery-id>]
+# A request that gets no answer at all (connection refused, a mistyped URL)
+# is reported as status 000, a failure like any other.
 post() {
   status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/github" \
     -H 'Content-Type: application/json' \
     -H 'X-GitHub-Event: issues' \
     -H "X-GitHub-Delivery: ${4:-$DELIVERY}" \
     -H "X-Hub-Signature-256: $3" \
-    --data-binary "$BODY")
+    --data-binary "$BODY") || status=000
   if [ "$status" = "$1" ]; then
     echo "ok   $2 ($status)"
   else

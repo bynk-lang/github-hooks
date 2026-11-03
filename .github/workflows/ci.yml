@@ -12,9 +12,8 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  # The Bynk release this project is built and tested with. Bump deliberately.
-  BYNK_VERSION: v0.492.1
+# The Bynk version (and its pinned checksum) lives in
+# .github/actions/setup-bynk/action.yml, so both jobs use the same toolchain.
 
 jobs:
   test:
@@ -23,15 +22,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
-        with:
-          node-version: 22
-      - name: Install Bynk
-        run: |
-          curl -fsSL "https://github.com/bynk-lang/bynk/releases/download/${BYNK_VERSION}/install.sh" \
-            | BYNK_INSTALL_DIR="$HOME/.local/bin" sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: bynk doctor
+      - uses: ./.github/actions/setup-bynk
       - run: bynk fmt --check .
       - run: bynk check
       - run: bynk test
@@ -42,14 +33,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
-        with:
-          node-version: 22
-      - name: Install Bynk
-        run: |
-          curl -fsSL "https://github.com/bynk-lang/bynk/releases/download/${BYNK_VERSION}/install.sh" \
-            | BYNK_INSTALL_DIR="$HOME/.local/bin" sh
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-bynk
       - name: Serve the Worker
         run: |
           bynk dev -- --var GITHUB_WEBHOOK_SECRET:ci-secret > dev.log 2>&1 &

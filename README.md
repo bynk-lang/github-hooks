@@ -38,13 +38,14 @@ GitHub App ──POST /github──▶ signature check ──▶ read headers + 
    `X-GitHub-Event`, the delivery id from `X-GitHub-Delivery`, and decodes the
    fields every event shares (`action`, `repository`, `sender`, `organization`,
    `installation`). Every other key is ignored, so a large `push` decodes into
-   a small record. A missing header or a body that isn't JSON is `400`.
+   a small record. A missing or empty header, or a body that isn't JSON, is `400`.
 3. **Record.** One row per delivery in the `deliveries` table
    ([schema](migrations/github-hooks-deliveries/0001_create_deliveries.sql)).
-   The delivery id is the primary key: when GitHub redelivers, the insert hits
-   the key and the service answers `200 duplicate` without recording it twice.
-   A new delivery is `202 recorded`. A database failure is `500`, so GitHub
-   marks the delivery failed and it can be redelivered.
+   The delivery id is the primary key, and the insert is
+   `ON CONFLICT (id) DO NOTHING`: when GitHub redelivers, nothing is inserted
+   and the service answers `200 duplicate`. A new delivery is `202 recorded`.
+   Any other database failure is logged and answered `500`, so GitHub marks the
+   delivery failed and it can be redelivered.
 
 GitHub signs no timestamp, so there is no replay window; the delivery-id key is
 what makes a replay harmless.
@@ -88,8 +89,9 @@ ok   an unsigned delivery is refused (401)
 
 ## Deploy
 
-See [docs/github-app.md](docs/github-app.md) for registering the GitHub App.
-Then:
+[docs/github-app.md](docs/github-app.md) walks through the whole set-up in
+order: choose a webhook secret, deploy the Worker with it, then register and
+install the GitHub App. The deploy itself is:
 
 ```sh
 npx wrangler login                    # or set CLOUDFLARE_API_TOKEN
@@ -111,6 +113,7 @@ src/github/hooks.bynk    context github.hooks: the Worker (actor, D1, routes)
 migrations/              D1 schema, applied in tests, by bynk dev and by bynk deploy
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
+.github/actions/         CI's Bynk install, pinned by version and SHA-256
 docs/github-app.md       registering and installing the GitHub App
 ```
 

@@ -83,6 +83,13 @@ case "the event and delivery headers are required" {
 	expect read(Some("ping"), None, body) == Err(MissingDelivery)
 }
 
+case "an empty or blank header counts as missing" {
+	let body = Bytes.fromUtf8("{}")
+	expect read(Some(""), Some("d"), body) == Err(MissingEvent)
+	expect read(Some("ping"), Some(""), body) == Err(MissingDelivery)
+	expect read(Some("ping"), Some("   "), body) == Err(MissingDelivery)
+}
+
 case "a body that is not UTF-8 is refused" {
 	match Bytes.fromHex("ff") {
 		Some(b) => expect read(Some("ping"), Some("d"), b) == Err(NotUtf8),
@@ -100,8 +107,8 @@ case "an envelope field of the wrong type is refused" {
 }
 
 case "every rejection has a message" {
-	expect describe(MissingEvent) == "missing X-GitHub-Event header"
-	expect describe(MissingDelivery) == "missing X-GitHub-Delivery header"
+	expect describe(MissingEvent) == "missing or empty X-GitHub-Event header"
+	expect describe(MissingDelivery) == "missing or empty X-GitHub-Delivery header"
 	expect describe(NotUtf8) == "payload is not UTF-8"
 	expect describe(NotJson) == "payload is not a JSON object GitHub would send"
 }

@@ -24,7 +24,8 @@ without being recorded twice.
 actor GitHub { auth = Signature(secret = "GITHUB_WEBHOOK_SECRET", header = "X-Hub-Signature-256") }
 
 service api from http {
-	// GitHub caps a delivery's payload at 25 MB.
+	// GitHub caps a delivery's payload at 25 MB (25,000,000 bytes). This cap is
+	// 25 MiB (26,214,400 bytes), so a delivery at GitHub's limit still fits.
 	limits {
 		maxBody: 26_214_400,
 	}
@@ -47,6 +48,7 @@ service api from http {
 					"""
 					INSERT INTO deliveries (id, event, action, repo, sender, org, installation, size)
 					VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+					ON CONFLICT (id) DO NOTHING
 					""",
 					[
 						Text(d.id),
@@ -59,19 +61,34 @@ service api from http {
 						Integer(d.size),
 					]
 				)
+				// Only a conflict on the delivery id is a redelivery: it inserts
+				// nothing. Any other failure, including a constraint a later
+				// migration adds, is a 500, so GitHub can redeliver it.
 				match ins {
-					Err(Constraint(_)) => {
+					Ok(r) => if r.changes == 0 {
 						let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
 						Ok("duplicate")
-					},
-					Err(_) => ServerError("could not record the delivery"),
-					Ok(_) => {
+					} else {
 						let _ <- Logger.info("delivery \(d.id) (\(d.event))")
 						Accepted("recorded")
+					},
+					Err(e) => {
+						let _ <- Logger.error(
+							"could not record delivery \(d.id) (\(d.event)): \(sqlError(e))"
+						)
+						ServerError("could not record the delivery")
 					},
 				}
 			},
 		}
+	}
+}
+
+fn sqlError(e: SqlError) -> String {
+	match e {
+		Constraint(m) => "constraint: \(m)",
+		Failed(m) => m,
+		_ => "unrecognised D1 error",
 	}
 }
 
