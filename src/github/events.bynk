@@ -80,28 +80,20 @@ fn read(
 	delivery: Option[String],
 	body: Bytes
 ) -> Result[Delivery, Rejection] {
-	match present(event) {
-		None => Err(MissingEvent),
-		Some(e) => match present(delivery) {
-			None => Err(MissingDelivery),
-			Some(d) => match body.decodeUtf8() {
-				None => Err(NotUtf8),
-				Some(text) => match Json.decode[Envelope](text) {
-					Err(_) => Err(NotJson),
-					Ok(env) => Ok(Delivery {
-						id: d,
-						event: e,
-						action: env.action,
-						repo: env.repository.map((r) => r.full_name),
-						sender: env.sender.map((s) => s.login),
-						org: orgOf(e, env),
-						installation: env.installation.map((i) => i.id),
-						size: body.length(),
-					}),
-				},
-			},
-		},
-	}
+	let Some(e) = present(event) else { Err(MissingEvent) }
+	let Some(d) = present(delivery) else { Err(MissingDelivery) }
+	let Some(text) = body.decodeUtf8() else { Err(NotUtf8) }
+	let Ok(env) = Json.decode[Envelope](text) else { Err(NotJson) }
+	Ok(Delivery {
+		id: d,
+		event: e,
+		action: env.action,
+		repo: env.repository.map((r) => r.full_name),
+		sender: env.sender.map((s) => s.login),
+		org: orgOf(e, env),
+		installation: env.installation.map((i) => i.id),
+		size: body.length(),
+	})
 }
 
 ---
@@ -113,19 +105,13 @@ installation events would record the user's login here. Every other event
 without an `organization` (one in a user's own repository) records none.
 ---
 fn orgOf(event: String, env: Envelope) -> Option[String] {
-	match env.organization {
+	let None = env.organization else match {
 		Some(o) => Some(o.login),
-		None => if event == "installation" || event == "installation_repositories" {
-			match env.installation {
-				Some(i) => match i.account {
-					Some(a) => a.login,
-					None => None,
-				},
-				None => None,
-			}
-		} else {
-			None
-		},
+	}
+	if event == "installation" || event == "installation_repositories" {
+		env.installation.andThen((i) => i.account).andThen((a) => a.login)
+	} else {
+		None
 	}
 }
 
