@@ -2,6 +2,9 @@ version = 1
 
 [environments.default.kv]
 
+[environments.default.kv_instances.github-hooks.KV_TOKENS]
+id = "a11c88a09a63484fb2a0440dace35910"
+
 [environments.default.d1_instances.github-hooks.D1_DELIVERIES]
 name = "github-hooks-deliveries"
 id = "a1887c06-f07d-4cd3-aec7-d0c5dda02c7f"
