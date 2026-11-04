@@ -156,6 +156,21 @@ commit the updated lock afterwards. It also applies migration `0003` (the
 warning at deploy, not a failure: the service then logs `APP_CLIENT_ID is not
 set` (or similar) and records the action as failed.
 
+**Changing a setting.** A redeploy keeps every secret already on the Worker,
+so correcting `ACTION_REPOS` (or any other name here) in `.secrets.env` and
+running `bynk deploy` again changes nothing: it prints ``secret `ACTION_REPOS`
+is already set … skipping``. Either redeploy with `--force`, which overwrites
+every name in the file, or set the one value directly:
+
+```sh
+printf '%s' 'bynk-lang/github-hooks-sandbox' | npx wrangler secret put ACTION_REPOS --name github-hooks
+```
+
+A setting removed from `.secrets.env` stays on the Worker too; delete it with
+`npx wrangler secret delete <NAME> --name github-hooks`. A new value applies
+to deliveries from then on. A delivery that was skipped under the old value is
+not revisited: redeliver it from the App's **Advanced** tab.
+
 **Try it.** Open an issue in `bynk-lang/github-hooks-sandbox`. Within a few
 seconds the App comments with the welcome from `embeds/welcome.md`, as
 `<app-name>[bot]`. If nothing appears:
@@ -192,6 +207,6 @@ at that moment and cached for up to 55 minutes. If GitHub refuses a comment
 with `401` or `403`, the cached token is dropped and the comment retried once
 with a fresh one, so approving write access takes effect immediately.
 
-**Widening it.** When it works in the sandbox, remove `WELCOME_ASSOCIATIONS`
-(back to first-timers only) and add repositories to `ACTION_REPOS`, then
-redeploy.
+**Widening it.** When it works in the sandbox, delete `WELCOME_ASSOCIATIONS`
+(back to first-timers only) and add repositories to `ACTION_REPOS`, as in
+**Changing a setting** above: a plain redeploy keeps the old values.

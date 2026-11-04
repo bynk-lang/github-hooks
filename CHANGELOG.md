@@ -52,6 +52,10 @@ All notable changes to github-hooks. The format follows
 
 ### Fixed
 
+- docs/github-app.md explains that a redeploy keeps secrets already set, so
+  changing `ACTION_REPOS` or `WELCOME_ASSOCIATIONS` needs `--force` or
+  `wrangler secret put`, and removing one needs `wrangler secret delete`. A
+  skipped delivery is retried by redelivering it.
 - docs/github-app.md's deploy step now sets `API_TOKEN_SECRET` alongside the
   webhook secret, and step 7 no longer assumes the first `.secrets.env` was
   kept: secrets already on the Worker are kept by later deploys.
