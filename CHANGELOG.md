@@ -20,6 +20,10 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- The digest's day handling uses `Instant.fromIso`, which already knows which
+  dates exist, and queries the exact range from the day's first instant to the
+  next day's (`start + 1.days`). This replaces a hand-written leap-year check
+  and a string trick for the range's end; behaviour is unchanged.
 - A read whose rows don't decode now logs why, from the `JsonError`'s kind,
   path and message (`StructuralMismatch at $[0].size: …`), not only that it
   failed.

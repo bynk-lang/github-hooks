@@ -26,24 +26,33 @@ case "an empty day totals zero" {
 	expect digest("2026-11-01", []).total == 0
 }
 
-case "a day's range ends just after every timestamp of that day" {
-	expect dayEnd("2026-11-01") == "2026-11-01U"
-	expect "2026-11-01T23:59:59.999Z" < dayEnd("2026-11-01")
-	expect "2026-11-02T00:00:00.000Z" > dayEnd("2026-11-01")
+case "a day's range is its 24 hours in UTC" {
+	let Some(r) = rangeOf("2026-11-01") else {
+		expect false
+	}
+	expect r.start.toIso() == "2026-11-01T00:00:00.000Z"
+	expect r.end.toIso() == "2026-11-02T00:00:00.000Z"
 }
 
-case "a real day is within its month's length" {
-	expect isRealDay("2026-01-31")
-	expect isRealDay("2026-04-30")
-	expect isRealDay("2026-02-28")
-	expect isRealDay("2026-12-31")
-	expect !isRealDay("2026-04-31")
-	expect !isRealDay("2026-02-30")
+case "a range crosses months and years" {
+	let Some(feb) = rangeOf("2024-02-29") else {
+		expect false
+	}
+	let Some(eve) = rangeOf("2026-12-31") else {
+		expect false
+	}
+	expect feb.end.toIso() == "2024-03-01T00:00:00.000Z"
+	expect eve.end.toIso() == "2027-01-01T00:00:00.000Z"
 }
 
-case "29 February exists only in leap years" {
-	expect isRealDay("2024-02-29")
-	expect isRealDay("2000-02-29")
-	expect !isRealDay("2026-02-29")
-	expect !isRealDay("1900-02-29")
+case "a date that doesn't exist has no range" {
+	expect rangeOf("2026-04-31") == None
+	expect rangeOf("2026-02-30") == None
+	expect rangeOf("2026-02-29") == None
+	expect rangeOf("1900-02-29") == None
+}
+
+case "29 February exists in leap years" {
+	expect rangeOf("2024-02-29").isSome()
+	expect rangeOf("2000-02-29").isSome()
 }
