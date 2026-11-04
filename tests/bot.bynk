@@ -164,6 +164,7 @@ case "a known contributor's issue is not welcomed" {
 		)
 	) by GitHub
 	expect Fetch.send never called
+	expect Logger.info called with msg == "welcome for w-3 skipped: regular is MEMBER, not in WELCOME_ASSOCIATIONS (FIRST_TIMER,FIRST_TIME_CONTRIBUTOR)"
 }
 
 case "a redelivery of a welcome that worked does not comment again" {

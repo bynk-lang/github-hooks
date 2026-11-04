@@ -52,6 +52,11 @@ All notable changes to github-hooks. The format follows
 
 ### Fixed
 
+- A skipped welcome is logged with its reason (`welcome for <delivery>
+  skipped: <login> is MEMBER, not in WELCOME_ASSOCIATIONS (…)`, a bot, no
+  installation, a payload that did not decode). It was silent before, so a
+  setting that hadn't reached the Worker looked like the service not running.
+  Deliveries that were never candidates (other events and actions) stay quiet.
 - docs/github-app.md explains that a redeploy keeps secrets already set, so
   changing `ACTION_REPOS` or `WELCOME_ASSOCIATIONS` needs `--force` or
   `wrangler secret put`, and removing one needs `wrangler secret delete`. A
