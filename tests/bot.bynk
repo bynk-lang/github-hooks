@@ -214,7 +214,7 @@ case "a comment refused twice is recorded as failed, and a redelivery retries it
 	)
 	let _ <- api.POST("/github", h, body) by GitHub
 	let failed <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-5'", [])
-	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403\"}"))
+	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403 Resource not accessible by integration\"}"))
 	let released <- Deliveries.first("SELECT login FROM welcomed", [])
 	expect released == Ok(None)
 	let _ <- api.POST("/github", h, body) by GitHub

@@ -69,3 +69,22 @@ The body of a new issue or pull-request comment.
 type NewComment = {
 	body: String,
 }
+
+---
+The part of a GitHub REST error response worth logging: GitHub answers a
+refusal with `{"message": "…", "documentation_url": "…"}`.
+---
+type ApiError = {
+	message: String,
+}
+
+---
+A refused call's status, with GitHub's own `message` when its body carries one
+(`403 Resource not accessible by integration`), so the log says why.
+---
+fn refusal(status: Int, body: String) -> String {
+	match Json.decode[ApiError](body) {
+		Ok(e) => "\(status) \(e.message)",
+		Err(_) => "\(status)",
+	}
+}

@@ -40,3 +40,12 @@ case "a stored key reads with or without line breaks" {
 	).isSome()
 	expect pkcs8("not base64!") == None
 }
+
+case "a refusal carries GitHub's message when there is one" {
+	expect refusal(
+		403,
+		"{\"message\": \"Resource not accessible by integration\", \"documentation_url\": \"https://docs.github.com\"}"
+	) == "403 Resource not accessible by integration"
+	expect refusal(502, "<html>Bad gateway</html>") == "502"
+	expect refusal(404, "") == "404"
+}
