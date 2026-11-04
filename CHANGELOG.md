@@ -52,6 +52,9 @@ All notable changes to github-hooks. The format follows
 
 ### Fixed
 
+- docs/github-app.md's deploy step now sets `API_TOKEN_SECRET` alongside the
+  webhook secret, and step 7 no longer assumes the first `.secrets.env` was
+  kept: secrets already on the Worker are kept by later deploys.
 - `installation` and `installation_repositories` deliveries now record the
   organisation, from the installation's `account`. Those events have no
   top-level `organization`, so the `org` column was empty for them. No other
