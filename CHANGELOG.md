@@ -8,6 +8,18 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 3: the service acts as the GitHub App. It welcomes a first-time
+  contributor's first issue or pull request with a comment (`embeds/welcome.md`),
+  in the repositories `ACTION_REPOS` lists.
+  - `AppAuth` signs an RS256 JWT with the App's private key (`APP_PRIVATE_KEY`,
+    base64 PKCS#8; `APP_CLIENT_ID`) and exchanges it for an installation token,
+    cached in the new `Tokens` KV namespace for 55 minutes.
+  - `Bot` runs after the delivery is answered (`~>`), and records each action in
+    the new `actions` table (migration `0003`), so a redelivery retries a
+    failed action and repeats nothing that worked.
+  - `WELCOME_ASSOCIATIONS` widens who is welcomed, for testing in a sandbox.
+  - Setup is in `docs/github-app.md`, step 7.
+
 - A read API, behind a `Reader` actor that accepts an HS256 JWT signed with
   the new `API_TOKEN_SECRET` (`scripts/token.sh` mints one):
   `GET /activity` and `GET /activity/:owner/:name` list the 50 most recent

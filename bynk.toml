@@ -6,3 +6,8 @@ version = "0.1.0"
 
 [paths]
 include = ["src", "tests"]
+
+# Phase 3 signs the GitHub App's JWT with RS256 through `bynk.crypto`, which is
+# experimental in Bynk v0.492.1.
+[unstable]
+allow = ["bynk.crypto"]

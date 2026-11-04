@@ -88,15 +88,77 @@ that and use **Redeliver**: a delivery that failed was never recorded, so the
 redelivery is answered `202 recorded`, and redelivering one that succeeded is
 answered `200 duplicate`.
 
-## Later: the private key (phase 3)
+## 7. Let the App act (phase 3)
 
-Phase 3 signs a short-lived JWT as the App and exchanges it for an installation
-token. Generate a private key on the App's page then. GitHub gives it as PKCS#1
-PEM; Bynk's crypto imports PKCS#8, so convert it once:
+Phase 3 lets the service act as the App: today it welcomes a first-time
+contributor's first issue or pull request with a comment. It signs a
+short-lived JWT as the App with the App's private key, exchanges it for an
+installation token (cached for 55 minutes), and comments with that token. It
+acts only in repositories you list.
+
+**Permissions.** On the App's page, raise **Issues** and **Pull requests** to
+**Read and write**. GitHub asks an organisation owner to approve the change on
+the installation; approve it there.
+
+**Repositories.** Add `bynk-lang/github-hooks-sandbox` to the installation
+(**Install App → Configure → Repository access**).
+
+**The App's credentials.**
+
+1. **Client ID:** shown at the top of the App's **General** page (`Iv1.…` or
+   `Iv23…`).
+2. **Private key:** under **Private keys → Generate a private key**. GitHub
+   downloads a PKCS#1 PEM. Bynk's crypto imports PKCS#8, so convert it, as one
+   line of base64:
+
+   ```sh
+   openssl pkcs8 -topk8 -nocrypt -in github-hooks.private-key.pem -outform DER | base64 -w0
+   ```
+
+   (On macOS, `base64` without `-w0`.) Delete the downloaded `.pem` once the
+   key is deployed. It never goes in the repository.
+
+**Configuration.** Add these to `.secrets.env` beside the two secrets from
+phase 1 and 2:
 
 ```sh
-openssl pkcs8 -topk8 -nocrypt -in bynk-bot.private-key.pem -out bynk-bot.pkcs8.pem
+APP_CLIENT_ID=Iv23…
+APP_PRIVATE_KEY=MIIEv…            # the base64 line from above
+ACTION_REPOS=bynk-lang/github-hooks-sandbox
+# Only while testing in the sandbox, where every author is a member:
+WELCOME_ASSOCIATIONS=FIRST_TIMER,FIRST_TIME_CONTRIBUTOR,OWNER,MEMBER
 ```
 
-The key will be a Worker secret like the webhook secret. It never goes in the
-repository.
+| Name | Meaning |
+|---|---|
+| `APP_CLIENT_ID` | the App's client ID, the JWT's `iss` |
+| `APP_PRIVATE_KEY` | the App's private key, base64 PKCS#8 |
+| `ACTION_REPOS` | comma-separated `owner/name` list the service may act in. Unset or empty: it acts nowhere |
+| `WELCOME_ASSOCIATIONS` | optional. Which `author_association` values earn a welcome. Default `FIRST_TIMER,FIRST_TIME_CONTRIBUTOR` |
+
+**Deploy** with `bynk deploy --secrets-file .secrets.env`. The first deploy
+creates the `Tokens` KV namespace and records its id in `bynk.deploy.lock`, so
+commit the updated lock afterwards. It also applies migration `0003` (the
+`actions` table). These names are read with `Secrets.get`, so a missing one is a
+warning at deploy, not a failure: the service then logs `APP_CLIENT_ID is not
+set` (or similar) and records the action as failed.
+
+**Try it.** Open an issue in `bynk-lang/github-hooks-sandbox`. Within a few
+seconds the App comments with the welcome from `embeds/welcome.md`, as
+`<app-name>[bot]`. If nothing appears:
+
+- the Worker's logs (`bynk tail`, or the dashboard) say why: `skipped: not in
+  ACTION_REPOS`, `could not welcome …: <reason>`, or nothing at all if the
+  author's association isn't welcomed;
+- the `actions` table records each attempt's `status` and `detail`:
+
+  ```sql
+  SELECT * FROM actions ORDER BY at DESC LIMIT 10;
+  ```
+
+- a failed welcome is retried by redelivering its delivery from the App's
+  **Advanced** tab. A welcome that worked is never repeated.
+
+**Widening it.** When it works in the sandbox, remove `WELCOME_ASSOCIATIONS`
+(back to first-timers only) and add repositories to `ACTION_REPOS`, then
+redeploy.

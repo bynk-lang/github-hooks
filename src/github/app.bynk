@@ -1,0 +1,71 @@
+commons github.app
+
+---
+What the App sends GitHub to prove it is the App: an RS256 JWT's signing input,
+`base64url(header).base64url(claims)`. GitHub accepts `iat` up to 60 seconds in
+the past (to allow for clock drift) and `exp` at most 10 minutes after `iat`;
+`iss` is the App's client ID.
+---
+fn jwtSigningInput(clientId: String, now: Instant) -> String {
+	let seconds = now.toEpochMillis() / 1000
+	let claims = JwtClaims {
+		iat: seconds - 60,
+		exp: seconds + 540,
+		iss: clientId,
+	}
+	"\(base64Url(JWT_HEADER)).\(base64Url(Json.encode(claims)))"
+}
+
+const JWT_HEADER: String = "{\"alg\":\"RS256\",\"typ\":\"JWT\"}"
+
+type JwtClaims = {
+	iat: Int,
+	exp: Int,
+	iss: String,
+}
+
+fn base64Url(text: String) -> String {
+	Bytes.fromUtf8(text).toBase64Url()
+}
+
+---
+The App's private key, from the base64 of its PKCS#8 DER form, as
+`openssl pkcs8 -topk8 -nocrypt -outform DER | base64 -w0` writes it. Whitespace
+is tolerated, so a value pasted with line breaks still reads.
+---
+fn pkcs8(stored: String) -> Option[Bytes] {
+	Bytes.fromBase64(stored.replaceRegex(r"\s+", ""))
+}
+
+---
+An installation token, as `POST /app/installations/{id}/access_tokens`
+answers. Everything else in the response is ignored.
+---
+type InstallationToken = {
+	token: String,
+}
+
+---
+How long a token is cached: 55 minutes of the hour GitHub gives it, so a cached
+token always has at least five minutes left when it is used.
+---
+const TOKEN_CACHE_SECONDS: Int = 3300
+
+---
+The headers every GitHub REST call carries. GitHub refuses a request without a
+`User-Agent`.
+---
+fn apiHeaders() -> Map[String, String] {
+	Map
+		.empty()
+		.insert("accept", "application/vnd.github+json")
+		.insert("user-agent", "bynk-lang-github-hooks")
+		.insert("x-github-api-version", "2022-11-28")
+}
+
+---
+The body of a new issue or pull-request comment.
+---
+type NewComment = {
+	body: String,
+}

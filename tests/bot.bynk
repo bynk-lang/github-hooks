@@ -1,0 +1,218 @@
+// Phase 3 end to end, through the webhook: the delivery is recorded, then the
+// bot reacts. Signing is real (a key pair made for these tests only), D1 is
+// in-memory SQLite with the migrations applied, Tokens is the in-memory KV
+// double, and Fetch is stubbed: first the token exchange, then the comment.
+suite github.hooks
+
+env {
+	ACTION_REPOS = "bynk-lang/github-hooks-sandbox"
+	APP_CLIENT_ID = "Iv1.testclient"
+	APP_PRIVATE_KEY = "MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCjTkIscmyAn4IqcxYPwZw2YKl/4dAtECW0Hni9+F7y9WWfFiuznUq0QxKoGde0NaUwt7MQQVUss3KEXwS6n1WZ/KKvGrv49iFSoEcs4d9q5iMMTc+d59eoXOGVaeR0HQVmDUOMCNQkZNTrFe0ZqZ54bsH2mL2+TffuPGQHEcwObzp9RxRRw91AR0Sob4GvU1DuZ6j/1jMu/gXCWa9pxB767lYyILc2rulLDZ/VvrIUur5sjCgVmEJyHIc36hnv6K2yrERZgp8p4XINBvhLgu9GZhMowsfJmvAsW6h5sghX5yee7miNzMIewG3HMsLLw0dXhgvvrj66rn1fszhMVYDdAgMBAAECggEAMRjstT87ltoeANQz/E25wPGD1FJYS8wQgdwtcfPz2/jichdw0SIHnTWTLN4EJ4Z/YSvBlrAFwxg6ZEjK+66+xjqZ0KppfDrHnvdYHsrT6GhDfkYAlxlmkZRHMCwzhqNZBasUNUxMN5rnFryzWaVQ4yVthE28sjPvx/z5F9UGdAoK4ZufXEju3Y+fhbmjTZv0eJUzelwy6x93bHX8SYVKnK//DV9bAA3jOuUfgnfmER7YP6/ZjVn+sX4j9alKklnFr/D3Luce1R4DjkAryUkn4K+zZ1ZBT34ICDg8My2w3twHOXfcdopKZrxoheXeLJ60zl03bMElG6myE66nbixZQwKBgQDRQTE46uTS3H1rITBzucQovsa2sIfJJyVwD8xGyFn4VtYoQOhgbMhltqlERzw3LEGLmr7Bag1QbfNSAUMgzzasEgI8nnoqM3XF2ynEiZENnjobIAhVZz/CtKUOJz6YQHKTJ5Bweqr2ZS9JW91jxctDjiB7HmrKSxFjFvsINllZIwKBgQDHyVj4hqdkKY/tdFcIM0VRo3SkEu8OySvQmbYwdp9Y9IYZseotVj+Fz4r1vs+Y6g9HJWVDG0+lgL4pjiDVmPn8Jf+4rBgVfWB71t4KKzY2yV3q9oldg80cCpC6+uojRAB7vCEeeB0jglZ71gsSbO4q13KtkGChrBp1dG/HTXxd/wKBgG20pxC3HYZrMJnUyakycGQIOPgYrufHzTnmHmvRqFGpfReXh/zdq2agEDgKvMgUPLzrQSz348kSC+onXUE7QeeOfXu4fkXXutwjXc97a//ev4nvDk9wFR6IRKyZ6Jg72ZXKvVArD6ykOdlU/0nKrhlZzy+dL9Gk75Wqu6t/ivJPAoGAdppngRKfKO0rjnH0gN+/FRoOUqES3ho7Mpkt+VNSgcKYIYTnWobLKyrsebsPDt5Ut43Rsaby/3OQcKb5gxRPw4rjZsRzf75wmtQR+MNyac/dO3GkVqm6CB2VkgsHGGx0RQCIQMhZtAzaPqXw6L1WHoTMhZEibJf5FSVMfmrXnA0CgYBShL5u8hG78qE3HAHnZXbVweGygCWNhMaYs862y3SsTOlvFiTXzRpcfyT7WHIi9pAJC0W0SwOlFRF5q9EsK3ygq0V+QUpdfPjwEdG5rY2EMKbKCYmynw4VxZjAl9rmsA+4qDMh7f25Wi2Bx4wSXt6nSoyDG6bhrmo7noxmGGTKdA=="
+}
+
+case "a first-timer's issue is welcomed, as the App's installation" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\", \"expires_at\": \"2026-11-04T06:00:00Z\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-1"])
+	let r <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 7, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect r == Accepted("recorded")
+	expect Fetch.send called 2 times
+	expect Fetch.send called with req.url == "https://api.github.com/app/installations/42/access_tokens"
+	expect Fetch.send called with req.url == "https://api.github.com/repos/bynk-lang/github-hooks-sandbox/issues/7/comments" && req.authorization == Some("Bearer ghs_test") && req.headers.get("user-agent") == Some("bynk-lang-github-hooks")
+	expect Logger.info called with msg == "welcomed newcomer on bynk-lang/github-hooks-sandbox#7"
+	let row <- Deliveries.first(
+		"SELECT status FROM actions WHERE delivery = 'w-1' AND action = 'welcome'",
+		[]
+	)
+	expect row == Ok(Some("{\"status\":\"done\"}"))
+}
+
+case "the JWT the App sends verifies with the App's public key" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-jwt"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 1, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	let calls = trace(Fetch.send)
+	let Some(first) = calls.get(0) else {
+		expect false
+	}
+	let Some(bearer) = first.req.authorization else {
+		expect false
+	}
+	let jwt = bearer.slice(7, bearer.length())
+	let parts = jwt.split(".")
+	expect parts.length() == 3
+	let Some(head) = parts.get(0) else {
+		expect false
+	}
+	let Some(claims) = parts.get(1) else {
+		expect false
+	}
+	let Some(sigText) = parts.get(2) else {
+		expect false
+	}
+	let Some(sig) = Bytes.fromBase64Url(sigText) else {
+		expect false
+	}
+	let Some(spki) = Bytes.fromBase64(
+		"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo05CLHJsgJ+CKnMWD8GcNmCpf+HQLRAltB54vfhe8vVlnxYrs51KtEMSqBnXtDWlMLezEEFVLLNyhF8Eup9Vmfyirxq7+PYhUqBHLOHfauYjDE3PnefXqFzhlWnkdB0FZg1DjAjUJGTU6xXtGameeG7B9pi9vk337jxkBxHMDm86fUcUUcPdQEdEqG+Br1NQ7meo/9YzLv4FwlmvacQe+u5WMiC3Nq7pSw2f1b6yFLq+bIwoFZhCchyHN+oZ7+itsqxEWYKfKeFyDQb4S4LvRmYTKMLHyZrwLFuoebIIV+cnnu5ojczCHsBtxzLCy8NHV4YL764+uq59X7M4TFWA3QIDAQAB"
+	) else {
+		expect false
+	}
+	let Ok(vk) <- Crypto.importVerifyKey(RsaPkcs1Sha256, spki) else match {
+		Err(_) => expect false,
+	}
+	let ok <- Crypto.verify(vk, Bytes.fromUtf8("\(head).\(claims)"), sig)
+	expect ok
+}
+
+case "a token is minted once and reused for the next welcome" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let a = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-a"])
+	let b = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-b"])
+	let _ <- api.POST(
+		"/github",
+		a,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 1, "user": { "login": "first" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		b,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 2, "user": { "login": "second" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send called 3 times
+	expect Fetch.send called once with req.url == "https://api.github.com/app/installations/42/access_tokens"
+}
+
+case "a repository not in ACTION_REPOS is left alone" {
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-2"])
+	let r <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/bynk" }, "installation": { "id": 42 },
+			  "issue": { "number": 9, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect r == Accepted("recorded")
+	expect Fetch.send never called
+	expect Logger.info called with msg == "welcome for bynk-lang/bynk#9 skipped: not in ACTION_REPOS"
+}
+
+case "a sandbox can widen who is welcomed" {
+	env {
+		WELCOME_ASSOCIATIONS = "FIRST_TIMER,FIRST_TIME_CONTRIBUTOR,OWNER"
+	}
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-own"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 8, "user": { "login": "the-owner" }, "author_association": "OWNER" } }
+			"""
+		)
+	) by GitHub
+	expect Logger.info called with msg == "welcomed the-owner on bynk-lang/github-hooks-sandbox#8"
+}
+
+case "a known contributor's issue is not welcomed" {
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-3"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 9, "user": { "login": "regular" }, "author_association": "MEMBER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send never called
+}
+
+case "a redelivery of a welcome that worked does not comment again" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-4"])
+	let body = Bytes.fromUtf8(
+		"""
+		{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+		  "issue": { "number": 4, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+		"""
+	)
+	let first <- api.POST("/github", h, body) by GitHub
+	let again <- api.POST("/github", h, body) by GitHub
+	expect first == Accepted("recorded")
+	expect again == Ok("duplicate")
+	expect Fetch.send called 2 times
+	expect Logger.info called with msg == "welcome for w-4 already done or in progress"
+}
+
+case "a refused comment is recorded as failed, and a redelivery retries it" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-5"])
+	let body = Bytes.fromUtf8(
+		"""
+		{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+		  "issue": { "number": 5, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+		"""
+	)
+	let _ <- api.POST("/github", h, body) by GitHub
+	let failed <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-5'", [])
+	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403\"}"))
+	expect Logger.error called once with msg == "could not welcome newcomer on bynk-lang/github-hooks-sandbox#5: GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403"
+	let _ <- api.POST("/github", h, body) by GitHub
+	expect Fetch.send called 3 times
+	let done <- Deliveries.first("SELECT status FROM actions WHERE delivery = 'w-5'", [])
+	expect done == Ok(Some("{\"status\":\"done\"}"))
+}
+
+case "without the App's credentials, nothing is sent and the failure is recorded" {
+	env {
+		APP_CLIENT_ID = ""
+	}
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-6"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 6, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send never called
+	let row <- Deliveries.first("SELECT status FROM actions WHERE delivery = 'w-6'", [])
+	expect row == Ok(Some("{\"status\":\"failed\"}"))
+}

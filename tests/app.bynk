@@ -1,0 +1,38 @@
+// The GitHub App's JWT, and the RSA key path, with a key pair made for these
+// tests only (never a real App's key).
+suite github.app
+
+case "the signing input is a JWT header and claims, base64url" {
+	let input = jwtSigningInput("Iv1.testclient", Instant.fromEpochMillis(1700000000000))
+	let parts = input.split(".")
+	expect parts.length() == 2
+	let Some(header) = parts
+		.get(0)
+		.andThen((h) => Bytes.fromBase64Url(h))
+		.andThen((b) => b.decodeUtf8()) else {
+		expect false
+	}
+	let Some(claims) = parts
+		.get(1)
+		.andThen((c) => Bytes.fromBase64Url(c))
+		.andThen((b) => b.decodeUtf8()) else {
+		expect false
+	}
+	expect header == "{\"alg\":\"RS256\",\"typ\":\"JWT\"}"
+	let Ok(c) = Json.decode[JwtClaims](claims) else {
+		expect false
+	}
+	expect c.iat == 1699999940
+	expect c.exp == 1700000540
+	expect c.iss == "Iv1.testclient"
+}
+
+case "a stored key reads with or without line breaks" {
+	expect pkcs8(
+		"MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCjTkIscmyAn4IqcxYPwZw2YKl/4dAtECW0Hni9+F7y9WWfFiuznUq0QxKoGde0NaUwt7MQQVUss3KEXwS6n1WZ/KKvGrv49iFSoEcs4d9q5iMMTc+d59eoXOGVaeR0HQVmDUOMCNQkZNTrFe0ZqZ54bsH2mL2+TffuPGQHEcwObzp9RxRRw91AR0Sob4GvU1DuZ6j/1jMu/gXCWa9pxB767lYyILc2rulLDZ/VvrIUur5sjCgVmEJyHIc36hnv6K2yrERZgp8p4XINBvhLgu9GZhMowsfJmvAsW6h5sghX5yee7miNzMIewG3HMsLLw0dXhgvvrj66rn1fszhMVYDdAgMBAAECggEAMRjstT87ltoeANQz/E25wPGD1FJYS8wQgdwtcfPz2/jichdw0SIHnTWTLN4EJ4Z/YSvBlrAFwxg6ZEjK+66+xjqZ0KppfDrHnvdYHsrT6GhDfkYAlxlmkZRHMCwzhqNZBasUNUxMN5rnFryzWaVQ4yVthE28sjPvx/z5F9UGdAoK4ZufXEju3Y+fhbmjTZv0eJUzelwy6x93bHX8SYVKnK//DV9bAA3jOuUfgnfmER7YP6/ZjVn+sX4j9alKklnFr/D3Luce1R4DjkAryUkn4K+zZ1ZBT34ICDg8My2w3twHOXfcdopKZrxoheXeLJ60zl03bMElG6myE66nbixZQwKBgQDRQTE46uTS3H1rITBzucQovsa2sIfJJyVwD8xGyFn4VtYoQOhgbMhltqlERzw3LEGLmr7Bag1QbfNSAUMgzzasEgI8nnoqM3XF2ynEiZENnjobIAhVZz/CtKUOJz6YQHKTJ5Bweqr2ZS9JW91jxctDjiB7HmrKSxFjFvsINllZIwKBgQDHyVj4hqdkKY/tdFcIM0VRo3SkEu8OySvQmbYwdp9Y9IYZseotVj+Fz4r1vs+Y6g9HJWVDG0+lgL4pjiDVmPn8Jf+4rBgVfWB71t4KKzY2yV3q9oldg80cCpC6+uojRAB7vCEeeB0jglZ71gsSbO4q13KtkGChrBp1dG/HTXxd/wKBgG20pxC3HYZrMJnUyakycGQIOPgYrufHzTnmHmvRqFGpfReXh/zdq2agEDgKvMgUPLzrQSz348kSC+onXUE7QeeOfXu4fkXXutwjXc97a//ev4nvDk9wFR6IRKyZ6Jg72ZXKvVArD6ykOdlU/0nKrhlZzy+dL9Gk75Wqu6t/ivJPAoGAdppngRKfKO0rjnH0gN+/FRoOUqES3ho7Mpkt+VNSgcKYIYTnWobLKyrsebsPDt5Ut43Rsaby/3OQcKb5gxRPw4rjZsRzf75wmtQR+MNyac/dO3GkVqm6CB2VkgsHGGx0RQCIQMhZtAzaPqXw6L1WHoTMhZEibJf5FSVMfmrXnA0CgYBShL5u8hG78qE3HAHnZXbVweGygCWNhMaYs862y3SsTOlvFiTXzRpcfyT7WHIi9pAJC0W0SwOlFRF5q9EsK3ygq0V+QUpdfPjwEdG5rY2EMKbKCYmynw4VxZjAl9rmsA+4qDMh7f25Wi2Bx4wSXt6nSoyDG6bhrmo7noxmGGTKdA=="
+	).isSome()
+	expect pkcs8(
+		"MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCjTkIscmyAn4Iq\ncxYPwZw2YKl/4dAtECW0Hni9+F7y9WWfFiuznUq0QxKoGde0NaUwt7MQQVUss3KEXwS6n1WZ/KKvGrv49iFSoEcs4d9q5iMMTc+d59eoXOGVaeR0HQVmDUOMCNQkZNTrFe0ZqZ54bsH2mL2+TffuPGQHEcwObzp9RxRRw91AR0Sob4GvU1DuZ6j/1jMu/gXCWa9pxB767lYyILc2rulLDZ/VvrIUur5sjCgVmEJyHIc36hnv6K2yrERZgp8p4XINBvhLgu9GZhMowsfJmvAsW6h5sghX5yee7miNzMIewG3HMsLLw0dXhgvvrj66rn1fszhMVYDdAgMBAAECggEAMRjstT87ltoeANQz/E25wPGD1FJYS8wQgdwtcfPz2/jichdw0SIHnTWTLN4EJ4Z/YSvBlrAFwxg6ZEjK+66+xjqZ0KppfDrHnvdYHsrT6GhDfkYAlxlmkZRHMCwzhqNZBasUNUxMN5rnFryzWaVQ4yVthE28sjPvx/z5F9UGdAoK4ZufXEju3Y+fhbmjTZv0eJUzelwy6x93bHX8SYVKnK//DV9bAA3jOuUfgnfmER7YP6/ZjVn+sX4j9alKklnFr/D3Luce1R4DjkAryUkn4K+zZ1ZBT34ICDg8My2w3twHOXfcdopKZrxoheXeLJ60zl03bMElG6myE66nbixZQwKBgQDRQTE46uTS3H1rITBzucQovsa2sIfJJyVwD8xGyFn4VtYoQOhgbMhltqlERzw3LEGLmr7Bag1QbfNSAUMgzzasEgI8nnoqM3XF2ynEiZENnjobIAhVZz/CtKUOJz6YQHKTJ5Bweqr2ZS9JW91jxctDjiB7HmrKSxFjFvsINllZIwKBgQDHyVj4hqdkKY/tdFcIM0VRo3SkEu8OySvQmbYwdp9Y9IYZseotVj+Fz4r1vs+Y6g9HJWVDG0+lgL4pjiDVmPn8Jf+4rBgVfWB71t4KKzY2yV3q9oldg80cCpC6+uojRAB7vCEeeB0jglZ71gsSbO4q13KtkGChrBp1dG/HTXxd/wKBgG20pxC3HYZrMJnUyakycGQIOPgYrufHzTnmHmvRqFGpfReXh/zdq2agEDgKvMgUPLzrQSz348kSC+onXUE7QeeOfXu4fkXXutwjXc97a//ev4nvDk9wFR6IRKyZ6Jg72ZXKvVArD6ykOdlU/0nKrhlZzy+dL9Gk75Wqu6t/ivJPAoGAdppngRKfKO0rjnH0gN+/FRoOUqES3ho7Mpkt+VNSgcKYIYTnWobLKyrsebsPDt5Ut43Rsaby/3OQcKb5gxRPw4rjZsRzf75wmtQR+MNyac/dO3GkVqm6CB2VkgsHGGx0RQCIQMhZtAzaPqXw6L1WHoTMhZEibJf5FSVMfmrXnA0CgYBShL5u8hG78qE3HAHnZXbVweGygCWNhMaYs862y3SsTOlvFiTXzRpcfyT7WHIi9pAJC0W0SwOlFRF5q9EsK3ygq0V+QUpdfPjwEdG5rY2EMKbKCYmynw4VxZjAl9rmsA+4qDMh7f25Wi2Bx4wSXt6nSoyDG6bhrmo7noxmGGTKdA=="
+	).isSome()
+	expect pkcs8("not base64!") == None
+}
