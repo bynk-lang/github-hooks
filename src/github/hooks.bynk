@@ -111,8 +111,11 @@ service api from http {
 		day: Day
 	) -> Effect[HttpResult[Digest]] by reader: Reader given Deliveries, Logger {
 		let Some(range) = rangeOf(day) else { BadRequest("\(day) is not a date") }
-		// `received_at` is written in `toIso()`'s format, so the range compares as
-		// text, in time order, and can use the time index.
+		// `received_at` defaults to strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
+		// three-digit milliseconds, so the range compares as text, in time order,
+		// and uses the time index. The bound depends on the two formats matching:
+		// change either and the digest's day-boundary test should fail.
 		let Ok(rows) <- Deliveries.all(
 			"""
 			SELECT repo, event, action, count(*) AS deliveries
