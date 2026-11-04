@@ -133,12 +133,10 @@ case "the allow-list matches whole names, whatever the case" {
 }
 
 case "a skipped welcome says why, and other deliveries say nothing" {
-	let member = Bytes.fromUtf8(
-		"""
-		{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
-		  "issue": { "number": 1, "user": { "login": "Regular" }, "author_association": "MEMBER" } }
-		"""
-	)
+	let member = Bytes.fromUtf8("""
+	{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
+	  "issue": { "number": 1, "user": { "login": "Regular" }, "author_association": "MEMBER" } }
+	""")
 	let bot = Bytes.fromUtf8(
 		"""
 		{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
@@ -181,7 +179,11 @@ case "a skipped welcome says why, and other deliveries say nothing" {
 	let Ok(dp) = read(Some("push"), Some("p"), member) else {
 		expect false
 	}
-	expect skipReason(dm, member, FIRST_TIMERS) == Some("Regular is MEMBER, not in WELCOME_ASSOCIATIONS (FIRST_TIMER,FIRST_TIME_CONTRIBUTOR)")
+	expect skipReason(
+		dm,
+		member,
+		FIRST_TIMERS
+	) == Some("Regular is MEMBER, not in WELCOME_ASSOCIATIONS (FIRST_TIMER,FIRST_TIME_CONTRIBUTOR)")
 	expect skipReason(db, bot, FIRST_TIMERS) == Some("renovate[bot] is a bot")
 	expect skipReason(du, uninstalled, FIRST_TIMERS) == Some("no installation in the payload")
 	expect skipReason(dx, malformed, FIRST_TIMERS) is Some
