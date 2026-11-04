@@ -1,5 +1,9 @@
-// The GitHub App's JWT, and the RSA key path, with a key pair made for these
-// tests only (never a real App's key).
+// The GitHub App's JWT, and the RSA key path.
+//
+// TEST-ONLY KEY: the RSA private key below was generated for these tests with
+// `openssl genpkey`, has never belonged to any GitHub App, and grants nothing.
+// The same key (and its public half) is in tests/bot.bynk; rotate both
+// together. One shared copy waits on suite fixtures in a Bynk release.
 suite github.app
 
 case "the signing input is a JWT header and claims, base64url" {

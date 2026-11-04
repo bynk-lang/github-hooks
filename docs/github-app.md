@@ -157,7 +157,27 @@ seconds the App comments with the welcome from `embeds/welcome.md`, as
   ```
 
 - a failed welcome is retried by redelivering its delivery from the App's
-  **Advanced** tab. A welcome that worked is never repeated.
+  **Advanced** tab. A welcome that worked is never repeated, and one left
+  half-done (the Worker stopped mid-action) can be retried after 10 minutes.
+
+**Who is welcomed, exactly.** A person is welcomed at most once per repository
+(the `welcomed` table), on an opened issue or pull request whose
+`author_association` is in `WELCOME_ASSOCIATIONS`. GitHub's associations are
+about commits, which has two consequences:
+
+- **Pull requests:** GitHub reports `FIRST_TIME_CONTRIBUTOR` on every pull
+  request until one is merged; the `welcomed` table is what stops a second
+  welcome.
+- **Issues:** someone who has never committed to the repository is likely
+  reported as `NONE`, so with the default associations most first issues are
+  not welcomed. Adding `NONE` to `WELCOME_ASSOCIATIONS` welcomes each such
+  person once, on the first issue or pull request the service sees from them.
+  Check real payloads in the sandbox before choosing.
+
+**Permissions changed?** A token is minted with the installation's permissions
+at that moment and cached for up to 55 minutes. If GitHub refuses a comment
+with `401` or `403`, the cached token is dropped and the comment retried once
+with a fresh one, so approving write access takes effect immediately.
 
 **Widening it.** When it works in the sandbox, remove `WELCOME_ASSOCIATIONS`
 (back to first-timers only) and add repositories to `ACTION_REPOS`, then

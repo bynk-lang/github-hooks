@@ -17,6 +17,11 @@ All notable changes to github-hooks. The format follows
   - `Bot` runs after the delivery is answered (`~>`), and records each action in
     the new `actions` table (migration `0003`), so a redelivery retries a
     failed action and repeats nothing that worked.
+  - A person is welcomed at most once per repository (a `welcomed` table),
+    since GitHub reports `FIRST_TIME_CONTRIBUTOR` on every pull request until
+    one is merged.
+  - A refused comment (`401`/`403`) drops the cached token and retries once
+    with a fresh one; a claim left `started` for 10 minutes can be retried.
   - `WELCOME_ASSOCIATIONS` widens who is welcomed, for testing in a sandbox.
   - Setup is in `docs/github-app.md`, step 7.
 

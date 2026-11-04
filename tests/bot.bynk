@@ -1,5 +1,10 @@
+// TEST-ONLY KEY: APP_PRIVATE_KEY below (and the public key in the JWT case)
+// was generated for these tests with `openssl genpkey`, has never belonged to
+// any GitHub App, and grants nothing. The same key is in tests/app.bynk; rotate
+// both together. One shared copy waits on suite fixtures in a Bynk release.
+//
 // Phase 3 end to end, through the webhook: the delivery is recorded, then the
-// bot reacts. Signing is real (a key pair made for these tests only), D1 is
+// bot reacts. Signing is real (with that test key), D1 is
 // in-memory SQLite with the migrations applied, Tokens is the in-memory KV
 // double, and Fetch is stubbed: first the token exchange, then the comment.
 suite github.hooks
@@ -178,8 +183,27 @@ case "a redelivery of a welcome that worked does not comment again" {
 	expect Logger.info called with msg == "welcome for w-4 already done or in progress"
 }
 
-case "a refused comment is recorded as failed, and a redelivery retries it" {
-	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+case "a refused comment evicts the token and retries once with a fresh one" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_fresh\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-fresh"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 11, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send called 4 times
+	expect Tokens.delete called once with key == "installation:42"
+	expect Fetch.send called with req.authorization == Some("Bearer ghs_fresh")
+	expect Logger.info called with msg == "welcomed newcomer on bynk-lang/github-hooks-sandbox#11"
+}
+
+case "a comment refused twice is recorded as failed, and a redelivery retries it" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
 	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-5"])
 	let body = Bytes.fromUtf8(
 		"""
@@ -190,11 +214,84 @@ case "a refused comment is recorded as failed, and a redelivery retries it" {
 	let _ <- api.POST("/github", h, body) by GitHub
 	let failed <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-5'", [])
 	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403\"}"))
-	expect Logger.error called once with msg == "could not welcome newcomer on bynk-lang/github-hooks-sandbox#5: GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403"
+	let released <- Deliveries.first("SELECT login FROM welcomed", [])
+	expect released == Ok(None)
 	let _ <- api.POST("/github", h, body) by GitHub
-	expect Fetch.send called 3 times
+	expect Fetch.send called 5 times
 	let done <- Deliveries.first("SELECT status FROM actions WHERE delivery = 'w-5'", [])
 	expect done == Ok(Some("{\"status\":\"done\"}"))
+}
+
+case "a person is welcomed once per repository, however many pull requests they open" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let first = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-p1"])
+	let second = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-p2"])
+	let _ <- api.POST(
+		"/github",
+		first,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 21, "user": { "login": "Newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		second,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 22, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send called 2 times
+	expect Logger.info called with msg == "newcomer was already welcomed in bynk-lang/github-hooks-sandbox; not again for #22"
+	let row <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-p2'", [])
+	expect row == Ok(Some("{\"status\":\"done\",\"detail\":\"newcomer was already welcomed in bynk-lang/github-hooks-sandbox\"}"))
+}
+
+case "a claim left started by a stopped Worker is taken over after 10 minutes" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
+	let _ <- Deliveries.run(
+		"INSERT INTO actions (delivery, action, status, at) VALUES ('w-stale', 'welcome', 'started', '2026-01-01T00:00:00.000Z')",
+		[]
+	)
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-stale"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 31, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send called 2 times
+	let done <- Deliveries.first("SELECT status FROM actions WHERE delivery = 'w-stale'", [])
+	expect done == Ok(Some("{\"status\":\"done\"}"))
+}
+
+case "a claim started moments ago is left to finish" {
+	let _ <- Deliveries.run(
+		"INSERT INTO actions (delivery, action, status) VALUES ('w-busy', 'welcome', 'started')",
+		[]
+	)
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-busy"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 32, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send never called
+	expect Logger.info called with msg == "welcome for w-busy already done or in progress"
 }
 
 case "without the App's credentials, nothing is sent and the failure is recorded" {
