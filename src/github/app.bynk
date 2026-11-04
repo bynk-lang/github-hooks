@@ -71,20 +71,42 @@ type NewComment = {
 }
 
 ---
-The part of a GitHub REST error response worth logging: GitHub answers a
-refusal with `{"message": "…", "documentation_url": "…"}`.
+The parts of a GitHub REST error response worth logging: GitHub answers a
+refusal with `{"message": "…", "documentation_url": "…"}`, and a `422` adds
+`errors`, where the useful detail is (`Validation Failed` says little on its
+own).
 ---
 type ApiError = {
 	message: String,
+	errors: Option[List[ApiErrorDetail]],
+}
+
+type ApiErrorDetail = {
+	message: Option[String],
+	code: Option[String],
 }
 
 ---
 A refused call's status, with GitHub's own `message` when its body carries one
-(`403 Resource not accessible by integration`), so the log says why.
+(`403 Resource not accessible by integration`), and any `errors` details after
+it (`422 Validation Failed (Body is too long)`), so the log says why.
 ---
 fn refusal(status: Int, body: String) -> String {
 	match Json.decode[ApiError](body) {
-		Ok(e) => "\(status) \(e.message)",
+		Ok(e) => {
+			let details = e.errors.getOrElse([]).map((d) => d.message.getOrElse(d.code.getOrElse(
+				""
+			))).filter((m) => m != "").fold("", (all, m) => if all == "" {
+				m
+			} else {
+				"\(all); \(m)"
+			})
+			if details == "" {
+				"\(status) \(e.message)"
+			} else {
+				"\(status) \(e.message) (\(details))"
+			}
+		},
 		Err(_) => "\(status)",
 	}
 }

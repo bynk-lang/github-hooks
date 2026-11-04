@@ -223,6 +223,24 @@ case "a comment refused twice is recorded as failed, and a redelivery retries it
 	expect done == Ok(Some("{\"status\":\"done\"}"))
 }
 
+case "a refused token is recorded with GitHub's message" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\", \"documentation_url\": \"https://docs.github.com/rest\"}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-t"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 6, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send called once
+	let failed <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-t'", [])
+	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused a token for installation 42: 404 Not Found\"}"))
+}
+
 case "a person is welcomed once per repository, however many pull requests they open" {
 	stub Fetch.send(_) returns each [Ok(Response { status: 201, headers: Map.empty(), body: "{\"token\": \"ghs_test\"}" }), Ok(Response { status: 201, headers: Map.empty(), body: "{}" })]
 	let first = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-p1"])

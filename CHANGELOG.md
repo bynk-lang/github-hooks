@@ -54,7 +54,8 @@ All notable changes to github-hooks. The format follows
 
 - A comment or token GitHub refuses is logged with GitHub's own message as well
   as the status (`403 Resource not accessible by integration`), so a missing
-  permission names itself.
+  permission names itself. A `422` adds GitHub's `errors` details
+  (`422 Validation Failed (Body is too long)`).
 - A skipped welcome is logged with its reason (`welcome for <delivery>
   skipped: <login> is MEMBER, not in WELCOME_ASSOCIATIONS (…)`, a bot, no
   installation, a payload that did not decode). It was silent before, so a

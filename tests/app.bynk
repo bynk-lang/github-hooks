@@ -49,3 +49,16 @@ case "a refusal carries GitHub's message when there is one" {
 	expect refusal(502, "<html>Bad gateway</html>") == "502"
 	expect refusal(404, "") == "404"
 }
+
+case "a 422 refusal names its errors" {
+	let body = """
+	{ "message": "Validation Failed",
+	  "errors": [ { "resource": "IssueComment", "code": "custom", "message": "Body is too long" },
+	              { "resource": "IssueComment", "code": "unprocessable" } ] }
+	"""
+	expect refusal(422, body) == "422 Validation Failed (Body is too long; unprocessable)"
+	expect refusal(
+		422,
+		"{\"message\": \"Validation Failed\", \"errors\": []}"
+	) == "422 Validation Failed"
+}
