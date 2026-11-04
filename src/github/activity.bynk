@@ -59,7 +59,7 @@ type Tally = {
 One day's activity, busiest first. Pushes that deleted a branch or tag are left
 out: each one arrives beside a `delete` event, which is counted instead.
 ---
-type Digest = {
+type DayDigest = {
 	day: Day,
 	total: Int,
 	tallies: List[Tally],
@@ -68,8 +68,8 @@ type Digest = {
 ---
 The digest for a day from its tallies.
 ---
-fn digest(day: Day, tallies: List[Tally]) -> Digest {
-	Digest {
+fn digest(day: Day, tallies: List[Tally]) -> DayDigest {
+	DayDigest {
 		day: day,
 		total: tallies.fold(0, (sum, t) => sum + t.deliveries),
 		tallies: tallies,

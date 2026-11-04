@@ -2,14 +2,288 @@ context github.hooks
 
 uses github.events
 uses github.activity
-consumes bynk { Logger }
-consumes bynk.cloudflare { D1 }
+uses github.app
+uses github.welcome
+consumes bynk { Logger, Secrets, Clock, Fetch }
+consumes bynk.crypto { Crypto }
+consumes bynk.cloudflare { D1, Kv }
 
 ---
 Every delivery this service has accepted, one row each, keyed by GitHub's
 delivery id. The key is what makes a redelivery harmless.
 ---
 capability Deliveries = D1
+
+---
+Installation tokens, cached for `TOKEN_CACHE_SECONDS` so a burst of deliveries
+mints one token, not one each. Keyed `installation:<id>`. A token here is a
+credential: it expires within the hour and is never logged.
+---
+capability Tokens = Kv
+
+---
+Acting as the GitHub App. `token` gives an installation token: from `Tokens`
+when one is cached, otherwise by signing a JWT with the App's private key
+(`APP_PRIVATE_KEY`, base64 PKCS#8) as `APP_CLIENT_ID` and exchanging it with
+GitHub. Kept separate from what the service does with the token, so it can move
+into a first-party package unchanged.
+---
+capability AppAuth {
+	fn token(installation: Int) -> Effect[Result[String, String]]
+	fn forget(installation: Int) -> Effect[()]
+}
+
+provides AppAuth = GitHubAppAuth given Secrets, Clock, Crypto, Fetch, Tokens {
+	fn token(installation: Int) -> Effect[Result[String, String]] {
+		let key = "installation:\(installation)"
+		let cached <- Tokens.get(key)
+		match cached {
+			Some(t) => Effect.pure(Ok(t)),
+			None => {
+				// An empty value is as unusable as a missing one.
+				let clientIdSet <- Secrets.get("APP_CLIENT_ID")
+				let Some(clientId) = present(clientIdSet) else {
+					Effect.pure(Err("APP_CLIENT_ID is not set"))
+				}
+				let keySet <- Secrets.get("APP_PRIVATE_KEY")
+				let Some(stored) = present(keySet) else {
+					Effect.pure(Err("APP_PRIVATE_KEY is not set"))
+				}
+				let Some(der) = pkcs8(stored) else {
+					Effect.pure(Err("APP_PRIVATE_KEY is not base64"))
+				}
+				let Ok(signingKey) <- Crypto.importSigningKey(RsaPkcs1Sha256, der) else match {
+					Err(_) => Effect.pure(Err("APP_PRIVATE_KEY is not an RSA PKCS#8 key")),
+				}
+				let now <- Clock.now()
+				let input = jwtSigningInput(clientId, now)
+				let signature <- Crypto.sign(signingKey, Bytes.fromUtf8(input))
+				let jwt = "\(input).\(signature.toBase64Url())"
+				let sent <- Fetch.send(Request {
+					method: Post,
+					url: "https://api.github.com/app/installations/\(installation)/access_tokens",
+					contentType: None,
+					authorization: Some("Bearer \(jwt)"),
+					headers: apiHeaders(),
+					body: None,
+				})
+				let Ok(res) = sent else {
+					Effect.pure(Err("GitHub could not be reached for a token"))
+				}
+				let true = res.status == 201 else {
+					Effect.pure(Err("GitHub refused a token for installation \(installation): \(res.status)"))
+				}
+				let Ok(t) = Json.decode[InstallationToken](res.body) else {
+					Effect.pure(Err("GitHub's token response did not decode"))
+				}
+				let _ <- Tokens.putTtl(key, t.token, TOKEN_CACHE_SECONDS)
+				Effect.pure(Ok(t.token))
+			},
+		}
+	}
+
+	// Drop a cached token GitHub has refused, so the next call mints a fresh one
+	// carrying the installation's current permissions.
+	fn forget(installation: Int) -> Effect[()] {
+		Tokens.delete("installation:\(installation)")
+	}
+}
+
+---
+One authenticated POST to GitHub's REST API, answering the status GitHub gave.
+Kept apart from `GitHubApi` so `comment` can post again with a fresh token.
+---
+capability GitHubHttp {
+	fn post(token: String, url: String, body: String) -> Effect[Result[Int, String]]
+}
+
+provides GitHubHttp = FetchGitHubHttp given Fetch {
+	fn post(token: String, url: String, body: String) -> Effect[Result[Int, String]] {
+		let sent <- Fetch.send(Request {
+			method: Post,
+			url: url,
+			contentType: Some("application/json"),
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: Some(body),
+		})
+		match sent {
+			Ok(res) => Effect.pure(Ok(res.status)),
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+	}
+}
+
+---
+The GitHub REST calls the service makes, each as the App's installation.
+---
+capability GitHubApi {
+	fn comment(
+		installation: Int,
+		repo: String,
+		number: Int,
+		body: String
+	) -> Effect[Result[(), String]]
+}
+
+provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
+	// An installation token carries the permissions the installation had when it
+	// was minted. A 401 or 403 may only mean the cached token predates a change
+	// (write access just approved, a token revoked), so drop it and try once more
+	// with a fresh one before giving up.
+	fn comment(
+		installation: Int,
+		repo: String,
+		number: Int,
+		body: String
+	) -> Effect[Result[(), String]] {
+		let url = "https://api.github.com/repos/\(repo)/issues/\(number)/comments"
+		let payload = Json.encode(NewComment { body: body })
+		let Ok(token) <- AppAuth.token(installation) else match {
+			Err(why) => Effect.pure(Err(why)),
+		}
+		let Ok(status) <- GitHubHttp.post(token, url, payload) else match {
+			Err(why) => Effect.pure(Err(why)),
+		}
+		let true = status == 401 || status == 403 else {
+			Effect.pure(answered(status, repo, number))
+		}
+		let _ <- AppAuth.forget(installation)
+		let Ok(fresh) <- AppAuth.token(installation) else match {
+			Err(why) => Effect.pure(Err(why)),
+		}
+		let Ok(again) <- GitHubHttp.post(fresh, url, payload) else match {
+			Err(why) => Effect.pure(Err(why)),
+		}
+		Effect.pure(answered(again, repo, number))
+	}
+}
+
+fn answered(status: Int, repo: String, number: Int) -> Result[(), String] {
+	if status == 201 {
+		Ok(())
+	} else {
+		Err("GitHub refused the comment on \(repo)#\(number): \(status)")
+	}
+}
+
+---
+What the service does in response to a delivery, after answering it. Each
+action runs at most once per delivery: it is claimed in `actions` first, and a
+claim succeeds only when the action has never run or last failed. So a
+redelivery of a failed action retries it, and a redelivery of one that worked
+does nothing. An action runs only in a repository `ACTION_REPOS` allows.
+---
+capability Bot {
+	fn react(event: String, delivery: String, body: Bytes) -> Effect[()]
+}
+
+provides Bot = GitHubBot given GitHubApi, Secrets, Deliveries, Logger {
+	// The delivery arrives as its parts, built-in types only, and is read again
+	// here: a capability operation that takes a commons type emits a test module
+	// that does not compile (Bynk v0.492.1).
+	fn react(event: String, delivery: String, body: Bytes) -> Effect[()] {
+		let Ok(d) = read(Some(event), Some(delivery), body) else { Effect.pure(()) }
+		// WELCOME_ASSOCIATIONS widens who is welcomed, to test in a sandbox where
+		// every author is a member (`FIRST_TIMER,FIRST_TIME_CONTRIBUTOR,OWNER`).
+		let associations <- Secrets.get("WELCOME_ASSOCIATIONS")
+		let welcomed = present(associations).getOrElse(FIRST_TIMERS)
+		let Some(w) = welcomeAmong(d, body, welcomed) else { Effect.pure(()) }
+		let allowed <- Secrets.get("ACTION_REPOS")
+		let true = allows(allowed, w.repo) else {
+			Logger.info("welcome for \(w.repo)#\(w.number) skipped: not in ACTION_REPOS")
+		}
+		// Claim the action for this delivery. A row that failed, or was left
+		// `started` more than 10 minutes ago (the Worker stopped mid-action), can be
+		// claimed again; a duplicate comment is then possible only if a post took
+		// longer than that.
+		let Ok(claim) <- Deliveries.run(
+			"""
+			INSERT INTO actions (delivery, action, status) VALUES (?1, 'welcome', 'started')
+			ON CONFLICT (delivery, action) DO UPDATE
+			  SET status = 'started', detail = NULL, at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			  WHERE actions.status = 'failed'
+			     OR (actions.status = 'started'
+			         AND actions.at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 minutes'))
+			""",
+			[Text(w.delivery)]
+		) else match {
+			Err(e) => Logger.error("could not claim the welcome for \(w.delivery): \(sqlError(e))"),
+		}
+		let true = claim.changes == 1 else {
+			Logger.info("welcome for \(w.delivery) already done or in progress")
+		}
+		// A person is welcomed once per repository: GitHub keeps reporting
+		// FIRST_TIME_CONTRIBUTOR on every pull request until one is merged. The
+		// claim is released if the comment fails, so a retry can welcome them.
+		let Ok(person) <- Deliveries.run(
+			"""
+			INSERT INTO welcomed (repo, login, delivery) VALUES (lower(?1), lower(?2), ?3)
+			ON CONFLICT (repo, login) DO UPDATE SET delivery = excluded.delivery
+			  WHERE welcomed.delivery = excluded.delivery
+			""",
+			[Text(w.repo), Text(w.login), Text(w.delivery)]
+		) else match {
+			Err(e) => Logger.error("could not claim the welcome of \(w.login): \(sqlError(e))"),
+		}
+		let already = person.changes == 0
+		let skipped: Result[(), String] = Ok(())
+		let posted <- if already {
+			Effect.pure(skipped)
+		} else {
+			GitHubApi.comment(w.installation, w.repo, w.number, message(w))
+		}
+		let status = match posted {
+			Ok(_) => "done",
+			Err(_) => "failed",
+		}
+		let detail = match posted {
+			Ok(_) => if already {
+				Text("\(w.login) was already welcomed in \(w.repo)")
+			} else {
+				Null
+			},
+			Err(why) => Text(why),
+		}
+		let nothingReleased: Result[SqlRun, SqlError] = Ok(SqlRun { changes: 0, lastRowId: 0 })
+		let release <- match posted {
+			Ok(_) => Effect.pure(nothingReleased),
+			Err(_) => Deliveries.run(
+				"DELETE FROM welcomed WHERE repo = lower(?1) AND login = lower(?2) AND delivery = ?3",
+				[Text(w.repo), Text(w.login), Text(w.delivery)]
+			),
+		}
+		let recorded <- Deliveries.run(
+			"""
+			UPDATE actions SET status = ?2, detail = ?3, at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			WHERE delivery = ?1 AND action = 'welcome'
+			""",
+			[Text(w.delivery), Text(status), detail]
+		)
+		let _ <- match recorded {
+			Ok(_) => Effect.pure(()),
+			Err(e) => Logger.error(
+				"could not record the welcome for \(w.delivery): \(sqlError(e))"
+			),
+		}
+		let _ <- match release {
+			Ok(_) => Effect.pure(()),
+			Err(e) => Logger.error("could not release the welcome of \(w.login): \(sqlError(e))"),
+		}
+		match posted {
+			Ok(_) => if already {
+				Logger.info(
+					"\(w.login) was already welcomed in \(w.repo); not again for #\(w.number)"
+				)
+			} else {
+				Logger.info("welcomed \(w.login) on \(w.repo)#\(w.number)")
+			},
+			Err(why) => Logger.error(
+				"could not welcome \(w.login) on \(w.repo)#\(w.number): \(why)"
+			),
+		}
+	}
+}
 
 ---
 The `bynk-lang` GitHub App. GitHub signs every delivery with HMAC-SHA256 of the
@@ -109,7 +383,7 @@ service api from http {
 	// One UTC day's activity, counted by repository, event and action.
 	on GET("/digest/:day") (
 		day: Day
-	) -> Effect[HttpResult[Digest]] by reader: Reader given Deliveries, Logger {
+	) -> Effect[HttpResult[DayDigest]] by reader: Reader given Deliveries, Logger {
 		let Some(range) = rangeOf(day) else { BadRequest("\(day) is not a date") }
 		// `received_at` defaults to strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
@@ -148,7 +422,7 @@ service api from http {
 	on POST("/github") (
 		headers: RequestHeaders,
 		body: Bytes
-	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger {
+	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot {
 		let Ok(d) = read(
 			headers.get("X-GitHub-Event"),
 			headers.get("X-GitHub-Delivery"),
@@ -184,6 +458,10 @@ service api from http {
 				ServerError("could not record the delivery")
 			},
 		}
+		// Act after answering: GitHub waits at most 10 seconds for the reply.
+		// A redelivery reacts too, so a failed action is retried; one that
+		// worked is not repeated (see `Bot`).
+		~> Bot.react(d.event, d.id, body)
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
 			Ok("duplicate")

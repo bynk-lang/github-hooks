@@ -19,7 +19,7 @@ It is two things at once:
 |---|---|---|
 | 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
 | 2 | Read API over recorded activity, daily digest, retention | read API and digest in progress ([#6](https://github.com/bynk-lang/github-hooks/issues/6)); retention after the load test |
-| 3 | Act on events through the App's installation token | planned |
+| 3 | Act on events through the App's installation token | welcoming first-time contributors, in the sandbox ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
 
 ## How it works
 
@@ -135,7 +135,10 @@ never appear in a process's arguments.
 ```text
 src/github/events.bynk   commons github.events: payload types and pure decoding
 src/github/activity.bynk commons github.activity: read API types and the digest
-src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, routes)
+src/github/app.bynk      commons github.app: the App's JWT and GitHub API shapes
+src/github/welcome.bynk  commons github.welcome: who is welcomed, and with what
+src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, KV, AppAuth, Bot, routes)
+embeds/welcome.md        the welcome comment's text
 migrations/              D1 schema, applied in tests, by bynk dev and by bynk deploy
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker

@@ -1,0 +1,116 @@
+commons github.welcome
+
+uses github.events
+
+---
+The welcome a first-time contributor's issue or pull request gets: which
+thread to comment on, through which installation, for whom.
+---
+type Welcome = {
+	delivery: String,
+	repo: String,
+	number: Int,
+	login: String,
+	installation: Int,
+	kind: ThreadKind,
+}
+
+type ThreadKind = enum { Issue, PullRequest }
+
+---
+The parts of an `issues` or `pull_request` payload a welcome needs. GitHub's
+`author_association` says how the author relates to the repository.
+---
+type Thread = {
+	number: Int,
+	user: Login,
+	author_association: String,
+}
+
+type Login = {
+	login: String,
+}
+
+type Opened = {
+	issue: Option[Thread],
+	pull_request: Option[Thread],
+}
+
+---
+The author associations that earn a welcome by default: `FIRST_TIMER` (a first
+contribution anywhere on GitHub) and `FIRST_TIME_CONTRIBUTOR` (a first in this
+repository).
+---
+const FIRST_TIMERS: String = "FIRST_TIMER,FIRST_TIME_CONTRIBUTOR"
+
+---
+Whether a delivery deserves a welcome, and if so which: an opened issue or pull
+request from a first-timer (`FIRST_TIMERS`), never a bot. Pure, so every case
+is a unit test.
+---
+fn welcomeFor(d: Delivery, body: Bytes) -> Option[Welcome] {
+	welcomeAmong(d, body, FIRST_TIMERS)
+}
+
+---
+`welcomeFor` with the welcomed author associations given as a comma-separated
+list, so a sandbox whose every author is a member can widen it.
+---
+fn welcomeAmong(d: Delivery, body: Bytes, associations: String) -> Option[Welcome] {
+	let Some("opened") = d.action else { None }
+	let Some(repo) = d.repo else { None }
+	let Some(installation) = d.installation else { None }
+	let Some(text) = body.decodeUtf8() else { None }
+	let Ok(o) = Json.decode[Opened](text) else { None }
+	let Some(at) = threadOf(d.event, o) else { None }
+	let true = qualifies(at.thread, associations) else { None }
+	Some(Welcome {
+		delivery: d.id,
+		repo: repo,
+		number: at.thread.number,
+		login: at.thread.user.login,
+		installation: installation,
+		kind: at.kind,
+	})
+}
+
+type ThreadAt = {
+	thread: Thread,
+	kind: ThreadKind,
+}
+
+fn threadOf(event: String, o: Opened) -> Option[ThreadAt] {
+	match event {
+		"issues" => o.issue.map((t) => ThreadAt { thread: t, kind: Issue }),
+		"pull_request" => o.pull_request.map((t) => ThreadAt { thread: t, kind: PullRequest }),
+		_ => None,
+	}
+}
+
+fn qualifies(t: Thread, associations: String) -> Bool {
+	let listed = associations.split(",").any((a) => a.trim().toUpper() == t.author_association)
+	listed && !t.user.login.endsWith("[bot]")
+}
+
+embed welcomeTemplate = "embeds/welcome.md"
+
+---
+The comment a welcome posts, from `embeds/welcome.md`.
+---
+fn message(w: Welcome) -> String {
+	let kind = match w.kind {
+		Issue => "issue",
+		PullRequest => "pull request",
+	}
+	welcomeTemplate.replace("{login}", w.login).replace("{kind}", kind)
+}
+
+---
+Whether actions may run in a repository: `ACTION_REPOS` is a comma-separated
+allow-list of `owner/name`, matched whatever the case, as GitHub names are.
+Unset or empty allows none, so a deployment acts nowhere until told where.
+---
+fn allows(list: Option[String], repo: String) -> Bool {
+	let Some(names) = list else { false }
+	names.split(",").any((n) => n.trim().toLower() == repo.toLower())
+}

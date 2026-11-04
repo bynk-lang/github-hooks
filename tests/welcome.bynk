@@ -1,0 +1,133 @@
+suite github.welcome
+
+case "a first-timer's opened issue is welcomed" {
+	let Ok(d) = read(
+		Some("issues"),
+		Some("d-1"),
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" },
+			  "installation": { "id": 42 },
+			  "issue": { "number": 7, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) else {
+		expect false
+	}
+	let Some(w) = welcomeFor(
+		d,
+		Bytes.fromUtf8(
+			"""
+			{ "issue": { "number": 7, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) else {
+		expect false
+	}
+	expect w.repo == "bynk-lang/github-hooks-sandbox"
+	expect w.number == 7
+	expect w.login == "newcomer"
+	expect w.installation == 42
+	expect w.kind == Issue
+	expect w.delivery == "d-1"
+}
+
+case "a first pull request in the repository is welcomed" {
+	let body = Bytes.fromUtf8(
+		"""
+		{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
+		  "pull_request": { "number": 3, "user": { "login": "pr-author" }, "author_association": "FIRST_TIME_CONTRIBUTOR" } }
+		"""
+	)
+	let Ok(d) = read(Some("pull_request"), Some("d-2"), body) else {
+		expect false
+	}
+	let Some(w) = welcomeFor(d, body) else {
+		expect false
+	}
+	expect w.kind == PullRequest
+	expect w.number == 3
+}
+
+case "contributors, bots and other actions get no welcome" {
+	let known = Bytes.fromUtf8(
+		"""
+		{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
+		  "issue": { "number": 1, "user": { "login": "regular" }, "author_association": "CONTRIBUTOR" } }
+		"""
+	)
+	let bot = Bytes.fromUtf8(
+		"""
+		{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
+		  "issue": { "number": 2, "user": { "login": "renovate[bot]" }, "author_association": "FIRST_TIMER" } }
+		"""
+	)
+	let closed = Bytes.fromUtf8(
+		"""
+		{ "action": "closed", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
+		  "issue": { "number": 3, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+		"""
+	)
+	let Ok(dk) = read(Some("issues"), Some("k"), known) else {
+		expect false
+	}
+	let Ok(db) = read(Some("issues"), Some("b"), bot) else {
+		expect false
+	}
+	let Ok(dc) = read(Some("issues"), Some("c"), closed) else {
+		expect false
+	}
+	let Ok(dp) = read(Some("push"), Some("p"), known) else {
+		expect false
+	}
+	expect welcomeFor(dk, known) == None
+	expect welcomeFor(db, bot) == None
+	expect welcomeFor(dc, closed) == None
+	expect welcomeFor(dp, known) == None
+}
+
+case "the welcomed associations can be widened, for a sandbox" {
+	let body = Bytes.fromUtf8("""
+	{ "action": "opened", "repository": { "full_name": "o/r" }, "installation": { "id": 1 },
+	  "issue": { "number": 1, "user": { "login": "owner" }, "author_association": "OWNER" } }
+	""")
+	let Ok(d) = read(Some("issues"), Some("d"), body) else {
+		expect false
+	}
+	expect welcomeFor(d, body) == None
+	expect welcomeAmong(d, body, "first_timer, owner").isSome()
+}
+
+case "a delivery without an installation gets no welcome" {
+	let body = Bytes.fromUtf8(
+		"""
+		{ "action": "opened", "repository": { "full_name": "o/r" },
+		  "issue": { "number": 1, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+		"""
+	)
+	let Ok(d) = read(Some("issues"), Some("d"), body) else {
+		expect false
+	}
+	expect welcomeFor(d, body) == None
+}
+
+case "the message names the author and what they opened" {
+	let w = Welcome {
+		delivery: "d",
+		repo: "o/r",
+		number: 1,
+		login: "newcomer",
+		installation: 1,
+		kind: PullRequest,
+	}
+	expect message(w).startsWith("Hello @newcomer, and thank you for your first pull request here!")
+	expect !message(w).contains("{login}")
+}
+
+case "the allow-list matches whole names, whatever the case" {
+	expect allows(Some("bynk-lang/github-hooks-sandbox"), "bynk-lang/github-hooks-sandbox")
+	expect allows(Some("a/b, Bynk-Lang/GitHub-Hooks-Sandbox"), "bynk-lang/github-hooks-sandbox")
+	expect !allows(Some("bynk-lang/github-hooks-sandbox"), "bynk-lang/bynk")
+	expect !allows(Some(""), "bynk-lang/bynk")
+	expect !allows(None, "bynk-lang/bynk")
+}
