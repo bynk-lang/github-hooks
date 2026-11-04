@@ -74,6 +74,31 @@ fn welcomeAmong(d: Delivery, body: Bytes, associations: String) -> Option[Welcom
 	})
 }
 
+---
+Why an opened issue or pull request got no welcome, for the log, or `None` for
+a delivery that was never a candidate (another event or action). It retraces
+`welcomeAmong`'s steps rather than replacing them, so the decision stays a
+plain `Option` and every reason is a unit test. The associations are shown as
+the Worker sees them, so a setting that didn't reach it is visible.
+---
+fn skipReason(d: Delivery, body: Bytes, associations: String) -> Option[String] {
+	let Some("opened") = d.action else { None }
+	let true = d.event == "issues" || d.event == "pull_request" else { None }
+	let Some(_) = d.repo else { Some("no repository in the payload") }
+	let Some(_) = d.installation else { Some("no installation in the payload") }
+	let Some(text) = body.decodeUtf8() else { Some("the payload is not UTF-8") }
+	let Ok(o) = Json.decode[Opened](text) else match {
+		Err(e) => Some("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	let Some(at) = threadOf(d.event, o) else { Some("no \(d.event) object in the payload") }
+	let t = at.thread
+	if t.user.login.endsWith("[bot]") {
+		Some("\(t.user.login) is a bot")
+	} else {
+		Some("\(t.user.login) is \(t.author_association), not in WELCOME_ASSOCIATIONS (\(associations))")
+	}
+}
+
 type ThreadAt = {
 	thread: Thread,
 	kind: ThreadKind,

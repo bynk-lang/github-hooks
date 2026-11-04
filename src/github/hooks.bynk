@@ -188,7 +188,12 @@ provides Bot = GitHubBot given GitHubApi, Secrets, Deliveries, Logger {
 		// every author is a member (`FIRST_TIMER,FIRST_TIME_CONTRIBUTOR,OWNER`).
 		let associations <- Secrets.get("WELCOME_ASSOCIATIONS")
 		let welcomed = present(associations).getOrElse(FIRST_TIMERS)
-		let Some(w) = welcomeAmong(d, body, welcomed) else { Effect.pure(()) }
+		let Some(w) = welcomeAmong(d, body, welcomed) else {
+			match skipReason(d, body, welcomed) {
+				Some(why) => Logger.info("welcome for \(d.id) skipped: \(why)"),
+				None => Effect.pure(()),
+			}
+		}
 		let allowed <- Secrets.get("ACTION_REPOS")
 		let true = allows(allowed, w.repo) else {
 			Logger.info("welcome for \(w.repo)#\(w.number) skipped: not in ACTION_REPOS")
