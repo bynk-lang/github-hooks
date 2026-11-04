@@ -71,7 +71,7 @@ provides AppAuth = GitHubAppAuth given Secrets, Clock, Crypto, Fetch, Tokens {
 					Effect.pure(Err("GitHub could not be reached for a token"))
 				}
 				let true = res.status == 201 else {
-					Effect.pure(Err("GitHub refused a token for installation \(installation): \(res.status)"))
+					Effect.pure(Err("GitHub refused a token for installation \(installation): \(refusal(res.status, res.body))"))
 				}
 				let Ok(t) = Json.decode[InstallationToken](res.body) else {
 					Effect.pure(Err("GitHub's token response did not decode"))
@@ -90,15 +90,15 @@ provides AppAuth = GitHubAppAuth given Secrets, Clock, Crypto, Fetch, Tokens {
 }
 
 ---
-One authenticated POST to GitHub's REST API, answering the status GitHub gave.
+One authenticated POST to GitHub's REST API, answering GitHub's response.
 Kept apart from `GitHubApi` so `comment` can post again with a fresh token.
 ---
 capability GitHubHttp {
-	fn post(token: String, url: String, body: String) -> Effect[Result[Int, String]]
+	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]]
 }
 
 provides GitHubHttp = FetchGitHubHttp given Fetch {
-	fn post(token: String, url: String, body: String) -> Effect[Result[Int, String]] {
+	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]] {
 		let sent <- Fetch.send(Request {
 			method: Post,
 			url: url,
@@ -108,7 +108,7 @@ provides GitHubHttp = FetchGitHubHttp given Fetch {
 			body: Some(body),
 		})
 		match sent {
-			Ok(res) => Effect.pure(Ok(res.status)),
+			Ok(res) => Effect.pure(Ok(res)),
 			Err(_) => Effect.pure(Err("GitHub could not be reached")),
 		}
 	}
@@ -142,11 +142,11 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 		let Ok(token) <- AppAuth.token(installation) else match {
 			Err(why) => Effect.pure(Err(why)),
 		}
-		let Ok(status) <- GitHubHttp.post(token, url, payload) else match {
+		let Ok(first) <- GitHubHttp.post(token, url, payload) else match {
 			Err(why) => Effect.pure(Err(why)),
 		}
-		let true = status == 401 || status == 403 else {
-			Effect.pure(answered(status, repo, number))
+		let true = first.status == 401 || first.status == 403 else {
+			Effect.pure(answered(first, repo, number))
 		}
 		let _ <- AppAuth.forget(installation)
 		let Ok(fresh) <- AppAuth.token(installation) else match {
@@ -159,11 +159,11 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	}
 }
 
-fn answered(status: Int, repo: String, number: Int) -> Result[(), String] {
-	if status == 201 {
+fn answered(res: Response, repo: String, number: Int) -> Result[(), String] {
+	if res.status == 201 {
 		Ok(())
 	} else {
-		Err("GitHub refused the comment on \(repo)#\(number): \(status)")
+		Err("GitHub refused the comment on \(repo)#\(number): \(refusal(res.status, res.body))")
 	}
 }
 

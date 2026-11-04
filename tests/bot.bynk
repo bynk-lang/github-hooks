@@ -214,13 +214,31 @@ case "a comment refused twice is recorded as failed, and a redelivery retries it
 	)
 	let _ <- api.POST("/github", h, body) by GitHub
 	let failed <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-5'", [])
-	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403\"}"))
+	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused the comment on bynk-lang/github-hooks-sandbox#5: 403 Resource not accessible by integration\"}"))
 	let released <- Deliveries.first("SELECT login FROM welcomed", [])
 	expect released == Ok(None)
 	let _ <- api.POST("/github", h, body) by GitHub
 	expect Fetch.send called 5 times
 	let done <- Deliveries.first("SELECT status FROM actions WHERE delivery = 'w-5'", [])
 	expect done == Ok(Some("{\"status\":\"done\"}"))
+}
+
+case "a refused token is recorded with GitHub's message" {
+	stub Fetch.send(_) returns each [Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\", \"documentation_url\": \"https://docs.github.com/rest\"}" })]
+	let h = RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: w-t"])
+	let _ <- api.POST(
+		"/github",
+		h,
+		Bytes.fromUtf8(
+			"""
+			{ "action": "opened", "repository": { "full_name": "bynk-lang/github-hooks-sandbox" }, "installation": { "id": 42 },
+			  "issue": { "number": 6, "user": { "login": "newcomer" }, "author_association": "FIRST_TIMER" } }
+			"""
+		)
+	) by GitHub
+	expect Fetch.send called once
+	let failed <- Deliveries.first("SELECT status, detail FROM actions WHERE delivery = 'w-t'", [])
+	expect failed == Ok(Some("{\"status\":\"failed\",\"detail\":\"GitHub refused a token for installation 42: 404 Not Found\"}"))
 }
 
 case "a person is welcomed once per repository, however many pull requests they open" {
