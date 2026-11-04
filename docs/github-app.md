@@ -4,7 +4,7 @@ github-hooks receives events from a GitHub App rather than a plain
 organisation webhook. The App gives the service its own identity
 (`<app-name>[bot]`), permissions scoped to what it needs, and short-lived
 installation tokens for phase 3, when it starts acting on events. Its webhook is
-the same signed POST either way, so phase 1 needs only the webhook secret.
+the same signed POST either way.
 
 ## 1. Choose a webhook secret
 
@@ -14,17 +14,28 @@ openssl rand -hex 32
 
 Keep it somewhere safe: it goes into both the Worker and the App.
 
-## 2. Deploy the Worker with the secret
+## 2. Deploy the Worker with its secrets
 
 Deploy first, so the Worker is already verifying signatures when GitHub sends
-the App's first delivery:
+the App's first delivery. The Worker needs two secrets: the webhook secret, and
+`API_TOKEN_SECRET`, which signs the [read API](read-api.md)'s tokens. Both are
+declared by the code's actors, so a deploy that cannot find either one asks for
+it (or fails, without a terminal).
 
 ```sh
 printf 'APP_WEBHOOK_SECRET=%s\n' "<the secret from step 1>" > .secrets.env
+printf 'API_TOKEN_SECRET=%s\n' "$(openssl rand -hex 32)" >> .secrets.env
 bynk deploy --secrets-file .secrets.env
 ```
 
-`.secrets.env` is ignored by git. Delete it once the deploy has run.
+Keep `API_TOKEN_SECRET` somewhere safe too: `scripts/token.sh` needs it to mint
+read-API tokens. Changing it later invalidates every token minted with the old
+value.
+
+`.secrets.env` is ignored by git. Delete it once the deploy has run. A secret
+already set on the Worker is kept on later deploys (`bynk deploy` says
+`already set … skipping`), so a later `.secrets.env` needs only the names that
+are new; `--force` overwrites ones already set.
 
 The name is `APP_WEBHOOK_SECRET` rather than anything starting `GITHUB_`
 because GitHub refuses Actions secret names with that prefix. Keeping the
@@ -118,8 +129,10 @@ the installation; approve it there.
    (On macOS, `base64` without `-w0`.) Delete the downloaded `.pem` once the
    key is deployed. It never goes in the repository.
 
-**Configuration.** Add these to `.secrets.env` beside the two secrets from
-phase 1 and 2:
+**Configuration.** Put these in a new `.secrets.env`. The secrets from step 2
+are already on the Worker and are kept, so they needn't be repeated. If
+`bynk deploy` asks for `API_TOKEN_SECRET`, the Worker predates the read API:
+generate one as in step 2 and add it here too.
 
 ```sh
 APP_CLIENT_ID=Iv23…
@@ -139,7 +152,7 @@ WELCOME_ASSOCIATIONS=FIRST_TIMER,FIRST_TIME_CONTRIBUTOR,OWNER,MEMBER
 **Deploy** with `bynk deploy --secrets-file .secrets.env`. The first deploy
 creates the `Tokens` KV namespace and records its id in `bynk.deploy.lock`, so
 commit the updated lock afterwards. It also applies migration `0003` (the
-`actions` table). These names are read with `Secrets.get`, so a missing one is a
+`actions` and `welcomed` tables). These names are read with `Secrets.get`, so a missing one is a
 warning at deploy, not a failure: the service then logs `APP_CLIENT_ID is not
 set` (or similar) and records the action as failed.
 
