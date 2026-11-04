@@ -110,7 +110,12 @@ service api from http {
 	on GET("/digest/:day") (
 		day: Day
 	) -> Effect[HttpResult[Digest]] by reader: Reader given Deliveries, Logger {
-		let true = isRealDay(day) else { BadRequest("\(day) is not a date") }
+		let Some(range) = rangeOf(day) else { BadRequest("\(day) is not a date") }
+		// `received_at` defaults to strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
+		// three-digit milliseconds, so the range compares as text, in time order,
+		// and uses the time index. The bound depends on the two formats matching:
+		// change either and the digest's day-boundary test should fail.
 		let Ok(rows) <- Deliveries.all(
 			"""
 			SELECT repo, event, action, count(*) AS deliveries
@@ -120,7 +125,7 @@ service api from http {
 			GROUP BY repo, event, action
 			ORDER BY deliveries DESC, repo, event, action
 			""",
-			[Text(day), Text(dayEnd(day))]
+			[Text(range.start.toIso()), Text(range.end.toIso())]
 		) else match {
 			Err(e) => {
 				let _ <- Logger.error("could not count \(day): \(sqlError(e))")
