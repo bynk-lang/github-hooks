@@ -89,8 +89,13 @@ case "a day with nothing recorded is an empty digest" {
 }
 
 case "a database failure while reading is logged and is a server error" {
+	// The route reads with `select[Activity]`, which can't be stubbed itself
+	// (it isn't an operation of `Deliveries`); it runs its statement through
+	// `Deliveries.all`, so that is stubbed, and the expectation on the written
+	// column list below says so: it fails first if `select` stops using `all`.
 	stub Deliveries.all(_, _) returns Err(Failed("disk full"))
 	let r <- api.GET("/activity") by Reader("me")
+	expect Deliveries.all called once with sql.startsWith("SELECT \"id\", \"event\", \"action\"")
 	expect r is ServerError(_)
 	expect Logger.error called once with msg == "could not list activity: disk full"
 }
@@ -110,22 +115,23 @@ case "a repository is matched whatever the case of its name" {
 	expect list.map((a) => a.id) == ["a"]
 }
 
-case "a digest for a date that doesn't exist is a bad request" {
-	let r <- api.GET("/digest/:day", "2026-02-30") by Reader("me")
-	expect r is BadRequest("2026-02-30 is not a date")
-	expect Deliveries.all never called
-}
-
 case "rows that don't decode are logged and are a server error" {
+	// The route reads with `select[Activity]`, which can't be stubbed itself
+	// (it isn't an operation of `Deliveries`); it runs its statement through
+	// `Deliveries.all`, so that is stubbed, and the expectation on the written
+	// column list below says so: it fails first if `select` stops using `all`.
 	stub Deliveries.all(_, _) returns Ok("[{\"id\": 7}]")
 	let r <- api.GET("/activity") by Reader("me")
+	expect Deliveries.all called once with sql.startsWith("SELECT \"id\", \"event\", \"action\"")
 	expect r is ServerError(_)
 	expect Logger.error called once with msg.startsWith("could not decode activity rows: StructuralMismatch at $[0]")
 }
 
 case "a repository's rows that don't decode are logged with the reason" {
+	// As above: `select[Activity]` reads through the stubbed `Deliveries.all`.
 	stub Deliveries.all(_, _) returns Ok("[{\"id\": 7}]")
 	let r <- api.GET("/activity/:owner/:name", "bynk-lang", "bynk") by Reader("me")
+	expect Deliveries.all called once with sql.startsWith("SELECT \"id\", \"event\", \"action\"")
 	expect r is ServerError(_)
 	expect Logger.error called once with msg.startsWith("could not decode bynk-lang/bynk activity rows: StructuralMismatch at $[0]")
 }

@@ -13,6 +13,18 @@ All notable changes to github-hooks. The format follows
   capability may take a commons type (bynk-lang/bynk#2886). The read API's
   token refusals are tested for forged and expired tokens too (`by Forged`,
   `by Expired`).
+- **The read API's JSON is plain** (breaking for any client of the tagged
+  form): an optional field is its value or `null`, so
+  `"action": {"kind": "Some", "value": "opened"}` is now `"action": "opened"`
+  and `"deleted": {"kind": "None"}` is `"deleted": null`
+  (`json { options: plain }`, bynk-lang/bynk#2858). Bynk clients read both.
+- A digest day is an `IsoDate`, so a date that doesn't exist (`2026-02-30`) is
+  refused at the boundary like any other bad `:day`, not by the handler.
+- The activity routes read with `select[Activity]`, which writes the column
+  list from the row type.
+- Read API tokens are minted with `bynk token Reader --sub <name>`;
+  `scripts/token.sh` is gone. Its default lifetime was 30 days, `bynk token`'s
+  is an hour: pass `--lifetime 30d` for the old one.
 
 ### Added
 

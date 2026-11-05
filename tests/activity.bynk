@@ -45,11 +45,11 @@ case "a range crosses months and years" {
 	expect eve.end.toIso() == "2027-01-01T00:00:00.000Z"
 }
 
-case "a date that doesn't exist has no range" {
-	expect rangeOf("2026-04-31") == None
-	expect rangeOf("2026-02-30") == None
-	expect rangeOf("2026-02-29") == None
-	expect rangeOf("1900-02-29") == None
+case "a date that doesn't exist is not a Day" {
+	expect !Day.of("2026-04-31").isOk()
+	expect !Day.of("2026-02-30").isOk()
+	expect !Day.of("2026-02-29").isOk()
+	expect !Day.of("1900-02-29").isOk()
 }
 
 case "29 February exists in leap years" {

@@ -101,7 +101,7 @@ then, in another terminal, mint a token and ask (see
 [docs/read-api.md](docs/read-api.md)), or run the smoke test with both secrets:
 
 ```sh
-curl -H "Authorization: Bearer $(API_TOKEN_SECRET=dev-api scripts/token.sh me)" \
+curl -H "Authorization: Bearer $(API_TOKEN_SECRET=dev-api bynk token Reader --sub me)" \
   localhost:8787/activity
 API_TOKEN_SECRET=dev-api scripts/smoke.sh
 ```
@@ -142,7 +142,6 @@ embeds/welcome.md        the welcome comment's text
 migrations/              D1 schema, applied in tests, by bynk dev and by bynk deploy
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
-scripts/token.sh         mint a read API token
 .github/actions/         CI's Bynk install, pinned by version and SHA-256
 docs/github-app.md       registering and installing the GitHub App
 docs/read-api.md         the read API: tokens, routes, what the digest counts

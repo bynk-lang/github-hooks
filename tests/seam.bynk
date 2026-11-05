@@ -47,12 +47,16 @@ suite github.hooks as system {
 		expect expired is Rejected(Unauthorized)
 	}
 
-	case "a digest day that is not YYYY-MM-DD is refused at the boundary" {
+	case "a digest day that is not a real YYYY-MM-DD date is refused at the boundary" {
 		let word <- api.GET("/digest/:day", Wire("yesterday")) by Reader("ci")
 		let month <- api.GET("/digest/:day", Wire("2026-13-01")) by Reader("ci")
 		let day <- api.GET("/digest/:day", Wire("2026-01-32")) by Reader("ci")
+		let missing <- api.GET("/digest/:day", Wire("2026-02-30")) by Reader("ci")
+		let notLeap <- api.GET("/digest/:day", Wire("2026-02-29")) by Reader("ci")
 		expect word is Rejected(_)
 		expect month is Rejected(_)
 		expect day is Rejected(_)
+		expect missing is Rejected(_)
+		expect notLeap is Rejected(_)
 	}
 }

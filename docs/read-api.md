@@ -14,11 +14,13 @@ that name (`me listed activity`).
 Mint one with:
 
 ```sh
-API_TOKEN_SECRET=… scripts/token.sh <reader-name> [lifetime-seconds]   # default 30 days
+API_TOKEN_SECRET=… bynk token Reader --sub <reader-name> --lifetime 30d   # default 1h
 ```
 
-The script reads the secret from the environment and signs with Node, so the
-secret never appears in a process's arguments. Send the token as `Authorization: Bearer <token>`. Anyone holding the secret can
+`bynk token` signs exactly as the `Reader` actor's generated check verifies,
+checks the name against `ReaderId` first, and reads the secret from the
+environment under the name the actor declares, so it never appears in a
+process's arguments. Send the token as `Authorization: Bearer <token>`. Anyone holding the secret can
 mint tokens, so keep it as you would the webhook secret. To revoke every token
 at once, rotate the secret and redeploy.
 
@@ -31,7 +33,7 @@ at once, rotate the secret and redeploy.
 | `GET /digest/:day` | one UTC day's deliveries counted by repository, event and action, busiest first; `:day` is `YYYY-MM-DD` |
 
 ```sh
-TOKEN=$(API_TOKEN_SECRET=… scripts/token.sh me)
+TOKEN=$(API_TOKEN_SECRET=… bynk token Reader --sub me)
 BASE=https://github-hooks.<subdomain>.workers.dev
 
 curl -H "Authorization: Bearer $TOKEN" $BASE/activity
@@ -39,10 +41,9 @@ curl -H "Authorization: Bearer $TOKEN" $BASE/activity/bynk-lang/bynk
 curl -H "Authorization: Bearer $TOKEN" $BASE/digest/2026-11-03
 ```
 
-A `:day` that isn't a `YYYY-MM-DD` date is refused with `400`: one that doesn't
-fit the pattern (`/digest/yesterday`, `/digest/2026-13-01`) at the boundary, by
-the `Day` type's refinement, and one that fits but doesn't exist
-(`/digest/2026-02-30`) by the handler, before it reads anything.
+A `:day` that isn't a real `YYYY-MM-DD` date is refused with `400` at the
+boundary, by the `Day` type's `IsoDate` refinement, before the handler runs:
+`/digest/yesterday`, `/digest/2026-13-01` and `/digest/2026-02-30` alike.
 
 Owner and repository names match whatever their case, as on GitHub:
 `/activity/Bynk-Lang/bynk` is `/activity/bynk-lang/bynk`.
@@ -55,21 +56,19 @@ A list of deliveries, each a row of the `deliveries` table:
 {
   "id": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
   "event": "issues",
-  "action": { "kind": "Some", "value": "opened" },
-  "repo": { "kind": "Some", "value": "bynk-lang/github-hooks" },
-  "sender": { "kind": "Some", "value": "octocat" },
-  "org": { "kind": "Some", "value": "bynk-lang" },
-  "installation": { "kind": "Some", "value": 178078395 },
-  "deleted": { "kind": "None" },
+  "action": "opened",
+  "repo": "bynk-lang/github-hooks",
+  "sender": "octocat",
+  "org": "bynk-lang",
+  "installation": 178078395,
+  "deleted": null,
   "size": 12021,
   "received_at": "2026-11-03T06:00:54.761Z"
 }
 ```
 
-Optional fields use Bynk's tagged JSON form, `{"kind": "Some", "value": …}` or
-`{"kind": "None"}` (plain values and `null` are proposed in
-bynk-lang/bynk#2858). `deleted` is set only on a `push`: `true` when the push
-deleted a branch or tag.
+An optional field is its value, or `null` when it's absent. `deleted` is set
+only on a `push`: `true` when the push deleted a branch or tag.
 
 ### `GET /digest/:day`
 
@@ -78,9 +77,9 @@ deleted a branch or tag.
   "day": "2026-11-03",
   "total": 4,
   "tallies": [
-    { "repo": { "kind": "Some", "value": "bynk-lang/bynk" }, "event": "issues", "action": { "kind": "Some", "value": "opened" }, "deliveries": 2 },
-    { "repo": { "kind": "Some", "value": "bynk-lang/bynk" }, "event": "delete", "action": { "kind": "None" }, "deliveries": 1 },
-    { "repo": { "kind": "Some", "value": "bynk-lang/bynk" }, "event": "push", "action": { "kind": "None" }, "deliveries": 1 }
+    { "repo": "bynk-lang/bynk", "event": "issues", "action": "opened", "deliveries": 2 },
+    { "repo": "bynk-lang/bynk", "event": "delete", "action": null, "deliveries": 1 },
+    { "repo": "bynk-lang/bynk", "event": "push", "action": null, "deliveries": 1 }
   ]
 }
 ```

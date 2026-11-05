@@ -303,7 +303,7 @@ actor GitHub { auth = Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-S
 Who may read recorded activity: a caller presenting a JWT signed (HS256) with
 `API_TOKEN_SECRET`. The compiler generates the check, including `exp` and
 `nbf`, and answers `401` to a missing, forged or expired token.
-`scripts/token.sh` mints one. The token's `sub` names the reader, for logs.
+`bynk token Reader --sub <name>` mints one. The token's `sub` names the reader, for logs.
 ---
 actor Reader { auth = Bearer(secret = "API_TOKEN_SECRET"), identity = ReaderId }
 
@@ -319,28 +319,35 @@ service api from http {
 		maxBody: 26_214_400,
 	}
 
+	// Responses are read by people and scripts, not only by Bynk, so an `Option`
+	// is written plainly: `Some(v)` as `v`, `None` as `null` (bynk-lang/bynk#2858).
+	json {
+		options: plain,
+	}
+
 	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
 		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
 	}
 
 	// The 50 most recent deliveries, across every repository.
 	on GET("/activity") () -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
-		let Ok(rows) <- Deliveries.all(
+		// `select[Activity]` writes the column list from `Activity`'s fields. The
+		// annotation is load-bearing until bynk-lang/bynk#2957 is fixed: without
+		// it the emitted error type does not narrow on `Sql`/`Decode`.
+		let listed: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
 			"""
-			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
 			FROM deliveries
 			ORDER BY received_at DESC, rowid DESC
 			LIMIT 50
 			""",
 			[]
-		) else match {
-			Err(e) => {
+		)
+		let Ok(list) = listed else match {
+			Err(Sql(e)) => {
 				let _ <- Logger.error("could not list activity: \(sqlError(e))")
 				ServerError("could not read recorded activity")
 			},
-		}
-		let Ok(list) = Json.decodeSql[List[Activity]](rows) else match {
-			Err(e) => {
+			Err(Decode(e)) => {
 				let _ <- Logger.error("could not decode activity rows: \(jsonError(e))")
 				ServerError("recorded activity did not decode")
 			},
@@ -354,23 +361,21 @@ service api from http {
 		owner: String,
 		name: String
 	) -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
-		let Ok(rows) <- Deliveries.all(
+		let listed: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
 			"""
-			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
 			FROM deliveries
 			WHERE repo = ?1 COLLATE NOCASE
 			ORDER BY received_at DESC, rowid DESC
 			LIMIT 50
 			""",
 			[Text("\(owner)/\(name)")]
-		) else match {
-			Err(e) => {
+		)
+		let Ok(list) = listed else match {
+			Err(Sql(e)) => {
 				let _ <- Logger.error("could not list \(owner)/\(name) activity: \(sqlError(e))")
 				ServerError("could not read recorded activity")
 			},
-		}
-		let Ok(list) = Json.decodeSql[List[Activity]](rows) else match {
-			Err(e) => {
+			Err(Decode(e)) => {
 				let _ <- Logger.error(
 					"could not decode \(owner)/\(name) activity rows: \(jsonError(e))"
 				)
@@ -385,12 +390,18 @@ service api from http {
 	on GET("/digest/:day") (
 		day: Day
 	) -> Effect[HttpResult[DayDigest]] by reader: Reader given Deliveries, Logger {
-		let Some(range) = rangeOf(day) else { BadRequest("\(day) is not a date") }
+		// Unreachable for an `IsoDate`; answered as a server error if the two
+		// calendar rules ever disagree, never as the caller's mistake.
+		let Some(range) = rangeOf(day) else {
+			let _ <- Logger.error("\(day) passed IsoDate but has no instant")
+			ServerError("could not read the day")
+		}
 		// `received_at` defaults to strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
 		// three-digit milliseconds, so the range compares as text, in time order,
 		// and uses the time index. The bound depends on the two formats matching:
-		// change either and the digest's day-boundary test should fail.
+		// change either and the digest's day-boundary test should fail. It stays
+		// `all`, not `select[Tally]`: `deliveries` is a `count(*)`, not a column.
 		let Ok(rows) <- Deliveries.all(
 			"""
 			SELECT repo, event, action, count(*) AS deliveries
