@@ -160,3 +160,50 @@ type LiveEvent = {
 	status: String,
 	conclusion: String,
 }
+
+---
+One completed attempt in a workflow's recent runs. `wall_seconds` is
+`completed_at - queued_at` whatever the conclusion, so a strip can show how
+long a failure took to report. `conclusion` is GitHub's, or `unknown` when a
+completed delivery carried none.
+---
+type RecentRun = {
+	repo: String,
+	path: String,
+	run_id: Int,
+	attempt: Int,
+	branch: Option[String],
+	event: String,
+	conclusion: String,
+	completed_at: String,
+	wall_seconds: Int,
+}
+
+---
+One workflow's day (UTC, by completion), defined as `WorkflowHealth` is:
+`failed` is `failure + timed_out`, `other` is every attempt not judged, and
+`pass_percent` is `None` on a day nothing was judged. Days with no completed
+attempt have no entry.
+---
+type DailyHealth = {
+	repo: String,
+	path: String,
+	day: String,
+	runs: Int,
+	success: Int,
+	failed: Int,
+	other: Int,
+	pass_percent: Option[Int],
+	wall_p50_seconds: Option[Int],
+}
+
+---
+`GET /metrics/ci/history`: for each workflow, its latest completed attempts
+in the window (at most 20, oldest first) and its health day by day.
+---
+type CiHistory = {
+	since: String,
+	until: String,
+	recent: List[RecentRun],
+	daily: List[DailyHealth],
+}

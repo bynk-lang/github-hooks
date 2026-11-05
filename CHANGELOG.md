@@ -28,6 +28,14 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, history (#20): `GET /metrics/ci/history` gives each workflow's
+  latest 20 completed attempts in the window and its runs, pass rate and
+  median wall-clock time by UTC day, with `/metrics/ci`'s window, filters,
+  caching and rate limit. The page shows the recent runs as a strip in each
+  workflow's row (each mark links to its run, and one keyboard-reachable
+  link per strip opens the workflow's runs; not-counted runs are half height) and, under **Trend**, daily charts of pass rate and median
+  wall-clock time with a table of the same figures. On the live feed the page
+  refetches the window figures and history only when a run completes.
 - Phase 4, step 4 (#20): the CI health page updates live. It opens a
   WebSocket to `/live`, and each time a public, non-excluded run's facts
   change (not on redeliveries) the service pushes a small event to every open

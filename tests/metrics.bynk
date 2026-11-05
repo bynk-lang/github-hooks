@@ -312,6 +312,17 @@ case "a window other than 7, 30 or 90 days is refused, so the cache covers every
 		viewer()
 	) by Visitor
 	expect r is BadRequest("days must be 7, 30 or 90")
+	let h <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 14,
+		},
+		viewer()
+	) by Visitor
+	expect h is BadRequest("days must be 7, 30 or 90")
 	expect Deliveries.all never called
 }
 
@@ -328,8 +339,211 @@ case "past the per-address limit, metrics are refused before anything is read" {
 		viewer()
 	) by Visitor
 	let now <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
+	let history <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
 	expect ci is TooManyRequests(_)
 	expect now is TooManyRequests(_)
+	expect history is TooManyRequests(_)
 	expect MetricsLimit.allow called with key == "metrics:203.0.113.7"
 	expect Deliveries.all never called
+}
+
+---
+A nightly workflow with 25 runs, one every 6 hours back from 11:00 on
+5 November: run 100 + i completed 6i hours earlier, 5 minutes after it was
+queued, and every fifth failed. So 5 November holds i = 1, 4 November
+i = 2..5 (3 passed, i = 5 failed), and so on back to 30 October (i = 22..25).
+---
+fn nightly() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 25)
+				INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+				                           created_at, queued_at, started_at, completed_at, updated_at)
+				SELECT 'bynk-lang/bynk', 100 + i, 1, 'Nightly', '.github/workflows/nightly.yml', 'main', 'n' || i, 'schedule',
+				  'completed', CASE WHEN i % 5 = 0 THEN 'failure' ELSE 'success' END,
+				  strftime('%Y-%m-%dT%H:%M:%S.000Z', '2026-11-05T10:55:00', '-' || (6 * i) || ' hours'),
+				  strftime('%Y-%m-%dT%H:%M:%S.000Z', '2026-11-05T10:55:00', '-' || (6 * i) || ' hours'),
+				  strftime('%Y-%m-%dT%H:%M:%S.000Z', '2026-11-05T10:55:00', '-' || (6 * i) || ' hours'),
+				  strftime('%Y-%m-%dT%H:%M:%S.000Z', '2026-11-05T11:00:00', '-' || (6 * i) || ' hours'),
+				  strftime('%Y-%m-%dT%H:%M:%S.000Z', '2026-11-05T11:00:00', '-' || (6 * i) || ' hours')
+				FROM n
+			""",
+			params: [],
+		},
+	]
+}
+
+case "history: each workflow's recent attempts, oldest first, from public repositories" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(h) = r else {
+		expect false
+	}
+	expect h.since == "2026-10-29T12:00:00.000Z"
+	expect h.until == "2026-11-05T12:00:00.000Z"
+	// r8 is before the window; r9 and r10 haven't completed; the private and
+	// excluded repositories' runs are left out.
+	expect h.recent.map(
+		(x) => "\(x.run_id)/\(x.attempt) \(x.conclusion) \(x.wall_seconds)"
+	) == [
+		"4/1 failure 300",
+		"4/2 success 600",
+		"3/1 success 1800",
+		"1/1 success 600",
+		"2/1 success 1200",
+		"5/1 cancelled 60",
+		"6/1 skipped 5",
+		"7/1 timed_out 3600",
+		"11/1 success 1800",
+	]
+	expect h.recent.filter((x) => x.run_id == 3).map((x) => x.branch) == [Some("feature")]
+}
+
+case "history: each workflow's day, with the pass rate and median of /metrics/ci" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(h) = r else {
+		expect false
+	}
+	// All of CI's window is on 5 November, so its one day matches the window's
+	// figures: 8 runs, 4 passed, 2 failed or timed out, 67 %, median 600 s.
+	expect h.daily.map(
+		(d) => "\(d.path) \(d.day) \(d.runs) \(d.success) \(d.failed) \(d.other)"
+	) == [
+		".github/workflows/ci.yml 2026-11-05 8 4 2 2",
+		".github/workflows/codeql.yml 2026-11-05 1 1 0 0",
+	]
+	expect h.daily.map((d) => d.pass_percent) == [Some(67), Some(100)]
+	expect h.daily.map((d) => d.wall_p50_seconds) == [Some(600), Some(1800)]
+}
+
+case "history: at most 20 recent attempts, and a day with nothing judged has no pass rate" {
+	let seeded <- Deliveries.batch(nightly())
+	expect seeded is Ok(_)
+	let visible <- Deliveries.run(
+		"INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/bynk', 1, 'main')",
+		[]
+	)
+	expect visible is Ok(_)
+	// 29 October has only a cancelled run: counted, but nothing judged.
+	let cancelled <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+		                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+		  ('bynk-lang/bynk', 99, 1, 'Nightly', '.github/workflows/nightly.yml', 'main', 'n0', 'schedule', 'completed', 'cancelled',
+		   '2026-10-29T13:00:00.000Z', '2026-10-29T13:00:00.000Z', '2026-10-29T13:00:00.000Z', '2026-10-29T13:01:00.000Z', '2026-10-29T13:01:00.000Z')
+		""",
+		[]
+	)
+	expect cancelled is Ok(_)
+	let r <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: Some("bynk-lang/bynk"),
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(h) = r else {
+		expect false
+	}
+	// The newest 20 of 25: runs 120 (oldest, failed) to 101.
+	expect h.recent.length() == 20
+	expect h.recent.first().map((x) => "\(x.run_id) \(x.conclusion)") == Some("120 failure")
+	expect h.recent
+		.get(19)
+		.map((x) => "\(x.run_id) \(x.conclusion) \(x.wall_seconds)") == Some("101 success 300")
+	expect h.daily.map(
+		(d) => "\(d.day) \(d.runs) \(d.success) \(d.failed)"
+	) == [
+		"2026-10-29 1 0 0",
+		"2026-10-30 4 3 1",
+		"2026-10-31 4 3 1",
+		"2026-11-01 4 3 1",
+		"2026-11-02 4 3 1",
+		"2026-11-03 4 4 0",
+		"2026-11-04 4 3 1",
+		"2026-11-05 1 1 0",
+	]
+	expect h.daily.map(
+		(d) => d.pass_percent
+	) == [None, Some(75), Some(75), Some(75), Some(75), Some(100), Some(75), Some(100)]
+	expect h.daily.map(
+		(d) => d.wall_p50_seconds
+	) == [None, Some(300), Some(300), Some(300), Some(300), Some(300), Some(300), Some(300)]
+}
+
+case "history: filters apply as they do to /metrics/ci" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: None,
+			branch: Some("feature"),
+			event: Some("pull_request"),
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(h) = r else {
+		expect false
+	}
+	expect h.recent.map((x) => x.run_id) == [3]
+	expect h.daily.map(
+		(d) => "\(d.day) \(d.runs) \(d.pass_percent.getOrElse(-1))"
+	) == ["2026-11-05 1 100"]
+	// 30 days reaches r8 (20 October) on main.
+	let wide <- api.GET(
+		"/metrics/ci/history",
+		CiQuery {
+			repo: None,
+			branch: Some("main"),
+			event: None,
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(w) = wide else {
+		expect false
+	}
+	expect w.daily.map(
+		(d) => "\(d.path) \(d.day)"
+	) == [
+		".github/workflows/ci.yml 2026-10-20",
+		".github/workflows/ci.yml 2026-11-05",
+		".github/workflows/codeql.yml 2026-11-05",
+	]
 }

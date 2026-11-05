@@ -132,6 +132,47 @@ td.none { color: var(--ink-muted); }
 .bar { display: flex; gap: 2px; width: 100%; min-width: 120px; height: 8px; }
 .seg { height: 8px; border-radius: 4px; min-width: 2px; }
 
+/* Recent runs: one 6px mark per attempt, 2px apart, oldest left. Runs the
+   pass rate doesn't count are half height, so they differ by shape too. */
+.strip { display: inline-flex; align-items: flex-end; gap: 2px; height: 18px; vertical-align: middle; }
+.run { display: block; width: 6px; height: 18px; border-radius: 3px; }
+.run.passed { background: var(--passed); }
+.run.failed { background: var(--failed); }
+.run.other { background: var(--other); height: 9px; }
+.run:hover { outline: 2px solid var(--ink); outline-offset: 1px; }
+.strip-wrap { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* The strip's keyboard link: out of sight until focused, then shown in full. */
+.strip-runs {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; font-size: 0.82rem;
+}
+.strip-runs:focus-visible {
+  position: static; width: auto; height: auto; overflow: visible; clip: auto;
+  outline: 2px solid var(--link); outline-offset: 2px;
+}
+
+.trend-toggle {
+  display: inline-block; margin-top: 4px; padding: 0; border: 0; background: none;
+  color: var(--link); font: inherit; font-size: 0.82rem; font-weight: 400; cursor: pointer; text-decoration: underline;
+}
+.trend-toggle:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+tr.trend-row > td { border-top: 0; padding-top: 0; }
+.trend { padding: 4px 0 8px; }
+.trend-charts { display: flex; flex-wrap: wrap; gap: 8px 32px; }
+.trend-chart { margin: 0; flex: 1 1 280px; max-width: 440px; }
+.trend-chart figcaption { color: var(--ink-2); font-size: 0.85rem; margin-bottom: 4px; }
+.chart { display: block; width: 100%; height: auto; overflow: visible; }
+.chart .grid { stroke: var(--rule); stroke-width: 1; }
+.chart .axis { stroke: var(--ink-muted); stroke-width: 1; }
+.chart .tick { fill: var(--ink-muted); font-size: 10px; font-family: var(--font); }
+.chart .mark { fill: var(--passed); }
+.chart .line { fill: none; stroke: var(--passed); stroke-width: 2; stroke-linejoin: round; }
+.chart .point { fill: var(--passed); stroke: var(--surface); stroke-width: 2; }
+.chart .hit { fill: transparent; }
+.chart .hit:hover { fill: var(--ring); }
+details.trend-table { margin-top: 8px; font-size: 0.88rem; color: var(--ink-2); }
+details.trend-table table { margin-top: 6px; max-width: 640px; }
+
 details.in-flight { margin-top: 12px; color: var(--ink-2); font-size: 0.9rem; }
 details.in-flight ul { margin: 8px 0 0; padding-left: 20px; }
 
@@ -152,9 +193,20 @@ footer { color: var(--ink-muted); font-size: 0.85rem; margin-top: 32px; }
   td.state-cell .state { white-space: normal; text-align: right; }
   td.bar-cell { padding-top: 6px; }
   td.bar-cell .bar { flex: 0 1 60%; align-self: center; }
+  td.strip-cell { align-items: center; }
+  tr.trend-row { border-top: 0; padding-top: 0; }
+  details.trend-table table, details.trend-table tbody, details.trend-table tr,
+  details.trend-table td, details.trend-table th { display: revert; width: auto; }
+  details.trend-table thead { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
+  details.trend-table td, details.trend-table th { border-top: 1px solid var(--rule); padding: 4px 6px; }
 }
 .empty { color: var(--ink-2); }
 
 @media (forced-colors: active) {
   .seg, .swatch { forced-color-adjust: none; border: 1px solid CanvasText; }
+  /* Passed: outlined. Failed: filled. Not counted: half-height outline. */
+  .run { forced-color-adjust: none; border: 1px solid CanvasText; background: Canvas; }
+  .run.failed { background: CanvasText; }
+  .chart .mark, .chart .point { fill: CanvasText; }
+  .chart .line { stroke: CanvasText; }
 }

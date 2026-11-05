@@ -386,6 +386,9 @@ agent LiveBoard {
 
 const LIVE_LIMIT: Int = 500
 
+// How many of a workflow's latest completed attempts `/metrics/ci/history` lists.
+const RECENT_RUNS: Int = 20
+
 ---
 Pushes a changed run to every open dashboard. A capability (not a direct agent
 call) so the rule for *when* to push is observable in tests.
@@ -858,6 +861,119 @@ service api from http {
 		Ok(CiNow {
 			in_flight: inFlight.filter((r) => !allows(excluded, r.repo)),
 			main: main.filter((m) => !allows(excluded, m.repo)),
+		})
+	}
+
+	// History for each workflow over the same window and filters as
+	// `/metrics/ci`: its latest `RECENT_RUNS` completed attempts, and its
+	// health day by day (UTC). Both read the `by_completion` index.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/ci/history") (query: CiQuery, headers: RequestHeaders) -> Effect[HttpResult[CiHistory]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+			BadRequest("days must be 7, 30 or 90")
+		}
+		let now <- Clock.now()
+		let since = now - Duration.millis(query.days * 86_400_000)
+		let params = [
+			Text(since.toIso()),
+			Text(now.toIso()),
+			text(query.repo.map((r) => "\(r)")),
+			text(query.branch),
+			text(query.event),
+		]
+		let Ok(recentRows) <- Deliveries.all(
+			"""
+			WITH ranked AS (
+			  SELECT w.repo, w.path, w.run_id, w.attempt, w.branch, w.event,
+			    coalesce(w.conclusion, 'unknown') AS conclusion, w.completed_at,
+			    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS wall_seconds,
+			    row_number() OVER (PARTITION BY w.repo, w.path
+			                       ORDER BY w.completed_at DESC, w.run_id DESC, w.attempt DESC) AS rn
+			  FROM workflow_runs w
+			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
+			  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
+			    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
+			    AND (?4 IS NULL OR w.branch = ?4)
+			    AND (?5 IS NULL OR w.event = ?5)
+			)
+			SELECT repo, path, run_id, attempt, branch, event, conclusion, completed_at, wall_seconds
+			FROM ranked WHERE rn <= ?6
+			ORDER BY repo, path, completed_at, run_id, attempt
+			""",
+			params.append(Integer(RECENT_RUNS))
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not read recent runs: \(sqlError(e))")
+				ServerError("could not read recent runs")
+			},
+		}
+		let Ok(dayRows) <- Deliveries.all(
+			"""
+			WITH win AS (
+			  SELECT w.repo, w.path, substr(w.completed_at, 1, 10) AS day, w.conclusion,
+			    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS seconds
+			  FROM workflow_runs w
+			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
+			  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
+			    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
+			    AND (?4 IS NULL OR w.branch = ?4)
+			    AND (?5 IS NULL OR w.event = ?5)
+			),
+			counts AS (
+			  SELECT repo, path, day, count(*) AS runs,
+			    sum(conclusion = 'success') AS success,
+			    sum(conclusion IN ('failure', 'timed_out')) AS failed,
+			    sum(conclusion IS NULL OR conclusion NOT IN ('success', 'failure', 'timed_out')) AS other
+			  FROM win GROUP BY repo, path, day
+			),
+			walls AS (
+			  SELECT repo, path, day, seconds,
+			    row_number() OVER (PARTITION BY repo, path, day ORDER BY seconds) AS rn,
+			    count(*) OVER (PARTITION BY repo, path, day) AS n
+			  FROM win WHERE conclusion = 'success'
+			),
+			p50 AS (
+			  SELECT repo, path, day, max(CASE WHEN rn = (50 * n + 99) / 100 THEN seconds END) AS p50
+			  FROM walls GROUP BY repo, path, day
+			)
+			SELECT c.repo, c.path, c.day, c.runs, c.success, c.failed, c.other,
+			  CASE WHEN c.success + c.failed > 0
+			    THEN CAST(round(100.0 * c.success / (c.success + c.failed)) AS INTEGER)
+			  END AS pass_percent,
+			  p.p50 AS wall_p50_seconds
+			FROM counts c
+			LEFT JOIN p50 p ON p.repo = c.repo AND p.path = c.path AND p.day = c.day
+			ORDER BY c.repo, c.path, c.day
+			""",
+			params
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not compute daily CI health: \(sqlError(e))")
+				ServerError("could not compute daily CI health")
+			},
+		}
+		let Ok(recent) = Json.decodeSql[List[RecentRun]](recentRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode recent runs: \(jsonError(e))")
+				ServerError("recent runs did not decode")
+			},
+		}
+		let Ok(daily) = Json.decodeSql[List[DailyHealth]](dayRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode daily CI health: \(jsonError(e))")
+				ServerError("daily CI health did not decode")
+			},
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		Ok(CiHistory {
+			since: since.toIso(),
+			until: now.toIso(),
+			recent: recent.filter((r) => !allows(excluded, r.repo)),
+			daily: daily.filter((d) => !allows(excluded, d.repo)),
 		})
 	}
 

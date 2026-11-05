@@ -32,10 +32,10 @@
     <li><span class="swatch other" aria-hidden="true"></span>Cancelled, skipped or other (not counted in the pass rate)</li>
   </ul>
   <div id="repos"></div>
-  <noscript><p>This page needs JavaScript. The same numbers are at <a href="/metrics/ci">/metrics/ci</a> and <a href="/metrics/ci/now">/metrics/ci/now</a>.</p></noscript>
+  <noscript><p>This page needs JavaScript. The same numbers are at <a href="/metrics/ci">/metrics/ci</a>, <a href="/metrics/ci/now">/metrics/ci/now</a> and <a href="/metrics/ci/history">/metrics/ci/history</a>.</p></noscript>
 </main>
 <footer>
-  <p>Pass rate is passed ÷ (passed + failed + timed out). Wall-clock time runs from when CI was triggered to when it finished, including waiting for runners, over passed runs. A run is flaky when its first attempt failed and a re-run passed. Data: <a href="/metrics/ci">/metrics/ci</a>, <a href="/metrics/ci/now">/metrics/ci/now</a>. Source: <a href="https://github.com/bynk-lang/github-hooks">bynk-lang/github-hooks</a>, written in Bynk.</p>
+  <p>Pass rate is passed ÷ (passed + failed + timed out). Wall-clock time runs from when CI was triggered to when it finished, including waiting for runners, over passed runs. A run is flaky when its first attempt failed and a re-run passed. Recent runs are each workflow's latest 20 completed attempts in the window, oldest on the left; runs not counted in the pass rate are drawn half height. Trends are by UTC day. Data: <a href="/metrics/ci">/metrics/ci</a>, <a href="/metrics/ci/now">/metrics/ci/now</a>, <a href="/metrics/ci/history">/metrics/ci/history</a>. Source: <a href="https://github.com/bynk-lang/github-hooks">bynk-lang/github-hooks</a>, written in Bynk.</p>
 </footer>
 </body>
 </html>
