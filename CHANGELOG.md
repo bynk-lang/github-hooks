@@ -28,6 +28,16 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 2, step 3 (#26): public PR flow routes. `GET /metrics/prs`
+  gives each repository's merged and closed-unmerged counts, time from ready
+  (the headline, over pull requests whose ready time was seen, with how many)
+  and from opened to merge, time in the merge queue and how many were
+  requeued, median size, why pull requests left the queue other than by
+  merging, merges by day, and bots' figures apart; over 7, 30 or 90 days.
+  `GET /metrics/prs/open` lists open pull requests, longest waiting first,
+  with their stage (draft, ready, queued) and whether they are stale. Public,
+  cached and rate-limited like the CI routes. Migration `0007` adds the
+  indexes they read. See docs/pr-flow.md.
 - Phase 4, slice 2, step 2 (#26): the daily open-PR sync. A `pullSync` cron
   service (04:41 UTC) lists each public repository's open pull requests
   through the REST API, as the installation that last delivered for it, and

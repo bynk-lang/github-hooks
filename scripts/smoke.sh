@@ -73,6 +73,9 @@ get 200 "CI metrics are public" /metrics/ci
 get 200 "what CI is running now is public" /metrics/ci/now
 get 200 "CI history is public" "/metrics/ci/history?days=30"
 get 400 "a CI history window other than 7, 30 or 90 days is refused" "/metrics/ci/history?days=14"
+get 200 "PR flow is public" "/metrics/prs?days=30"
+get 200 "open pull requests are public" /metrics/prs/open
+get 400 "a PR flow window other than 7, 30 or 90 days is refused" "/metrics/prs?days=14"
 get 400 "a CI window longer than 90 days is refused" "/metrics/ci?days=91"
 get 400 "a CI window other than 7, 30 or 90 days is refused" "/metrics/ci?days=14"
 
