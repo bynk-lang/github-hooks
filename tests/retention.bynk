@@ -1,0 +1,116 @@
+// Retention, against an in-memory D1 with the migrations applied. Each case
+// runs the hourly job as if scheduled at 2026-11-05T00:00:00Z, so 90 days back
+// is 2026-08-07 and 7 days back is 2026-10-29.
+suite github.hooks
+
+--- 2026-11-05T00:00:00Z, as the scheduled time in epoch milliseconds.
+fn nowMs() -> Int {
+	1793836800000
+}
+
+case "old deliveries and stale workflow-run progress go; the rest stays" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, repo, size, received_at) VALUES
+		  ('old-push',       'push',         NULL,          'bynk-lang/bynk', 1, '2026-08-06T23:59:59.999Z'),
+		  ('edge-push',      'push',         NULL,          'bynk-lang/bynk', 1, '2026-08-07T00:00:00.000Z'),
+		  ('old-run-done',   'workflow_run', 'completed',   'bynk-lang/bynk', 1, '2026-08-01T00:00:00.000Z'),
+		  ('run-requested',  'workflow_run', 'requested',   'bynk-lang/bynk', 1, '2026-10-20T00:00:00.000Z'),
+		  ('run-progress',   'workflow_run', 'in_progress', 'bynk-lang/bynk', 1, '2026-10-28T23:59:59.999Z'),
+		  ('run-done',       'workflow_run', 'completed',   'bynk-lang/bynk', 1, '2026-10-20T00:00:00.000Z'),
+		  ('recent-running', 'workflow_run', 'in_progress', 'bynk-lang/bynk', 1, '2026-11-01T00:00:00.000Z'),
+		  ('issue-opened',   'issues',       'opened',      'bynk-lang/bynk', 1, '2026-10-01T00:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	let kept <- Deliveries.all("SELECT id FROM deliveries ORDER BY id", [])
+	expect kept == Ok("[{\"id\":\"edge-push\"},{\"id\":\"issue-opened\"},{\"id\":\"recent-running\"},{\"id\":\"run-done\"}]")
+	expect Logger.info called once with msg == "retention removed 2 workflow-run progress, 2 deliveries and 0 actions"
+}
+
+case "old actions go, and who was welcomed is kept for good" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO actions (delivery, action, status, at) VALUES
+		  ('d-old', 'welcome', 'done', '2026-07-01T00:00:00.000Z'),
+		  ('d-new', 'welcome', 'done', '2026-11-01T00:00:00.000Z')
+		""",
+		[]
+	)
+	let _ <- Deliveries.run(
+		"INSERT INTO welcomed (repo, login, delivery, at) VALUES ('bynk-lang/bynk', 'newcomer', 'd-old', '2026-07-01T00:00:00.000Z')",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	let actions <- Deliveries.all("SELECT delivery FROM actions", [])
+	expect actions == Ok("[{\"delivery\":\"d-new\"}]")
+	let welcomed <- Deliveries.all("SELECT login FROM welcomed", [])
+	expect welcomed == Ok("[{\"login\":\"newcomer\"}]")
+	expect Logger.info called once with msg == "retention removed 0 workflow-run progress, 0 deliveries and 1 actions"
+}
+
+case "a run with nothing to remove logs nothing" {
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	expect Logger.info never called
+}
+
+case "a backlog is removed a batch at a time, oldest first" {
+	// 5,001 workflow-run progress deliveries from June and 5,001 pushes from
+	// July, one a second, all older than both cutoffs. The first run takes
+	// 5,000 progress rows, then the 5,000 oldest of what's left past 90 days:
+	// the last progress row and 4,999 pushes. Both limits are pinned.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, size, received_at)
+		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+		SELECT 'run-' || i, 'workflow_run', 'in_progress', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-06-01', '+' || i || ' seconds')
+		FROM n
+		""",
+		[]
+	)
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, size, received_at)
+		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+		SELECT 'push-' || i, 'push', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-07-01', '+' || i || ' seconds')
+		FROM n
+		""",
+		[]
+	)
+	let first <- retention.schedule("23 * * * *", nowMs())
+	expect first is Ok(_)
+	let left <- Deliveries.all("SELECT id FROM deliveries ORDER BY id", [])
+	expect left == Ok("[{\"id\":\"push-4999\"},{\"id\":\"push-5000\"}]")
+	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress, 5000 deliveries and 0 actions; more remain for the next run"
+	let second <- retention.schedule("23 * * * *", nowMs() + 3600000)
+	expect second is Ok(_)
+	let none <- Deliveries.all("SELECT id FROM deliveries", [])
+	expect none == Ok("[]")
+}
+
+case "a full batch of workflow-run progress alone says more remain" {
+	// 5,001 progress deliveries between the two cutoffs: past 7 days, inside 90.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, size, received_at)
+		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+		SELECT 'run-' || i, 'workflow_run', 'requested', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-10-01', '+' || i || ' seconds')
+		FROM n
+		""",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress, 0 deliveries and 0 actions; more remain for the next run"
+}
+
+case "a failed delete is logged and is the run's error" {
+	stub Deliveries.run(_, _) returns Err(Failed("database is locked"))
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Err("retention could not delete workflow-run progress: database is locked")
+	expect Logger.error called once with msg == "retention could not delete workflow-run progress: database is locked"
+}

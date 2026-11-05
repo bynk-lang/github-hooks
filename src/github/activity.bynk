@@ -75,3 +75,35 @@ fn digest(day: Day, tallies: List[Tally]) -> DayDigest {
 		tallies: tallies,
 	}
 }
+
+---
+How long recorded activity is kept. A delivery is kept 90 days, enough for any
+quarter's digests. A `workflow_run` that is only `requested` or `in_progress`
+is kept 7 days: two thirds of all deliveries are workflow runs, and the
+`completed` delivery carries the run's outcome.
+---
+const KEEP: Duration = 90.days
+
+const KEEP_RUN_PROGRESS: Duration = 7.days
+
+---
+At most this many rows go per statement per run, so no one `DELETE` runs long.
+The job runs hourly, so a backlog clears at up to 120,000 rows a day.
+---
+const RETENTION_BATCH: Int = 5000
+
+---
+The `received_at` text each rule deletes before, from the run's time. Compared
+as text with `received_at`, as the digest's range is.
+---
+type Cutoffs = {
+	deliveries: String,
+	runProgress: String,
+}
+
+fn cutoffs(now: Instant) -> Cutoffs {
+	Cutoffs {
+		deliveries: (now - KEEP).toIso(),
+		runProgress: (now - KEEP_RUN_PROGRESS).toIso(),
+	}
+}

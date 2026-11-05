@@ -18,8 +18,8 @@ It is two things at once:
 | Phase | What | State |
 |---|---|---|
 | 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
-| 2 | Read API over recorded activity, daily digest, retention | read API and digest in progress ([#6](https://github.com/bynk-lang/github-hooks/issues/6)); retention after the load test |
-| 3 | Act on events through the App's installation token | welcoming first-time contributors, in the sandbox ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
+| 2 | Read API over recorded activity, daily digest, retention | read API and digest live ([docs](docs/read-api.md)); retention hourly, 90 days ([#6](https://github.com/bynk-lang/github-hooks/issues/6)) |
+| 3 | Act on events through the App's installation token | welcoming first-time contributors, live on `bynk-lang/bynk` ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
 
 ## How it works
 
@@ -50,6 +50,14 @@ GitHub App ──POST /github──▶ signature check ──▶ read headers + 
 GitHub signs no timestamp, so there is no replay window; the delivery-id key is
 what makes a replay harmless.
 
+**Retention.** The `retention` cron service runs hourly (at :23). It deletes
+deliveries older than 90 days, `workflow_run` deliveries that are only
+`requested` or `in_progress` after 7 days (the `completed` one carries the
+outcome, and runs are two thirds of all traffic), and `actions` older than 90
+days. `welcomed` is kept, so a person is still welcomed only once. Each delete
+takes at most 5,000 rows a run, oldest first. Sized from the load test: about
+3,200 deliveries a day from `bynk-lang/bynk`, roughly 400–500 bytes a row in D1.
+
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Develop
@@ -66,7 +74,8 @@ bynk test             # every suite: unit, integration and system
 `tests/events.bynk` tests the pure decoding. `tests/hooks.bynk` runs the
 handler against an in-memory SQLite D1 with the schema applied.
 `tests/read.bynk` covers the read API against seeded rows, and
-`tests/activity.bynk` the digest. `tests/seam.bynk` runs the deployable Worker
+`tests/activity.bynk` the digest, and `tests/retention.bynk` the hourly
+retention job. `tests/seam.bynk` runs the deployable Worker
 itself, so the generated signature and token checks see real signed, unsigned,
 forged and tokenless requests.
 
