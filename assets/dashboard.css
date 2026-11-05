@@ -1,0 +1,160 @@
+/* CI health page (#20). Colours are tokens, defined once per theme, so
+   bynk-lang branding can replace them without touching the layout.
+   Conclusions: blue (passed) and red (failed) pass the data-viz palette
+   validator in both themes (CVD ΔE 21.6 light, 19.2 dark); grey is
+   de-emphasis, not a series. Default-branch state uses the fixed status
+   palette, always with an icon and a label. */
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-muted: #6b6a65;
+  --rule: #e1e0d9;
+  --ring: rgba(11, 11, 11, 0.10);
+  --passed: #2a78d6;
+  --failed: #e34948;
+  --other: #c3c2b7;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --critical: #d03b3b;
+  --link: #1c5cab;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-muted: #a3a29b;
+    --rule: #2c2c2a;
+    --ring: rgba(255, 255, 255, 0.10);
+    --passed: #3987e5;
+    --failed: #e66767;
+    --other: #4a4a46;
+    --good: #0ca30c;
+    --good-text: #0ca30c;
+    --critical: #e66767;
+    --link: #86b6ef;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-muted: #a3a29b;
+  --rule: #2c2c2a;
+  --ring: rgba(255, 255, 255, 0.10);
+  --passed: #3987e5;
+  --failed: #e66767;
+  --other: #4a4a46;
+  --good: #0ca30c;
+  --good-text: #0ca30c;
+  --critical: #e66767;
+  --link: #86b6ef;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--page); }
+body {
+  margin: 0 auto;
+  max-width: 72rem;
+  padding: 24px 16px 48px;
+  background: var(--page);
+  color: var(--ink);
+  font: 15px/1.5 var(--font);
+}
+a { color: var(--link); }
+h1 { font-size: 1.75rem; margin: 0; }
+h2 { font-size: 1.15rem; margin: 0; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+.masthead {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  justify-content: space-between; align-items: flex-end;
+  margin-bottom: 16px;
+}
+.subtitle, .freshness, .coverage { color: var(--ink-2); margin: 4px 0 0; }
+.controls { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.window { display: flex; gap: 0; border: 0; padding: 0; margin: 0; }
+.window label {
+  padding: 4px 12px; border: 1px solid var(--rule); background: var(--surface);
+  cursor: pointer; color: var(--ink-2);
+}
+.window label:first-of-type { border-radius: 6px 0 0 6px; }
+.window label:last-of-type { border-radius: 0 6px 6px 0; }
+.window label + label { border-left: 0; }
+.window input { position: absolute; opacity: 0; }
+.window label:has(input:checked) { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--ink); }
+.window label:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 2px; }
+.freshness.stale { color: var(--critical); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 20px; list-style: none; padding: 0; margin: 12px 0 20px; color: var(--ink-2); font-size: 0.9rem; }
+.legend li { display: flex; align-items: center; gap: 8px; }
+.swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.swatch.passed, .seg.passed { background: var(--passed); }
+.swatch.failed, .seg.failed { background: var(--failed); }
+.swatch.other, .seg.other { background: var(--other); }
+
+.repo {
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
+  padding: 16px; margin-bottom: 20px;
+}
+.repo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+.running { color: var(--ink-2); font-size: 0.9rem; }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+th, td { padding: 8px 10px; text-align: left; border-top: 1px solid var(--rule); vertical-align: middle; }
+thead th { border-top: 0; color: var(--ink-muted); font-weight: 600; font-size: 0.8rem; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.workflow { font-weight: 600; }
+td.workflow small { display: block; font-weight: 400; color: var(--ink-muted); }
+td.none { color: var(--ink-muted); }
+
+.state { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.state .icon { width: 16px; height: 16px; border-radius: 50%; color: #fff; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; }
+.state.good .icon { background: var(--good); }
+.state.good { color: var(--good-text); }
+.state.critical .icon { background: var(--critical); }
+.state.critical { color: var(--ink); font-weight: 600; }
+.state.none { color: var(--ink-muted); }
+
+/* Thin segmented bar: 8px, fully rounded ends, 2px surface gap between parts. */
+.bar { display: flex; gap: 2px; width: 100%; min-width: 120px; height: 8px; }
+.seg { height: 8px; border-radius: 4px; min-width: 2px; }
+
+details.in-flight { margin-top: 12px; color: var(--ink-2); font-size: 0.9rem; }
+details.in-flight ul { margin: 8px 0 0; padding-left: 20px; }
+
+footer { color: var(--ink-muted); font-size: 0.85rem; margin-top: 32px; }
+
+/* Narrow screens: each workflow becomes a card of labelled figures, so nothing
+   scrolls sideways or is cut off. */
+@media (max-width: 720px) {
+  .controls { align-items: flex-start; }
+  .masthead { align-items: flex-start; }
+  table, tbody, tr, td { display: block; width: 100%; }
+  thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  tr { border-top: 1px solid var(--rule); padding: 10px 0; }
+  tbody tr:first-child { border-top: 0; }
+  td { border: 0; padding: 2px 0; }
+  td[data-label] { display: flex; justify-content: space-between; gap: 12px; text-align: right; }
+  td[data-label]::before { content: attr(data-label); color: var(--ink-muted); text-align: left; }
+  td.state-cell .state { white-space: normal; text-align: right; }
+  td.bar-cell { padding-top: 6px; }
+  td.bar-cell .bar { flex: 0 1 60%; align-self: center; }
+}
+.empty { color: var(--ink-2); }
+
+@media (forced-colors: active) {
+  .seg, .swatch { forced-color-adjust: none; border: 1px solid CanvasText; }
+}

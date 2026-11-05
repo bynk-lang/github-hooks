@@ -28,6 +28,17 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, step 3 (#20): the CI health page at `/`. One table per public
+  repository: each workflow's state on its default branch (icon and label),
+  pass rate, runs, median and 95th-percentile wall-clock time, flaky runs and
+  a bar of passed, failed and not-counted runs; what is running now; and how
+  much of the window has data. 7, 30 or 90 days. Polls the metrics routes
+  every 30 seconds while visible, keeping open lists and focus across
+  refreshes, dropping answers for a window no longer chosen, and saying
+  which source is stale. `/` itself isn't cached, so a deploy never serves a
+  page naming the previous deploy's assets. Light and dark themes from colour tokens;
+  stacks into cards on narrow screens. The service's one-line description
+  moves from `/` to `/about`.
 - Phase 4, step 2 (#20): public CI metrics. `GET /metrics/ci` gives each
   workflow's runs, conclusions, pass rate (success over success, failure and
   timed out), median and 95th-percentile wall-clock time of successful

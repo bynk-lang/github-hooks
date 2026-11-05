@@ -1,8 +1,24 @@
 suite github.hooks
 
-case "the root describes the service" {
+case "the root is the CI health page, loading its own stylesheet and script" {
 	let r <- api.GET("/") by Visitor
-	expect r is Ok(_)
+	let Raw(body, contentType) = r else {
+		expect false
+	}
+	expect contentType == "text/html; charset=utf-8"
+	let Some(page) = body.decodeUtf8() else {
+		expect false
+	}
+	expect page.contains("<title>bynk-lang CI health</title>")
+	expect page.contains("href=\"\(dashboardCss.url)\"")
+	expect page.contains("src=\"\(dashboardJs.url)\"")
+	expect !page.contains("{css}")
+	expect !page.contains("{js}")
+}
+
+case "the service describes itself at /about" {
+	let r <- api.GET("/about") by Visitor
+	expect r is Ok("github-hooks: POST GitHub App webhook deliveries to /github")
 }
 
 case "a delivery is recorded" {
