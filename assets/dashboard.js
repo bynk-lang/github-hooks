@@ -9,8 +9,9 @@
   let days = 7;
   let metrics = null;
   let now = null;
-  let lastOk = null;
-  let failing = false;
+  // Each source keeps its own freshness, so one succeeding never hides the
+  // other failing.
+  const fresh = { metrics: { lastOk: null, failing: false }, now: { lastOk: null, failing: false } };
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, attrs = {}, ...children) => {
@@ -48,11 +49,15 @@
   }
 
   async function refreshMetrics() {
+    const asked = days;
     try {
-      metrics = await getJson(`/metrics/ci?days=${days}`);
-      ok();
+      const m = await getJson(`/metrics/ci?days=${asked}`);
+      if (asked !== days) return; // the window changed while this was in flight
+      metrics = m;
+      ok("metrics");
     } catch (e) {
-      failed(e);
+      if (asked !== days) return;
+      failed("metrics", e);
     }
     render();
   }
@@ -60,35 +65,43 @@
   async function refreshNow() {
     try {
       now = await getJson("/metrics/ci/now");
-      ok();
+      ok("now");
     } catch (e) {
-      failed(e);
+      failed("now", e);
     }
     render();
   }
 
-  function ok() {
-    failing = false;
-    lastOk = new Date();
+  function ok(source) {
+    fresh[source] = { lastOk: new Date(), failing: false };
   }
 
-  function failed(e) {
-    failing = true;
-    console.warn("CI health: refresh failed:", e.message);
+  function failed(source, e) {
+    fresh[source].failing = true;
+    console.warn(`CI health: refreshing ${source} failed:`, e.message);
   }
+
+  const clock = (d) =>
+    d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
 
   function renderFreshness() {
     const f = $("freshness");
-    if (!lastOk) {
-      f.textContent = failing ? "Couldn't load the figures; retrying." : "Loading…";
-      f.classList.toggle("stale", failing);
-      return;
+    const describe = (source, label) => {
+      const s = fresh[source];
+      if (!s.lastOk) return s.failing ? `${label}: couldn't load, retrying` : null;
+      return s.failing ? `${label} from ${clock(s.lastOk)} UTC, retrying` : null;
+    };
+    const problems = [describe("now", "Running and default-branch states"), describe("metrics", "Window figures")]
+      .filter(Boolean);
+    const latest = [fresh.now.lastOk, fresh.metrics.lastOk].filter(Boolean).sort((a, b) => b - a)[0];
+    if (problems.length > 0) {
+      f.textContent = `${problems.join("; ")}.`;
+    } else if (latest) {
+      f.textContent = `Updated ${clock(latest)} UTC · refreshes every 30 seconds`;
+    } else {
+      f.textContent = "Loading…";
     }
-    const at = lastOk.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    f.textContent = failing
-      ? `Couldn't refresh; showing figures from ${at}. Retrying.`
-      : `Updated ${at} · refreshes every 30 seconds`;
-    f.classList.toggle("stale", failing);
+    f.classList.toggle("stale", problems.length > 0);
   }
 
   function renderCoverage() {
@@ -146,8 +159,26 @@
       : el("td", { class: cls, "data-label": label }, value);
   }
 
+  // A redraw replaces the sections, so keep what the reader is doing: which
+  // "Running now" lists are open, and which control has focus (by data-key).
+  function readerState(root) {
+    const open = new Set([...root.querySelectorAll("details[open]")].map((d) => d.dataset.key));
+    const active = document.activeElement;
+    const focused = active && root.contains(active) ? active.dataset.key : null;
+    return { open, focused };
+  }
+
+  function restoreReaderState(root, { open, focused }) {
+    for (const d of root.querySelectorAll("details[data-key]")) if (open.has(d.dataset.key)) d.open = true;
+    if (focused) {
+      const target = [...root.querySelectorAll("[data-key]")].find((n) => n.dataset.key === focused);
+      if (target) target.focus({ preventScroll: true });
+    }
+  }
+
   function renderRepos() {
     const root = $("repos");
+    const kept = readerState(root);
     root.replaceChildren();
     if (!metrics && !now) return;
     const repos = new Map();
@@ -174,7 +205,7 @@
       const running = r.running.length;
       section.append(el("div", { class: "repo-head" },
         el("h2", { id: `repo-${name}` },
-          el("a", { href: `https://github.com/${name}/actions` }, name)),
+          el("a", { href: `https://github.com/${name}/actions`, "data-key": `link:${name}` }, name)),
         el("span", { class: "running" }, running === 0 ? "Nothing running" : `${running} running`)));
 
       const table = el("table", {},
@@ -217,10 +248,12 @@
           list.append(el("li", {},
             `${f.workflow} · ${f.event}${f.branch ? ` on ${f.branch}` : ""} · ${f.status.replace("_", " ")}, queued ${since(f.queued_at)} ago`));
         }
-        section.append(el("details", { class: "in-flight" }, el("summary", {}, `Running now (${running})`), list));
+        section.append(el("details", { class: "in-flight", "data-key": `running:${name}` },
+          el("summary", { "data-key": `summary:${name}` }, `Running now (${running})`), list));
       }
       root.append(section);
     }
+    restoreReaderState(root, kept);
   }
 
   function render() {

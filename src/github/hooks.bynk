@@ -447,9 +447,10 @@ service api from http {
 		options: plain,
 	}
 
-	// The CI health page: public, and the same for everyone, so cached five
-	// minutes; its figures come from the metrics routes, which it polls.
-	@cache(maxAge: 300.seconds, scope: public)
+	// The CI health page. Deliberately not `@cache`d: it names this deploy's
+	// content-hashed stylesheet and script, and a cached copy outliving a deploy
+	// would ask for the previous ones. It is a few hundred bytes from an embed,
+	// with no D1 read; its figures come from the metrics routes, which it polls.
 	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
 		let page = dashboardTemplate
 			.replace("{css}", dashboardCss.url)
