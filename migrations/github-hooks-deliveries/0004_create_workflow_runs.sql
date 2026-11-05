@@ -10,7 +10,6 @@ CREATE TABLE workflow_runs (
   repo         TEXT    NOT NULL,             -- repository.full_name
   run_id       INTEGER NOT NULL,             -- workflow_run.id
   attempt      INTEGER NOT NULL,             -- workflow_run.run_attempt
-  public       INTEGER NOT NULL,             -- 1 unless repository.private
   workflow     TEXT    NOT NULL,             -- workflow_run.name
   path         TEXT    NOT NULL,             -- workflow_run.path, the stable grouping
   branch       TEXT,                         -- workflow_run.head_branch
@@ -18,11 +17,22 @@ CREATE TABLE workflow_runs (
   event        TEXT    NOT NULL,             -- what triggered it: push, pull_request, merge_group, …
   status       TEXT    NOT NULL,             -- requested, queued, waiting, in_progress, completed, …
   conclusion   TEXT,                         -- set once completed: success, failure, cancelled, …
-  created_at   TEXT    NOT NULL,             -- queued
+  created_at   TEXT    NOT NULL,             -- the run's: a re-run keeps the original
+  queued_at    TEXT    NOT NULL,             -- this attempt's: created_at, or a re-run's earliest delivery
   started_at   TEXT,                         -- run_started_at
   completed_at TEXT,                         -- updated_at of the completed delivery
   updated_at   TEXT    NOT NULL,             -- the latest delivery's workflow_run.updated_at
   PRIMARY KEY (repo, run_id, attempt)
+);
+
+-- Whether each repository is public, decided at read time: the public
+-- dashboard joins this, so making a repository private hides its whole
+-- history at once, not just runs from then on. Updated from every delivery
+-- whose `repository` carries `private`; last arrival wins.
+CREATE TABLE repositories (
+  repo       TEXT    PRIMARY KEY,
+  public     INTEGER NOT NULL,
+  updated_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- Metrics over a window: per repository and workflow, by completion time.

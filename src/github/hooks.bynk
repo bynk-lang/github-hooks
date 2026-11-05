@@ -170,8 +170,9 @@ fn answered(res: Response, repo: String, number: Int) -> Result[(), String] {
 
 ---
 The facts the dashboard reads (#20), extracted from a delivery after it is
-answered. Today: one `workflow_runs` row per run attempt. A redelivery records
-the same facts again, which changes nothing.
+answered: whether its repository is public (from any delivery that says), and
+for a `workflow_run`, one `workflow_runs` row per run attempt. A redelivery
+records the same facts again, which changes nothing.
 ---
 capability Facts {
 	fn extract(d: Delivery, body: Bytes) -> Effect[()]
@@ -179,55 +180,90 @@ capability Facts {
 
 provides Facts = DeliveryFacts given Deliveries, Logger {
 	fn extract(d: Delivery, body: Bytes) -> Effect[()] {
+		let _ <- recordVisibility(body)
 		let true = d.event == "workflow_run" else { Effect.pure(()) }
-		let Ok(r) = runOf(body) else match {
-			Err(why) => Logger.error("could not read workflow run from \(d.id): \(why)"),
-		}
-		// The row only moves forward: a delivery replaces it when its status is
-		// further along (requested/queued/waiting < in_progress < completed), or
-		// equally far and newer. So a late `in_progress` never undoes `completed`.
-		let Ok(_) <- Deliveries.run(
-			"""
-			INSERT INTO workflow_runs (repo, run_id, attempt, public, workflow, path, branch, sha, event,
-			                           status, conclusion, created_at, started_at, completed_at, updated_at)
-			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-			ON CONFLICT (repo, run_id, attempt) DO UPDATE SET
-			  public = excluded.public, workflow = excluded.workflow, path = excluded.path,
-			  branch = excluded.branch, sha = excluded.sha, event = excluded.event,
-			  status = excluded.status, conclusion = excluded.conclusion,
-			  created_at = excluded.created_at,
-			  started_at = coalesce(excluded.started_at, workflow_runs.started_at),
-			  completed_at = excluded.completed_at, updated_at = excluded.updated_at
-			WHERE (CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
-			    > (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
-			   OR ((CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
-			    = (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
-			   AND excluded.updated_at > workflow_runs.updated_at)
-			""",
-			[
-				Text(r.repo),
-				Integer(r.runId),
-				Integer(r.attempt),
-				Boolean(r.isPublic),
-				Text(r.workflow),
-				Text(r.path),
-				text(r.branch),
-				Text(r.sha),
-				Text(r.event),
-				Text(r.status),
-				text(r.conclusion),
-				Text(r.createdAt),
-				text(r.startedAt),
-				text(r.completedAt),
-				Text(r.updatedAt),
-			]
-		) else match {
-			Err(e) => Logger.error(
-				"could not record \(r.repo) run \(r.runId) attempt \(r.attempt): \(sqlError(e))"
-			),
-		}
-		Effect.pure(())
+		recordRun(d, body)
 	}
+}
+
+// Visibility is decided when the dashboard reads, from this table, not stored
+// per run: a repository made private hides its whole history at once. Last
+// arrival wins; a `repository` `privatized`/`publicized` delivery carries the
+// new value, as does every later delivery from the repository.
+fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Some(v) = visibilityOf(body) else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO repositories (repo, public) VALUES (?1, ?2)
+		ON CONFLICT (repo) DO UPDATE
+		  SET public = excluded.public, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		  WHERE repositories.public != excluded.public
+		""",
+		[Text(v.repo), Boolean(v.isPublic)]
+	) else match {
+		Err(e) => Logger.error("could not record whether \(v.repo) is public: \(sqlError(e))"),
+	}
+	Effect.pure(())
+}
+
+fn recordRun(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(r) = runOf(body) else match {
+		Err(why) => Logger.error("could not read workflow run from \(d.id): \(why)"),
+	}
+	// The row only moves forward: a delivery replaces it when its status is
+	// further along (requested/queued/waiting < in_progress < completed), or
+	// equally far and newer. So a late `in_progress` never undoes `completed`.
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status,
+		                           conclusion, created_at, queued_at, started_at, completed_at, updated_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+		ON CONFLICT (repo, run_id, attempt) DO UPDATE SET
+		  workflow = excluded.workflow, path = excluded.path, branch = excluded.branch,
+		  sha = excluded.sha, event = excluded.event,
+		  status = excluded.status, conclusion = excluded.conclusion,
+		  created_at = excluded.created_at,
+		  started_at = coalesce(excluded.started_at, workflow_runs.started_at),
+		  completed_at = excluded.completed_at, updated_at = excluded.updated_at
+		WHERE (CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		    > (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		   OR ((CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		    = (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		   AND excluded.updated_at > workflow_runs.updated_at)
+		""",
+		[
+			Text(r.repo),
+			Integer(r.runId),
+			Integer(r.attempt),
+			Text(r.workflow),
+			Text(r.path),
+			text(r.branch),
+			Text(r.sha),
+			Text(r.event),
+			Text(r.status),
+			text(r.conclusion),
+			Text(r.createdAt),
+			Text(r.queuedAt),
+			text(r.startedAt),
+			text(r.completedAt),
+			Text(r.updatedAt),
+		]
+	) else match {
+		Err(e) => Logger.error(
+			"could not record \(r.repo) run \(r.runId) attempt \(r.attempt): \(sqlError(e))"
+		),
+	}
+	// An attempt was queued no later than its earliest delivery, whichever
+	// order they arrive in, so `queued_at` only ever moves earlier.
+	let Ok(_) <- Deliveries.run(
+		"UPDATE workflow_runs SET queued_at = ?4 WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND queued_at > ?4",
+		[Text(r.repo), Integer(r.runId), Integer(r.attempt), Text(r.queuedAt)]
+	) else match {
+		Err(e) => Logger.error(
+			"could not record when \(r.repo) run \(r.runId) attempt \(r.attempt) was queued: \(sqlError(e))"
+		),
+	}
+	Effect.pure(())
 }
 
 ---

@@ -76,15 +76,15 @@
     "head_commit": {
       "id": "7bc9208d8352ee3e7a13f2c59530d4aaaac1b6a6",
       "tree_id": "c7424a77a4ab080610ce4eff7a9c03cbe3b00978",
-      "message": "Merge pull request #19 from bynk-lang/retention\n\nRetention: 90 days of deliveries, 7 days of workflow-run progress",
+      "message": "Merge pull request #19 from bynk-lang/retention",
       "timestamp": "2026-11-05T06:10:53Z",
       "author": {
-        "name": "Matthew Gibbons",
-        "email": "mhgibbons@me.com"
+        "name": "Test Author",
+        "email": "author@example.invalid"
       },
       "committer": {
-        "name": "GitHub",
-        "email": "noreply@github.com"
+        "name": "Test Author",
+        "email": "author@example.invalid"
       }
     },
     "repository": {

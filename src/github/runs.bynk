@@ -1,23 +1,46 @@
 commons github.runs
 
+uses github.events
+
 ---
 The parts of a `workflow_run` delivery the CI dashboard needs (#20). GitHub's
-payload carries much more; everything else is ignored. `repository.private`
-decides whether a run may appear on the public dashboard.
+payload carries much more; everything else is ignored.
 ---
 type RunDelivery = {
 	workflow_run: RunPayload,
-	repository: RunRepository,
+	repository: RepoRef,
 }
 
-type RunRepository = {
+---
+Whether a repository is public, from any delivery whose `repository` says.
+The public dashboard shows a repository only while its latest word is public.
+---
+type VisibilityDelivery = {
+	repository: Option[RepoVisibilityRef],
+}
+
+type RepoVisibilityRef = {
 	full_name: String,
-	private: Bool,
+	private: Option[Bool],
+}
+
+type RepoVisibility = {
+	repo: String,
+	isPublic: Bool,
+}
+
+fn visibilityOf(body: Bytes) -> Option[RepoVisibility] {
+	let Some(text) = body.decodeUtf8() else { None }
+	let Ok(v) = Json.decode[VisibilityDelivery](text) else { None }
+	let Some(r) = v.repository else { None }
+	let Some(isPrivate) = r.private else { None }
+	Some(RepoVisibility { repo: r.full_name, isPublic: !isPrivate })
 }
 
 ---
 `workflow_run` as GitHub sends it. `head_branch` is absent for some triggers,
 `conclusion` until the run completes, and `run_started_at` until it starts.
+`created_at` belongs to the run, not the attempt: a re-run keeps the original.
 ---
 type RunPayload = {
 	id: Int,
@@ -36,13 +59,14 @@ type RunPayload = {
 
 ---
 One run attempt, as `workflow_runs` stores it: times in the `received_at`
-format, and `completed_at` set only once the run has completed.
+format, and `completed_at` set only once the run has completed. `queuedAt` is
+when this attempt was queued: the run's `created_at` for attempt 1, and for a
+re-run this delivery's `updated_at` (the earliest delivery seen wins).
 ---
 type RunFact = {
 	repo: String,
 	runId: Int,
 	attempt: Int,
-	isPublic: Bool,
 	workflow: String,
 	path: String,
 	branch: Option[String],
@@ -51,6 +75,7 @@ type RunFact = {
 	status: String,
 	conclusion: Option[String],
 	createdAt: String,
+	queuedAt: String,
 	startedAt: Option[String],
 	completedAt: Option[String],
 	updatedAt: String,
@@ -76,7 +101,6 @@ fn runOf(body: Bytes) -> Result[RunFact, String] {
 		repo: p.repository.full_name,
 		runId: r.id,
 		attempt: r.run_attempt,
-		isPublic: !p.repository.private,
 		workflow: r.name,
 		path: r.path,
 		branch: r.head_branch,
@@ -85,6 +109,7 @@ fn runOf(body: Bytes) -> Result[RunFact, String] {
 		status: r.status,
 		conclusion: r.conclusion,
 		createdAt: created,
+		queuedAt: if r.run_attempt == 1 { created } else { updated },
 		startedAt: started,
 		completedAt: if r.status == "completed" { Some(updated) } else { None },
 		updatedAt: updated,

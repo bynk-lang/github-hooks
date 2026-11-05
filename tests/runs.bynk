@@ -26,13 +26,13 @@ case "a completed run is recorded with its times in the received_at format" {
 	expect r is Accepted(_)
 	let row <- Deliveries.first(
 		"""
-		SELECT repo, run_id, attempt, public, workflow, path, branch, sha, event, status, conclusion,
-		       created_at, started_at, completed_at, updated_at
+		SELECT repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+		       created_at, queued_at, started_at, completed_at, updated_at
 		FROM workflow_runs
 		""",
 		[]
 	)
-	expect row == Ok(Some("{\"repo\":\"bynk-lang/github-hooks\",\"run_id\":41978704067,\"attempt\":1,\"public\":1,\"workflow\":\"CI\",\"path\":\".github/workflows/ci.yml\",\"branch\":\"main\",\"sha\":\"7bc9208d8352ee3e7a13f2c59530d4aaaac1b6a6\",\"event\":\"push\",\"status\":\"completed\",\"conclusion\":\"success\",\"created_at\":\"2026-11-05T06:10:56.000Z\",\"started_at\":\"2026-11-05T06:10:56.000Z\",\"completed_at\":\"2026-11-05T06:11:34.000Z\",\"updated_at\":\"2026-11-05T06:11:34.000Z\"}"))
+	expect row == Ok(Some("{\"repo\":\"bynk-lang/github-hooks\",\"run_id\":41978704067,\"attempt\":1,\"workflow\":\"CI\",\"path\":\".github/workflows/ci.yml\",\"branch\":\"main\",\"sha\":\"7bc9208d8352ee3e7a13f2c59530d4aaaac1b6a6\",\"event\":\"push\",\"status\":\"completed\",\"conclusion\":\"success\",\"created_at\":\"2026-11-05T06:10:56.000Z\",\"queued_at\":\"2026-11-05T06:10:56.000Z\",\"started_at\":\"2026-11-05T06:10:56.000Z\",\"completed_at\":\"2026-11-05T06:11:34.000Z\",\"updated_at\":\"2026-11-05T06:11:34.000Z\"}"))
 }
 
 case "a run's deliveries move its row forward to completed" {
@@ -90,25 +90,80 @@ case "of two deliveries in the same state, the newer one wins" {
 	expect row == Ok(Some("{\"updated_at\":\"2026-11-05T06:11:10.000Z\"}"))
 }
 
-case "a re-run is a second attempt, recorded beside the first" {
+case "a re-run is a second attempt, queued when it was re-run, not when the run was" {
 	let _ <- api.POST("/github", runHeaders("run-1"), Bytes.fromUtf8(completedRun)) by GitHub
+	// Attempt 2, re-run the next morning: GitHub keeps the run's created_at.
 	let _ <- api.POST(
 		"/github",
 		runHeaders("run-2"),
-		Bytes.fromUtf8(completedRun.replace("\"run_attempt\": 1", "\"run_attempt\": 2"))
+		Bytes.fromUtf8(completedRun
+			.replace("\"run_attempt\": 1", "\"run_attempt\": 2")
+			.replace("\"status\": \"completed\"", "\"status\": \"requested\"")
+			.replace(
+				"\"updated_at\": \"2026-11-05T06:11:34Z\"",
+				"\"updated_at\": \"2026-11-06T09:00:00Z\""
+			))
 	) by GitHub
-	let attempts <- Deliveries.all("SELECT attempt FROM workflow_runs ORDER BY attempt", [])
-	expect attempts == Ok("[{\"attempt\":1},{\"attempt\":2}]")
+	let attempts <- Deliveries.all(
+		"SELECT attempt, created_at, queued_at FROM workflow_runs ORDER BY attempt",
+		[]
+	)
+	expect attempts == Ok("[{\"attempt\":1,\"created_at\":\"2026-11-05T06:10:56.000Z\",\"queued_at\":\"2026-11-05T06:10:56.000Z\"},{\"attempt\":2,\"created_at\":\"2026-11-05T06:10:56.000Z\",\"queued_at\":\"2026-11-06T09:00:00.000Z\"}]")
 }
 
-case "a private repository's run is recorded as not public" {
+case "a re-run's queue time is its earliest delivery, whatever order they arrive in" {
 	let _ <- api.POST(
 		"/github",
-		runHeaders("run-private"),
-		Bytes.fromUtf8(completedRun.replace("\"private\": false", "\"private\": true"))
+		runHeaders("run-2-progress"),
+		Bytes.fromUtf8(completedRun
+			.replace("\"run_attempt\": 1", "\"run_attempt\": 2")
+			.replace("\"status\": \"completed\"", "\"status\": \"in_progress\"")
+			.replace(
+				"\"updated_at\": \"2026-11-05T06:11:34Z\"",
+				"\"updated_at\": \"2026-11-06T09:00:40Z\""
+			))
 	) by GitHub
-	let row <- Deliveries.first("SELECT public FROM workflow_runs", [])
-	expect row == Ok(Some("{\"public\":0}"))
+	let _ <- api.POST(
+		"/github",
+		runHeaders("run-2-requested"),
+		Bytes.fromUtf8(completedRun
+			.replace("\"run_attempt\": 1", "\"run_attempt\": 2")
+			.replace("\"status\": \"completed\"", "\"status\": \"requested\"")
+			.replace(
+				"\"updated_at\": \"2026-11-05T06:11:34Z\"",
+				"\"updated_at\": \"2026-11-06T09:00:00Z\""
+			))
+	) by GitHub
+	let row <- Deliveries.first("SELECT status, queued_at FROM workflow_runs", [])
+	expect row == Ok(Some("{\"status\":\"in_progress\",\"queued_at\":\"2026-11-06T09:00:00.000Z\"}"))
+}
+
+case "a repository's visibility is its latest delivery's" {
+	let _ <- api.POST("/github", runHeaders("run-1"), Bytes.fromUtf8(completedRun)) by GitHub
+	let public <- Deliveries.first("SELECT repo, public FROM repositories", [])
+	expect public == Ok(Some("{\"repo\":\"bynk-lang/github-hooks\",\"public\":1}"))
+	// Made private later: one delivery saying so hides the history recorded before.
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: repository", "X-GitHub-Delivery: privatized-1"]),
+		Bytes.fromUtf8(
+			"{\"action\": \"privatized\", \"repository\": {\"full_name\": \"bynk-lang/github-hooks\", \"private\": true}}"
+		)
+	) by GitHub
+	let hidden <- Deliveries.first("SELECT public FROM repositories", [])
+	expect hidden == Ok(Some("{\"public\":0}"))
+	let runs <- Deliveries.first("SELECT count(*) AS n FROM workflow_runs", [])
+	expect runs == Ok(Some("{\"n\":1}"))
+}
+
+case "a delivery that doesn't say whether its repository is private changes nothing" {
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: push", "X-GitHub-Delivery: push-1"]),
+		Bytes.fromUtf8("{\"repository\": {\"full_name\": \"bynk-lang/bynk\"}}")
+	) by GitHub
+	let n <- Deliveries.first("SELECT count(*) AS n FROM repositories", [])
+	expect n == Ok(Some("{\"n\":0}"))
 }
 
 case "a redelivery changes nothing" {

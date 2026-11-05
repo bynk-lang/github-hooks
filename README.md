@@ -56,8 +56,13 @@ what makes a replay harmless.
 ([schema](migrations/github-hooks-deliveries/0004_create_workflow_runs.sql)):
 created by the first delivery, moved forward by later ones (`requested` <
 `in_progress` < `completed`, then the newer `updated_at`), never back, so
-deliveries arriving out of order are harmless. Those rows are kept for good;
-retention prunes only the raw deliveries.
+deliveries arriving out of order are harmless. Each attempt has its own
+`queued_at`, because GitHub's `created_at` belongs to the run and a re-run
+keeps it. Those rows are kept for good; retention prunes only the raw
+deliveries. Whether a repository is public lives in `repositories`, updated
+from every delivery that says, and is decided when the dashboard reads: making
+a repository private hides its whole history at once. Subscribing the App to
+**Repository** events makes that immediate (`privatized`, `publicized`).
 
 **Retention.** The `retention` cron service runs hourly (at :23). It deletes
 deliveries older than 90 days, `workflow_run` deliveries that are only
