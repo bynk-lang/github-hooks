@@ -71,6 +71,8 @@ post 401 "a delivery signed with the wrong secret is refused" "$BAD" "$DELIVERY-
 post 401 "an unsigned delivery is refused" "" "$DELIVERY-unsigned"
 get 200 "CI metrics are public" /metrics/ci
 get 200 "what CI is running now is public" /metrics/ci/now
+get 200 "CI history is public" "/metrics/ci/history?days=30"
+get 400 "a CI history window other than 7, 30 or 90 days is refused" "/metrics/ci/history?days=14"
 get 400 "a CI window longer than 90 days is refused" "/metrics/ci?days=91"
 get 400 "a CI window other than 7, 30 or 90 days is refused" "/metrics/ci?days=14"
 

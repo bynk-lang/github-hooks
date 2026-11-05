@@ -109,6 +109,49 @@ default branch. `?repo=owner/name` narrows both.
   rejected, which is what keeps the default branch green. A workflow that never
   runs on a `push` to the default branch doesn't appear here.
 
+## `GET /metrics/ci/history`
+
+Each workflow's recent runs and its health day by day, over the same window
+and filters as `/metrics/ci` (`days`, `repo`, `branch`, `event`). Public,
+cached and rate-limited the same way.
+
+```json
+{
+  "since": "2026-10-29T12:00:00.000Z",
+  "until": "2026-11-05T12:00:00.000Z",
+  "recent": [
+    {
+      "repo": "bynk-lang/bynk", "path": ".github/workflows/ci.yml", "run_id": 41981894779,
+      "attempt": 1, "branch": "main", "event": "push", "conclusion": "success",
+      "completed_at": "2026-11-05T10:10:00.000Z", "wall_seconds": 600
+    }
+  ],
+  "daily": [
+    {
+      "repo": "bynk-lang/bynk", "path": ".github/workflows/ci.yml", "day": "2026-11-05",
+      "runs": 8, "success": 4, "failed": 2, "other": 2,
+      "pass_percent": 67, "wall_p50_seconds": 600
+    }
+  ]
+}
+```
+
+- **`recent`**: each workflow's latest 20 completed attempts in the window,
+  oldest first (per workflow; the list is ordered by repository, path, then
+  completion). `wall_seconds` is `completed_at - queued_at` whatever the
+  conclusion. `conclusion` is `unknown` if a completed delivery carried none.
+- **`daily`**: one entry per workflow per UTC day (by completion) that has a
+  completed attempt; a day with none has no entry. The definitions are
+  `/metrics/ci`'s: `failed` is `failure` + `timed_out`, `other` is every
+  attempt not judged, `pass_percent` is `null` on a day nothing was judged,
+  and `wall_p50_seconds` is the nearest-rank median over successful attempts.
+  The window's first and last days are partial.
+
+On the page, the recent runs are a strip in each workflow's row (each mark
+links to the run on GitHub; runs the pass rate doesn't count are drawn half
+height), and **Trend** opens a chart of the daily pass rate, a chart of the
+daily median wall-clock time, and a table of the same figures.
+
 ## Settings
 
 | Name | Meaning |
@@ -134,8 +177,9 @@ an event whenever a public run's facts change:
 ```
 
 `conclusion` is `""` until the run completes. The page treats an event as a
-nudge: 3 seconds after the last one it refetches `/metrics/ci/now` and
-`/metrics/ci`, so what it shows always follows the routes' definitions. While
+nudge: 3 seconds after the last one it refetches `/metrics/ci/now`, and
+`/metrics/ci` and `/metrics/ci/history` too if any run completed meanwhile
+(nothing else moves them), so what it shows always follows the routes' definitions. While
 the feed is connected it polls only every 2 minutes, as a safety net; if the
 feed drops it reconnects with backoff (5 seconds, doubling to a minute) and
 polls every 30 seconds meanwhile.
