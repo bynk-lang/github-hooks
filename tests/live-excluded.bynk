@@ -1,0 +1,17 @@
+// An excluded repository's runs are never pushed, as they're never shown.
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/github-hooks"
+}
+
+fixture completedRun = "fixtures/github/workflow_run.completed.json"
+
+case "an excluded repository's run is never pushed" {
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: workflow_run", "X-GitHub-Delivery: ex-1"]),
+		Bytes.fromUtf8(completedRun)
+	) by GitHub
+	expect LiveFeed.publish never called
+}

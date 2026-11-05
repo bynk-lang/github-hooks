@@ -99,4 +99,8 @@ if [ -n "${API_TOKEN_SECRET:-}" ]; then
   get 401 "an expired token is refused" /activity "$EXPIRED"
 fi
 
+if [ "${SMOKE_LIVE:-}" = 1 ]; then
+  APP_WEBHOOK_SECRET=$APP_WEBHOOK_SECRET node "$(dirname "$0")/live.mjs" "$BASE" || failed=1
+fi
+
 exit $failed

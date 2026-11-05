@@ -125,3 +125,38 @@ When collection began, decoded from `SELECT min(completed_at) AS first`.
 type FirstRun = {
 	first: Option[String],
 }
+
+---
+The live board's key. There is one board, so one value; it is a refined
+route parameter because the WebSocket upgrade resolves its agent from the
+route (bynk-lang/bynk#2959).
+---
+type LiveBoardKey = String where Matches("^ci$")
+
+---
+A dashboard's id for its live connection: a random UUID the page makes.
+---
+type LiveClient = String where Matches("^[A-Za-z0-9-]{8,64}$")
+
+---
+What a dashboard may send on its live connection. It sends nothing today; the
+type exists because a WebSocket names its inbound frame.
+---
+type LiveHello = {
+	hello: String,
+}
+
+---
+A run that changed, pushed to every open dashboard so it refreshes at once.
+`conclusion` is `""` until the run completes (frames are Bynk's JSON, where an
+`Option` would be tagged, so a plain string keeps the page simple).
+---
+type LiveEvent = {
+	repo: String,
+	path: String,
+	workflow: String,
+	run_id: Int,
+	attempt: Int,
+	status: String,
+	conclusion: String,
+}

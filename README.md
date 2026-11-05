@@ -20,7 +20,7 @@ It is two things at once:
 | 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
 | 2 | Read API over recorded activity, daily digest, retention | read API and digest live ([docs](docs/read-api.md)); retention hourly, 90 days ([#6](https://github.com/bynk-lang/github-hooks/issues/6)) |
 | 3 | Act on events through the App's installation token | welcoming first-time contributors, live on `bynk-lang/bynk` ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
-| 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/` |
+| 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/`, updated live over WebSocket |
 
 ## How it works
 
@@ -171,6 +171,7 @@ fixtures/github/         recorded GitHub payloads the suites read (`fixture`)
 migrations/              D1 schema, applied in tests, by bynk dev and by bynk deploy
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
+scripts/live.mjs         the live feed end to end (WebSocket), run by smoke.sh with SMOKE_LIVE=1
 .github/actions/         CI's Bynk install, pinned by version and SHA-256
 docs/github-app.md       registering and installing the GitHub App
 docs/read-api.md         the read API: tokens, routes, what the digest counts

@@ -1,3 +1,26 @@
 version = 2
 
 [events]
+
+[agents."github.hooks.LiveBoard"]
+version = 1
+floor = 1
+
+[[agents."github.hooks.LiveBoard".shapes]]
+version = 1
+additive = false
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "conns"
+kind = "Map"
+type = "String, <non-boundary>"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$"), <non-boundary>'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "conns#0"
+type = "String"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "conns#1"
+type = "<non-boundary>"

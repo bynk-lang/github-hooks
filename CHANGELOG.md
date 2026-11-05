@@ -28,6 +28,13 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, step 4 (#20): the CI health page updates live. It opens a
+  WebSocket to `/live`, and each time a public, non-excluded run's facts
+  change (not on redeliveries) the service pushes a small event to every open
+  page through a `LiveBoard` agent (one Durable Object, at most 500
+  connections). The page refetches 3 seconds after the last event, polls only
+  every 2 minutes while live, and falls back to 30-second polling if the feed
+  drops. `scripts/live.mjs` checks the socket end to end in CI.
 - Phase 4, step 3 (#20): the CI health page at `/`. One table per public
   repository: each workflow's state on its default branch (icon and label),
   pass rate, runs, median and 95th-percentile wall-clock time, flaky runs and

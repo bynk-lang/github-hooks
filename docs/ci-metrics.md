@@ -1,8 +1,8 @@
 # CI metrics
 
 The **CI health page** at `/` shows these figures for every public
-repository, refreshing every 30 seconds (and pausing while the tab is
-hidden): each workflow's state on its default branch, pass rate, run count,
+repository, updated live as runs change (see *Live feed* below), with polling
+as a fallback (and pausing while the tab is hidden): each workflow's state on its default branch, pass rate, run count,
 median and 95th-percentile time, flaky runs and a bar of how its runs ended.
 It is plain HTML, CSS and JavaScript (`embeds/dashboard.html`, `assets/`),
 with colour tokens in one place for branding later. The routes below are
@@ -122,3 +122,34 @@ keeps the old value.
 Making a repository private hides its whole history at once. Subscribing the
 App to **Repository** events makes that immediate (`privatized`, `publicized`);
 otherwise it applies with the repository's next delivery.
+
+## Live feed
+
+The page opens a WebSocket to `/live?board=ci&client=<random id>` and is sent
+an event whenever a public run's facts change:
+
+```json
+{"repo": "bynk-lang/bynk", "path": ".github/workflows/ci.yml", "workflow": "CI",
+ "run_id": 41981894779, "attempt": 1, "status": "completed", "conclusion": "success"}
+```
+
+`conclusion` is `""` until the run completes. The page treats an event as a
+nudge: 3 seconds after the last one it refetches `/metrics/ci/now` and
+`/metrics/ci`, so what it shows always follows the routes' definitions. While
+the feed is connected it polls only every 2 minutes, as a safety net; if the
+feed drops it reconnects with backoff (5 seconds, doubling to a minute) and
+polls every 30 seconds meanwhile.
+
+- **What is sent:** only a change (a redelivery, or a late delivery that moves
+  nothing, sends nothing), and only for a repository the page may show
+  (public, not in `DASHBOARD_EXCLUDE`).
+- **Who may connect:** anyone, like the page. The connections live in one
+  Durable Object (`LiveBoard`), which holds at most 500; past that a new one is
+  closed at once and that page keeps polling.
+- **`board`** is always `ci`. It is a route parameter rather than fixed in the
+  code because of bynk-lang/bynk#2959.
+- **Testing:** suites can't drive a WebSocket yet, so the rule for what is
+  pushed is tested through a `LiveFeed` capability (`tests/live.bynk`), and
+  the socket end to end by `scripts/live.mjs`, which CI's smoke job runs
+  against the local Worker (`SMOKE_LIVE=1`). It records a made-up run, so it
+  doesn't run against production by default.

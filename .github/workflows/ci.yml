@@ -47,6 +47,7 @@ jobs:
         env:
           APP_WEBHOOK_SECRET: ci-secret
           API_TOKEN_SECRET: ci-api
+          SMOKE_LIVE: "1"
       - name: Worker log
         if: always()
         run: cat dev.log

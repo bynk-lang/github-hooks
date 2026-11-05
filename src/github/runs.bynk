@@ -1,6 +1,7 @@
 commons github.runs
 
 uses github.events
+uses github.metrics
 
 ---
 The parts of a `workflow_run` delivery the CI dashboard needs (#20). GitHub's
@@ -128,4 +129,19 @@ GitHub's `2026-11-05T06:10:56Z` as `2026-11-05T06:10:56.000Z`, the format
 ---
 fn isoTime(github: String) -> Option[String] {
 	Instant.fromIso(github).map((t) => t.toIso())
+}
+
+---
+The live-feed event for a run that changed.
+---
+fn liveEventOf(r: RunFact) -> LiveEvent {
+	LiveEvent {
+		repo: r.repo,
+		path: r.path,
+		workflow: r.workflow,
+		run_id: r.runId,
+		attempt: r.attempt,
+		status: r.status,
+		conclusion: r.conclusion.getOrElse(""),
+	}
 }
