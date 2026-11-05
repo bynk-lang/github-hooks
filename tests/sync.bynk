@@ -300,3 +300,26 @@ case "repairs go oldest first" {
 	)
 	expect rows == Ok(Some("{\"rows\":\"3:merged 7:open\"}"))
 }
+
+case "a pull request held under a differently cased name is still repaired, under that name" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("[]"), ok(prIn("Bynk-Lang/Bynk", 5, false, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\""))]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, updated_at)
+		VALUES ('Bynk-Lang/Bynk', 5, 'Held', 'a-contributor', 0, 'main', 'h', 0, 'open', '2026-11-01T09:00:00.000Z', '2026-11-03T09:00:00.000Z')
+		""",
+		[]
+	)
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/Bynk-Lang/Bynk/pulls/5"
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || state, ' ') AS rows FROM pull_requests",
+		[]
+	)
+	expect rows == Ok(Some("{\"rows\":\"Bynk-Lang/Bynk#5:merged\"}"))
+}

@@ -178,7 +178,7 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 		number: Int
 	) -> Effect[Result[PullPayload, ApiFailure]] {
 		let url = "https://api.github.com/repos/\(repo)/pulls/\(number)"
-		let Ok(res) <- getAsApp(installation, url) else match {
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
 			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
 		}
 		let true = res.status == 200 else {
@@ -196,10 +196,6 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 		}
 	}
 
-	// An installation token carries the permissions the installation had when it
-	// was minted. A 401 or 403 may only mean the cached token predates a change
-	// (write access just approved, a token revoked), so drop it and try once more
-	// with a fresh one before giving up.
 	fn comment(
 		installation: Int,
 		repo: String,
@@ -208,23 +204,10 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	) -> Effect[Result[(), String]] {
 		let url = "https://api.github.com/repos/\(repo)/issues/\(number)/comments"
 		let payload = Json.encode(NewComment { body: body })
-		let Ok(token) <- AppAuth.token(installation) else match {
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.post(token, url, payload)) else match {
 			Err(why) => Effect.pure(Err(why)),
 		}
-		let Ok(first) <- GitHubHttp.post(token, url, payload) else match {
-			Err(why) => Effect.pure(Err(why)),
-		}
-		let true = first.status == 401 || first.status == 403 else {
-			Effect.pure(answered(first, repo, number))
-		}
-		let _ <- AppAuth.forget(installation)
-		let Ok(fresh) <- AppAuth.token(installation) else match {
-			Err(why) => Effect.pure(Err(why)),
-		}
-		let Ok(again) <- GitHubHttp.post(fresh, url, payload) else match {
-			Err(why) => Effect.pure(Err(why)),
-		}
-		Effect.pure(answered(again, repo, number))
+		Effect.pure(answered(res, repo, number))
 	}
 }
 
@@ -237,7 +220,7 @@ fn openPullsFrom(
 	sofar: List[PullPayload]
 ) -> Effect[Result[List[PullPayload], ApiFailure]] given AppAuth, GitHubHttp {
 	let url = "https://api.github.com/repos/\(repo)/pulls?state=open&per_page=\(PULL_PAGE)&page=\(page)"
-	let Ok(res) <- getAsApp(installation, url) else match {
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
 		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
 	}
 	let true = res.status == 200 else {
@@ -260,17 +243,20 @@ fn openPullsFrom(
 	}
 }
 
-// A GET as the App's installation. As with `comment`, a 401 or 403 may only
-// mean the cached token predates a change, so it is dropped and the call made
-// once more with a fresh one.
-fn getAsApp(
+// One call to GitHub as the App's installation, given the token. An
+// installation token carries the permissions the installation had when it was
+// minted, so a 401 or 403 may only mean the cached one predates a change
+// (write access just approved, a token revoked): it is dropped and the call
+// made once more with a fresh one before giving up. Every GitHubApi call goes
+// through here.
+fn asApp(
 	installation: Int,
-	url: String
-) -> Effect[Result[Response, String]] given AppAuth, GitHubHttp {
+	call: String -> Effect[Result[Response, String]]
+) -> Effect[Result[Response, String]] given AppAuth {
 	let Ok(token) <- AppAuth.token(installation) else match {
 		Err(why) => Effect.pure(Err(why)),
 	}
-	let Ok(first) <- GitHubHttp.get(token, url) else match {
+	let Ok(first) <- call(token) else match {
 		Err(why) => Effect.pure(Err(why)),
 	}
 	let true = first.status == 401 || first.status == 403 else { Effect.pure(Ok(first)) }
@@ -278,7 +264,7 @@ fn getAsApp(
 	let Ok(fresh) <- AppAuth.token(installation) else match {
 		Err(why) => Effect.pure(Err(why)),
 	}
-	GitHubHttp.get(fresh, url)
+	call(fresh)
 }
 
 // GitHub's largest page, and how many the sync reads: 500 open pull requests
@@ -1380,7 +1366,7 @@ service pullSync from cron {
 		))
 		let failures = errorsOf(results)
 		let true = failures.length() > 0 else { Effect.pure(Ok(())) }
-		Effect.pure(Err(failures.fold("", (all, f) => if all == "" { f } else { "\(all); \(f)" })))
+		Effect.pure(Err(joined(failures, "; ")))
 	}
 }
 
@@ -1421,7 +1407,7 @@ fn syncRepo(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Logge
 		Err(e) => syncFailed("\(t.repo): could not save its open pull requests: \(sqlError(e))"),
 	}
 	let Ok(held) <- Deliveries.all(
-		"SELECT number FROM pull_requests WHERE repo = ?1 AND state = 'open' ORDER BY updated_at, number",
+		"SELECT repo, number FROM pull_requests WHERE repo = ?1 COLLATE NOCASE AND state = 'open' ORDER BY updated_at, number",
 		[Text(t.repo)]
 	) else match {
 		Err(e) => syncFailed(
@@ -1434,15 +1420,15 @@ fn syncRepo(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Logge
 		),
 	}
 	let gone = heldOpen.filter((h) => !open.any((pr) => pr.number == h.number)).take(MAX_REPAIRS)
-	let repairs <- gone.traverseAll((h) => repair(installation, t.repo, h.number))
+	// Each is saved under the name its row has, so a difference in case can't
+	// make a second row.
+	let repairs <- gone.traverseAll((h) => repair(installation, h.repo, h.number))
 	let repaired = repairs.filter((r) => r == Ok(true)).length()
 	let failed = unread.concat(errorsOf(repairs.map((r) => r.map((_) => ()))))
 	let _ <- Logger.info(
 		"pull request sync: \(t.repo) has \(open.length()) open, \(repaired) repaired\(if failed.length() > 0 { ", \(failed.length()) failed" } else { "" })"
 	)
-	let true = failed.length() == 0 else {
-		Effect.pure(Err("\(t.repo): \(failed.fold("", (all, f) => if all == "" { f } else { "\(all); \(f)" }))"))
-	}
+	let true = failed.length() == 0 else { Effect.pure(Err("\(t.repo): \(joined(failed, "; "))")) }
 	Effect.pure(Ok(()))
 }
 

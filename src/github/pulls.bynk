@@ -218,8 +218,10 @@ type SyncTarget = {
 }
 
 ---
-A pull request's number, as the sync reads the ones it holds open.
+A pull request the sync holds open: its repository, as its row names it, and
+its number.
 ---
 type PullNumber = {
+	repo: String,
 	number: Int,
 }
