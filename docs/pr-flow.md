@@ -177,7 +177,8 @@ each public repository it shows:
 
 Like the CI page it polls (open pull requests every 30 seconds, the window's
 figures every minute) and listens on the live feed, refetching both 3 seconds
-after a pull request changes.
+after a pull request changes, or once their cached copies expire if they were
+fetched less than 30 seconds before (as the CI page does).
 
 ## Live feed
 

@@ -8,6 +8,7 @@
   const METRICS_EVERY_MS = 60_000;  // the window's figures move more slowly
   const LIVE_POLL_MS = 120_000;     // while the live feed is up, polling is only a safety net
   const LIVE_SETTLE_MS = 3_000;     // a burst of runs costs one refresh, not one each
+  const CACHE_MS = 30_000;          // the routes' `max-age`, at the edge and in the browser
   let days = 7;
   let metrics = null;
   let now = null;
@@ -561,6 +562,15 @@
   const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
     : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
+  // How long to wait before refetching after a live event: the settle time,
+  // or until the copies last fetched have left the cache (they are cached 30
+  // seconds at the edge, keyed by URL, so an earlier refetch would only get
+  // the same answer back), whichever is later.
+  function liveDelay(lastFetches) {
+    const latest = Math.max(0, ...lastFetches.filter(Boolean).map((d) => d.getTime()));
+    return Math.max(LIVE_SETTLE_MS, latest + CACHE_MS + 1_000 - Date.now());
+  }
+
   function connect() {
     if (socket || !("WebSocket" in globalThis)) return;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -587,7 +597,9 @@
         refreshNow();
         if (completedSince) refreshWindow();
         completedSince = false;
-      }, LIVE_SETTLE_MS);
+      }, liveDelay(completedSince
+        ? [fresh.now.lastOk, fresh.metrics.lastOk, fresh.history.lastOk]
+        : [fresh.now.lastOk]));
     };
     ws.onclose = () => {
       if (socket !== ws) return;

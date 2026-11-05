@@ -183,7 +183,11 @@ an event whenever a public run's facts change:
 ignores. The page treats an event as a
 nudge: 3 seconds after the last one it refetches `/metrics/ci/now`, and
 `/metrics/ci` and `/metrics/ci/history` too if any run completed meanwhile
-(nothing else moves them), so what it shows always follows the routes' definitions. While
+(nothing else moves them), so what it shows always follows the routes' definitions.
+If those were fetched less than 30 seconds earlier, it waits until their
+cached copies expire (the routes are cached 30 seconds per URL, at the edge
+and in the browser), so the refetch gets the change rather than the same
+answer. While
 the feed is connected it polls only every 2 minutes, as a safety net; if the
 feed drops it reconnects with backoff (5 seconds, doubling to a minute) and
 polls every 30 seconds meanwhile.

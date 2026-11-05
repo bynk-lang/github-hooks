@@ -8,6 +8,7 @@
   const FLOW_EVERY_MS = 60_000;     // the window's figures move more slowly
   const LIVE_POLL_MS = 120_000;     // while the live feed is up, polling is only a safety net
   const LIVE_SETTLE_MS = 3_000;     // a burst of changes costs one refresh, not one each
+  const CACHE_MS = 30_000;          // the routes' `max-age`, at the edge and in the browser
   let days = 7;
   let flow = null;
   let open = null;
@@ -289,12 +290,14 @@
       return;
     }
     for (const [name, r] of [...repos].sort(([a], [b]) => a.localeCompare(b))) {
-      const people = r.open.filter((p) => !p.author_is_bot);
+      const bots = r.open.filter((p) => p.author_is_bot).length;
       const section = el("section", { class: "repo", "aria-labelledby": `repo-${name}` });
       section.append(el("div", { class: "repo-head" },
         el("h2", { id: `repo-${name}` },
           el("a", { href: `https://github.com/${name}/pulls`, "data-key": `link:${name}` }, name)),
-        el("span", { class: "running" }, people.length === 0 ? "Nothing open" : `${people.length} open`)));
+        el("span", { class: "running" }, r.open.length === 0
+          ? "Nothing open"
+          : `${r.open.length} open${bots > 0 ? ` (${bots} by ${bots === 1 ? "a bot" : "bots"})` : ""}`)));
       if (r.flow) {
         section.append(tiles(r.flow));
         const extras = [];
@@ -345,6 +348,15 @@
   const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
     : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
+  // How long to wait before refetching after a live event: the settle time,
+  // or until the copies last fetched have left the cache (they are cached 30
+  // seconds at the edge, keyed by URL, so an earlier refetch would only get
+  // the same answer back), whichever is later.
+  function liveDelay(lastFetches) {
+    const latest = Math.max(0, ...lastFetches.filter(Boolean).map((d) => d.getTime()));
+    return Math.max(LIVE_SETTLE_MS, latest + CACHE_MS + 1_000 - Date.now());
+  }
+
   function connect() {
     if (socket || !("WebSocket" in globalThis)) return;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -358,7 +370,7 @@
         // unreadable: refresh anyway
       }
       clearTimeout(settle);
-      settle = setTimeout(refreshAll, LIVE_SETTLE_MS);
+      settle = setTimeout(refreshAll, liveDelay([fresh.flow.lastOk, fresh.open.lastOk]));
     };
     ws.onclose = () => {
       if (socket !== ws) return;
