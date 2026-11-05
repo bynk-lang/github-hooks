@@ -40,7 +40,11 @@ suite github.hooks as system {
 
 	case "reading activity without a valid token is refused" {
 		let none <- api.GET("/activity") by Nobody
+		let forged <- api.GET("/activity") by Forged
+		let expired <- api.GET("/activity") by Expired
 		expect none is Rejected(Unauthorized)
+		expect forged is Rejected(Unauthorized)
+		expect expired is Rejected(Unauthorized)
 	}
 
 	case "a digest day that is not YYYY-MM-DD is refused at the boundary" {

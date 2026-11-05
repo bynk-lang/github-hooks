@@ -6,10 +6,10 @@ description: >
 inputs:
   version:
     description: The Bynk release tag to install.
-    default: v0.492.1
+    default: v0.508.4
   sha256:
     description: SHA-256 of bynk-<version>-x86_64-unknown-linux-gnu.tar.gz. Change it with the version.
-    default: aec1b4515f6a7e95169e0c1cb3b79f665ccb0f34de31b4642ffe6403ad9e4266
+    default: 444570f92bf25b619b8ec8b99cf645595468870015539ecd1f9b14f9cb44bfb0
 
 runs:
   using: composite

@@ -6,6 +6,14 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Built and tested with Bynk v0.508.4 (was v0.492.1). `Bot.react` now takes
+  the `Delivery` itself instead of reading it again from its parts, now that a
+  capability may take a commons type (bynk-lang/bynk#2886). The read API's
+  token refusals are tested for forged and expired tokens too (`by Forged`,
+  `by Expired`).
+
 ### Added
 
 - Phase 3: the service acts as the GitHub App. It welcomes a first-time
