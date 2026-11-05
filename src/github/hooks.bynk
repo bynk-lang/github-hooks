@@ -319,6 +319,12 @@ service api from http {
 		maxBody: 26_214_400,
 	}
 
+	// Responses are read by people and scripts, not only by Bynk, so an `Option`
+	// is written plainly: `Some(v)` as `v`, `None` as `null` (bynk-lang/bynk#2858).
+	json {
+		options: plain,
+	}
+
 	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
 		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
 	}

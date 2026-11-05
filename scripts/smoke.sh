@@ -77,6 +77,17 @@ if [ -n "${API_TOKEN_SECRET:-}" ]; then
   EXPIRED=$(bynk token Reader --sub smoke --expired --input "$PROJECT")
   get 200 "a reader with a token lists activity" /activity "$TOKEN"
   get 200 "a reader reads today's digest" "/digest/$(date -u +%Y-%m-%d)" "$TOKEN"
+  # The delivery recorded above, as plain JSON: an Option is its value or null.
+  shape=$(curl -s -H "Authorization: Bearer $TOKEN" "$BASE/activity" | DELIVERY=$DELIVERY node -e '
+    let data = "";
+    process.stdin.on("data", (c) => (data += c)).on("end", () => {
+      try {
+        const row = JSON.parse(data).find((r) => r.id === process.env.DELIVERY);
+        process.stdout.write(row && row.action === "opened" && row.deleted === null ? "plain" : "tagged");
+      } catch { process.stdout.write("unreadable"); }
+    });
+  ') || shape=none
+  check plain "$shape" "activity is plain JSON (action is a string, deleted is null)"
   get 400 "a digest day that isn't YYYY-MM-DD is refused" /digest/yesterday "$TOKEN"
   get 400 "a digest day that doesn't exist is refused" /digest/2026-02-30 "$TOKEN"
   get 401 "reading without a token is refused" /activity

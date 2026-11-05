@@ -56,21 +56,19 @@ A list of deliveries, each a row of the `deliveries` table:
 {
   "id": "72d3162e-cc78-11e3-81ab-4c9367dc0958",
   "event": "issues",
-  "action": { "kind": "Some", "value": "opened" },
-  "repo": { "kind": "Some", "value": "bynk-lang/github-hooks" },
-  "sender": { "kind": "Some", "value": "octocat" },
-  "org": { "kind": "Some", "value": "bynk-lang" },
-  "installation": { "kind": "Some", "value": 178078395 },
-  "deleted": { "kind": "None" },
+  "action": "opened",
+  "repo": "bynk-lang/github-hooks",
+  "sender": "octocat",
+  "org": "bynk-lang",
+  "installation": 178078395,
+  "deleted": null,
   "size": 12021,
   "received_at": "2026-11-03T06:00:54.761Z"
 }
 ```
 
-Optional fields use Bynk's tagged JSON form, `{"kind": "Some", "value": …}` or
-`{"kind": "None"}` (plain values and `null` are proposed in
-bynk-lang/bynk#2858). `deleted` is set only on a `push`: `true` when the push
-deleted a branch or tag.
+An optional field is its value, or `null` when it's absent. `deleted` is set
+only on a `push`: `true` when the push deleted a branch or tag.
 
 ### `GET /digest/:day`
 
@@ -79,9 +77,9 @@ deleted a branch or tag.
   "day": "2026-11-03",
   "total": 4,
   "tallies": [
-    { "repo": { "kind": "Some", "value": "bynk-lang/bynk" }, "event": "issues", "action": { "kind": "Some", "value": "opened" }, "deliveries": 2 },
-    { "repo": { "kind": "Some", "value": "bynk-lang/bynk" }, "event": "delete", "action": { "kind": "None" }, "deliveries": 1 },
-    { "repo": { "kind": "Some", "value": "bynk-lang/bynk" }, "event": "push", "action": { "kind": "None" }, "deliveries": 1 }
+    { "repo": "bynk-lang/bynk", "event": "issues", "action": "opened", "deliveries": 2 },
+    { "repo": "bynk-lang/bynk", "event": "delete", "action": null, "deliveries": 1 },
+    { "repo": "bynk-lang/bynk", "event": "push", "action": null, "deliveries": 1 }
   ]
 }
 ```
