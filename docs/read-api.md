@@ -14,11 +14,13 @@ that name (`me listed activity`).
 Mint one with:
 
 ```sh
-API_TOKEN_SECRET=… scripts/token.sh <reader-name> [lifetime-seconds]   # default 30 days
+API_TOKEN_SECRET=… bynk token Reader --sub <reader-name> --lifetime 30d   # default 1h
 ```
 
-The script reads the secret from the environment and signs with Node, so the
-secret never appears in a process's arguments. Send the token as `Authorization: Bearer <token>`. Anyone holding the secret can
+`bynk token` signs exactly as the `Reader` actor's generated check verifies,
+checks the name against `ReaderId` first, and reads the secret from the
+environment under the name the actor declares, so it never appears in a
+process's arguments. Send the token as `Authorization: Bearer <token>`. Anyone holding the secret can
 mint tokens, so keep it as you would the webhook secret. To revoke every token
 at once, rotate the secret and redeploy.
 
@@ -31,7 +33,7 @@ at once, rotate the secret and redeploy.
 | `GET /digest/:day` | one UTC day's deliveries counted by repository, event and action, busiest first; `:day` is `YYYY-MM-DD` |
 
 ```sh
-TOKEN=$(API_TOKEN_SECRET=… scripts/token.sh me)
+TOKEN=$(API_TOKEN_SECRET=… bynk token Reader --sub me)
 BASE=https://github-hooks.<subdomain>.workers.dev
 
 curl -H "Authorization: Bearer $TOKEN" $BASE/activity

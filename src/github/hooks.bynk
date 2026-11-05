@@ -303,7 +303,7 @@ actor GitHub { auth = Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-S
 Who may read recorded activity: a caller presenting a JWT signed (HS256) with
 `API_TOKEN_SECRET`. The compiler generates the check, including `exp` and
 `nbf`, and answers `401` to a missing, forged or expired token.
-`scripts/token.sh` mints one. The token's `sub` names the reader, for logs.
+`bynk token Reader --sub <name>` mints one. The token's `sub` names the reader, for logs.
 ---
 actor Reader { auth = Bearer(secret = "API_TOKEN_SECRET"), identity = ReaderId }
 

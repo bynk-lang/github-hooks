@@ -8,12 +8,13 @@
 # The secrets come from the environment, under the names the Worker uses, so
 # they never appear in a process's arguments. APP_WEBHOOK_SECRET defaults to
 # `dev-secret`, to suit `bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret`. With
-# API_TOKEN_SECRET set, it also checks the read API's token handling.
+# API_TOKEN_SECRET set, it also checks the read API's token handling, minting
+# tokens with `bynk token Reader`.
 set -eu
 
 BASE=${1:-http://localhost:8787}
 APP_WEBHOOK_SECRET=${APP_WEBHOOK_SECRET:-dev-secret}
-TOKEN_SH="$(dirname "$0")/token.sh"
+PROJECT="$(dirname "$0")/.."
 DELIVERY="smoke-$(date +%s)-$$"
 BODY='{"action":"opened","repository":{"full_name":"bynk-lang/github-hooks"},"sender":{"login":"octocat"},"organization":{"login":"bynk-lang"},"installation":{"id":1}}'
 
@@ -70,9 +71,10 @@ post 401 "a delivery signed with the wrong secret is refused" "$BAD" "$DELIVERY-
 post 401 "an unsigned delivery is refused" "" "$DELIVERY-unsigned"
 
 if [ -n "${API_TOKEN_SECRET:-}" ]; then
-  TOKEN=$("$TOKEN_SH" smoke 300)
-  WRONG=$(API_TOKEN_SECRET=not-the-secret "$TOKEN_SH" smoke 300)
-  EXPIRED=$(TOKEN_ISSUED_AT=$(($(date +%s) - 3600)) "$TOKEN_SH" smoke 60)
+  # `bynk token` reads API_TOKEN_SECRET from the environment, as the Worker does.
+  TOKEN=$(bynk token Reader --sub smoke --lifetime 5m --input "$PROJECT")
+  WRONG=$(API_TOKEN_SECRET=not-the-secret bynk token Reader --sub smoke --input "$PROJECT")
+  EXPIRED=$(bynk token Reader --sub smoke --expired --input "$PROJECT")
   get 200 "a reader with a token lists activity" /activity "$TOKEN"
   get 200 "a reader reads today's digest" "/digest/$(date -u +%Y-%m-%d)" "$TOKEN"
   get 400 "a digest day that isn't YYYY-MM-DD is refused" /digest/yesterday "$TOKEN"

@@ -28,7 +28,7 @@ printf 'API_TOKEN_SECRET=%s\n' "$(openssl rand -hex 32)" >> .secrets.env
 bynk deploy --secrets-file .secrets.env
 ```
 
-Keep `API_TOKEN_SECRET` somewhere safe too: `scripts/token.sh` needs it to mint
+Keep `API_TOKEN_SECRET` somewhere safe too: `bynk token Reader` needs it to mint
 read-API tokens. Changing it later invalidates every token minted with the old
 value.
 
