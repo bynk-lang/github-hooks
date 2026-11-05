@@ -1,12 +1,12 @@
 commons github.activity
 
 ---
-A calendar day in UTC, `YYYY-MM-DD`, as `received_at` begins. A path parameter
-of this type is checked at the boundary, so `GET /digest/yesterday` or
-`/digest/2026-13-45` is a `400` before the handler runs. The pattern bounds the
-month to 01–12 and the day to 01–31; `rangeOf` rejects the rest (`02-30`).
+A calendar day in UTC, `YYYY-MM-DD`, as `received_at` begins. `IsoDate` admits
+only dates that exist, so a path parameter of this type is checked at the
+boundary: `GET /digest/yesterday`, `/digest/2026-13-01` and `/digest/2026-02-30`
+are each a `400` before the handler runs.
 ---
-type Day = String where Matches("^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$")
+type Day = String where IsoDate
 
 ---
 The instants a UTC day spans: from its first millisecond (`start`) up to, not
@@ -18,9 +18,9 @@ type DayRange = {
 }
 
 ---
-A day's range, or `None` when the date doesn't exist (`2026-02-30`, or
-29 February outside a leap year). `Instant.fromIso` decides which dates exist,
-so this needs no calendar arithmetic of its own; a UTC day is always 24 hours.
+A day's range; a UTC day is always 24 hours. `Instant.fromIso` answers an
+`Option`, but it applies the same calendar rule as `IsoDate`, so for a `Day`
+it is always `Some`.
 ---
 fn rangeOf(day: Day) -> Option[DayRange] {
 	let Some(start) = Instant.fromIso("\(day)T00:00:00Z") else { None }

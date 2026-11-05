@@ -385,7 +385,12 @@ service api from http {
 	on GET("/digest/:day") (
 		day: Day
 	) -> Effect[HttpResult[DayDigest]] by reader: Reader given Deliveries, Logger {
-		let Some(range) = rangeOf(day) else { BadRequest("\(day) is not a date") }
+		// Unreachable for an `IsoDate`; answered as a server error if the two
+		// calendar rules ever disagree, never as the caller's mistake.
+		let Some(range) = rangeOf(day) else {
+			let _ <- Logger.error("\(day) passed IsoDate but has no instant")
+			ServerError("could not read the day")
+		}
 		// `received_at` defaults to strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
 		// three-digit milliseconds, so the range compares as text, in time order,

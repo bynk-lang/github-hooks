@@ -39,10 +39,9 @@ curl -H "Authorization: Bearer $TOKEN" $BASE/activity/bynk-lang/bynk
 curl -H "Authorization: Bearer $TOKEN" $BASE/digest/2026-11-03
 ```
 
-A `:day` that isn't a `YYYY-MM-DD` date is refused with `400`: one that doesn't
-fit the pattern (`/digest/yesterday`, `/digest/2026-13-01`) at the boundary, by
-the `Day` type's refinement, and one that fits but doesn't exist
-(`/digest/2026-02-30`) by the handler, before it reads anything.
+A `:day` that isn't a real `YYYY-MM-DD` date is refused with `400` at the
+boundary, by the `Day` type's `IsoDate` refinement, before the handler runs:
+`/digest/yesterday`, `/digest/2026-13-01` and `/digest/2026-02-30` alike.
 
 Owner and repository names match whatever their case, as on GitHub:
 `/activity/Bynk-Lang/bynk` is `/activity/bynk-lang/bynk`.
