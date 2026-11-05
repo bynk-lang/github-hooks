@@ -47,6 +47,29 @@ suite github.hooks as system {
 		expect expired is Rejected(Unauthorized)
 	}
 
+	case "CI metrics are public, and their query is checked at the boundary" {
+		let open <- api.GET("/metrics/ci", Wire(""), RequestHeaders.of([])) by Visitor
+		let now <- api.GET("/metrics/ci/now", Wire(""), RequestHeaders.of([])) by Visitor
+		let tooLong <- api.GET("/metrics/ci", Wire("?days=91"), RequestHeaders.of([])) by Visitor
+		let notARepo <- api.GET("/metrics/ci", Wire("?repo=bynk"), RequestHeaders.of([])) by Visitor
+		let notATrigger <- api.GET(
+			"/metrics/ci",
+			Wire("?event=anything"),
+			RequestHeaders.of([])
+		) by Visitor
+		let notABranch <- api.GET(
+			"/metrics/ci",
+			Wire("?branch=a%20b"),
+			RequestHeaders.of([])
+		) by Visitor
+		expect open is Handled(Ok(_))
+		expect now is Handled(Ok(_))
+		expect tooLong is Rejected(_)
+		expect notARepo is Rejected(_)
+		expect notATrigger is Rejected(_)
+		expect notABranch is Rejected(_)
+	}
+
 	case "a digest day that is not a real YYYY-MM-DD date is refused at the boundary" {
 		let word <- api.GET("/digest/:day", Wire("yesterday")) by Reader("ci")
 		let month <- api.GET("/digest/:day", Wire("2026-13-01")) by Reader("ci")

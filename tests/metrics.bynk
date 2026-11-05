@@ -1,0 +1,335 @@
+// Phase 4, step 2 (#20): the public CI metrics, against an in-memory D1 with
+// the migrations applied and a hand-built set of runs whose numbers are worked
+// out below. The clock is fixed at 2026-11-05T12:00:00Z, so the default 7-day
+// window opens at 2026-10-29T12:00:00Z.
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+--- A viewer's request headers: one address, well within the limit.
+fn viewer() -> RequestHeaders {
+	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7"])
+}
+
+---
+The runs every case reads. In `bynk-lang/bynk`'s CI (`ci.yml`), within the
+window: r1 600 s, r2 1200 s, r3 1800 s (a PR branch) and r4's re-run 600 s
+succeed; r4's first attempt fails (so r4 is flaky); r5 is cancelled, r6
+skipped and r7 timed out, last of all on `main`. So 8 runs, 4 successes, 6
+judged: 67 % pass; successful wall-clock 600, 600, 1200, 1800: p50 600, p95
+1800. r8 completed before the window, r9 is running, r10 has been "running"
+for two days. CodeQL last passed on `main`. A private repository and an
+excluded one have a passing run each, and must not appear.
+---
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+				                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+				  ('bynk-lang/bynk', 1, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a1', 'push', 'completed', 'success',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:10:00.000Z', '2026-11-05T10:10:00.000Z'),
+				  ('bynk-lang/bynk', 2, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a2', 'push', 'completed', 'success',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:20:00.000Z', '2026-11-05T10:20:00.000Z'),
+				  ('bynk-lang/bynk', 3, 1, 'CI', '.github/workflows/ci.yml', 'feature', 'a3', 'pull_request', 'completed', 'success',
+				   '2026-11-05T09:00:00.000Z', '2026-11-05T09:00:00.000Z', '2026-11-05T09:00:00.000Z', '2026-11-05T09:30:00.000Z', '2026-11-05T09:30:00.000Z'),
+				  ('bynk-lang/bynk', 4, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a4', 'push', 'completed', 'failure',
+				   '2026-11-05T08:00:00.000Z', '2026-11-05T08:00:00.000Z', '2026-11-05T08:00:00.000Z', '2026-11-05T08:05:00.000Z', '2026-11-05T08:05:00.000Z'),
+				  ('bynk-lang/bynk', 4, 2, 'CI', '.github/workflows/ci.yml', 'main', 'a4', 'push', 'completed', 'success',
+				   '2026-11-05T08:00:00.000Z', '2026-11-05T08:10:00.000Z', '2026-11-05T08:10:00.000Z', '2026-11-05T08:20:00.000Z', '2026-11-05T08:20:00.000Z'),
+				  ('bynk-lang/bynk', 5, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a5', 'push', 'completed', 'cancelled',
+				   '2026-11-05T10:30:00.000Z', '2026-11-05T10:30:00.000Z', '2026-11-05T10:30:00.000Z', '2026-11-05T10:31:00.000Z', '2026-11-05T10:31:00.000Z'),
+				  ('bynk-lang/bynk', 6, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a6', 'push', 'completed', 'skipped',
+				   '2026-11-05T10:40:00.000Z', '2026-11-05T10:40:00.000Z', '2026-11-05T10:40:00.000Z', '2026-11-05T10:40:05.000Z', '2026-11-05T10:40:05.000Z'),
+				  ('bynk-lang/bynk', 7, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a7', 'push', 'completed', 'timed_out',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z'),
+				  ('bynk-lang/bynk', 8, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a8', 'push', 'completed', 'success',
+				   '2026-10-20T10:00:00.000Z', '2026-10-20T10:00:00.000Z', '2026-10-20T10:00:00.000Z', '2026-10-20T10:10:00.000Z', '2026-10-20T10:10:00.000Z'),
+				  ('bynk-lang/bynk', 9, 1, 'CI', '.github/workflows/ci.yml', 'feature', 'a9', 'pull_request', 'in_progress', NULL,
+				   '2026-11-05T11:55:00.000Z', '2026-11-05T11:55:00.000Z', '2026-11-05T11:55:00.000Z', NULL, '2026-11-05T11:56:00.000Z'),
+				  ('bynk-lang/bynk', 10, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a10', 'push', 'in_progress', NULL,
+				   '2026-11-03T10:00:00.000Z', '2026-11-03T10:00:00.000Z', '2026-11-03T10:00:00.000Z', NULL, '2026-11-03T10:00:00.000Z'),
+				  ('bynk-lang/bynk', 11, 1, 'CodeQL', '.github/workflows/codeql.yml', 'main', 'a11', 'push', 'completed', 'success',
+				   '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z', '2026-11-05T11:30:00.000Z', '2026-11-05T11:30:00.000Z'),
+				  ('bynk-lang/secret', 12, 1, 'CI', '.github/workflows/ci.yml', 'main', 'b1', 'push', 'completed', 'success',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:10:00.000Z', '2026-11-05T10:10:00.000Z'),
+				  ('bynk-lang/sandbox', 13, 1, 'CI', '.github/workflows/ci.yml', 'main', 'c1', 'push', 'completed', 'success',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:10:00.000Z', '2026-11-05T10:10:00.000Z')
+			""",
+			params: [],
+		},
+	]
+}
+
+case "a week of CI health, from completed attempts in public repositories" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.since == "2026-10-29T12:00:00.000Z"
+	expect m.until == "2026-11-05T12:00:00.000Z"
+	expect m.data_since == Some("2026-10-20T10:10:00.000Z")
+	expect m.workflows.map(
+		(w) => "\(w.repo) \(w.path)"
+	) == ["bynk-lang/bynk .github/workflows/ci.yml", "bynk-lang/bynk .github/workflows/codeql.yml"]
+	let Some(ci) = m.workflows.first() else {
+		expect false
+	}
+	expect ci.workflow == "CI"
+	expect ci.runs == 8
+	expect ci.success == 4
+	expect ci.failure == 1
+	expect ci.timed_out == 1
+	expect ci.cancelled == 1
+	expect ci.skipped == 1
+	expect ci.other == 0
+	expect ci.pass_percent == Some(67)
+	expect ci.wall_p50_seconds == Some(600)
+	expect ci.wall_p95_seconds == Some(1800)
+	expect ci.flaky == 1
+}
+
+case "filters narrow the window: branch, trigger, repository (any case) and length" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// On main: r1, r2, r4 (both attempts), r5, r6, r7 = 7 runs; 3 of 5 judged pass;
+	// successful 600, 1200, 600 s: p50 600, p95 1200. CodeQL runs on main too.
+	let onMain <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: Some("main"),
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(m) = onMain else {
+		expect false
+	}
+	let Some(ci) = m.workflows.first() else {
+		expect false
+	}
+	expect ci.runs == 7
+	expect ci.pass_percent == Some(60)
+	expect ci.wall_p50_seconds == Some(600)
+	expect ci.wall_p95_seconds == Some(1200)
+	expect m.workflows.length() == 2
+	// Pull requests only: r3, one run, 30 minutes.
+	let prs <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: Some("pull_request"),
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(p) = prs else {
+		expect false
+	}
+	expect p.workflows.map(
+		(w) => "\(w.path) \(w.runs) \(w.pass_percent.getOrElse(-1)) \(w.wall_p50_seconds.getOrElse(-1)) \(w.wall_p95_seconds.getOrElse(-1))"
+	) == [".github/workflows/ci.yml 1 100 1800 1800"]
+	// 30 days reach r8 too; the repository matches whatever its case.
+	let month <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: Some("Bynk-Lang/BYNK"),
+			branch: None,
+			event: None,
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(mo) = month else {
+		expect false
+	}
+	let Some(ci30) = mo.workflows.first() else {
+		expect false
+	}
+	expect mo.since == "2026-10-06T12:00:00.000Z"
+	expect ci30.runs == 9
+	expect ci30.success == 5
+}
+
+case "an empty window is an empty list, not an error" {
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.workflows == []
+	expect m.data_since == None
+}
+
+case "now: what is running, and each workflow's latest result on the default branch" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(n) = r else {
+		expect false
+	}
+	// r10 has been "running" for two days: its completion was lost, so it's left out.
+	expect n.in_flight.map((f) => f.run_id) == [9]
+	expect n.main.map(
+		(s) => "\(s.path) \(s.conclusion) \(s.red_since.getOrElse("-"))"
+	) == [
+		".github/workflows/ci.yml timed_out 2026-11-05T11:00:00.000Z",
+		".github/workflows/codeql.yml success -",
+	]
+}
+
+case "red since the first failure after the last success" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// A later failure on main does not move red_since: it is still r7's 11:00.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+		                           created_at, queued_at, started_at, completed_at, updated_at)
+		VALUES ('bynk-lang/bynk', 20, 1, 'CI', '.github/workflows/ci.yml', 'main', 'd1', 'push', 'completed', 'failure',
+		        '2026-11-05T11:30:00.000Z', '2026-11-05T11:30:00.000Z', '2026-11-05T11:30:00.000Z',
+		        '2026-11-05T11:40:00.000Z', '2026-11-05T11:40:00.000Z')
+		""",
+		[]
+	)
+	let r <- api.GET(
+		"/metrics/ci/now",
+		NowQuery { repo: Some("bynk-lang/bynk") },
+		viewer()
+	) by Visitor
+	let Ok(n) = r else {
+		expect false
+	}
+	let Some(ci) = n.main.first() else {
+		expect false
+	}
+	expect ci.conclusion == "failure"
+	expect ci.completed_at == "2026-11-05T11:40:00.000Z"
+	expect ci.red_since == Some("2026-11-05T11:00:00.000Z")
+}
+
+case "a re-run after a cancelled first attempt is not flaky" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+		                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+		  ('bynk-lang/bynk', 21, 1, 'CI', '.github/workflows/ci.yml', 'main', 'e1', 'push', 'completed', 'cancelled',
+		   '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z',
+		   '2026-11-04T10:01:00.000Z', '2026-11-04T10:01:00.000Z'),
+		  ('bynk-lang/bynk', 21, 2, 'CI', '.github/workflows/ci.yml', 'main', 'e1', 'push', 'completed', 'success',
+		   '2026-11-04T10:00:00.000Z', '2026-11-04T10:05:00.000Z', '2026-11-04T10:05:00.000Z',
+		   '2026-11-04T10:15:00.000Z', '2026-11-04T10:15:00.000Z')
+		""",
+		[]
+	)
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	let Some(ci) = m.workflows.first() else {
+		expect false
+	}
+	// Still 1: r4 from the seed. Run 21, re-run after a cancellation, adds none.
+	expect ci.flaky == 1
+}
+
+case "only the default branch decides a workflow's state" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// CodeQL fails later on a release branch: main is still green.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+		                           created_at, queued_at, started_at, completed_at, updated_at)
+		VALUES ('bynk-lang/bynk', 22, 1, 'CodeQL', '.github/workflows/codeql.yml', 'release', 'f1', 'push',
+		        'completed', 'failure', '2026-11-05T11:40:00.000Z', '2026-11-05T11:40:00.000Z',
+		        '2026-11-05T11:40:00.000Z', '2026-11-05T11:50:00.000Z', '2026-11-05T11:50:00.000Z')
+		""",
+		[]
+	)
+	let r <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(n) = r else {
+		expect false
+	}
+	expect n.main.map(
+		(s) => "\(s.path) \(s.branch) \(s.conclusion)"
+	) == [".github/workflows/ci.yml main timed_out", ".github/workflows/codeql.yml main success"]
+}
+
+case "a window other than 7, 30 or 90 days is refused, so the cache covers every shape asked" {
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 14,
+		},
+		viewer()
+	) by Visitor
+	expect r is BadRequest("days must be 7, 30 or 90")
+	expect Deliveries.all never called
+}
+
+case "past the per-address limit, metrics are refused before anything is read" {
+	stub MetricsLimit.allow(_) returns false
+	let ci <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let now <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
+	expect ci is TooManyRequests(_)
+	expect now is TooManyRequests(_)
+	expect MetricsLimit.allow called with key == "metrics:203.0.113.7"
+	expect Deliveries.all never called
+}

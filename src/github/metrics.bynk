@@ -1,0 +1,127 @@
+commons github.metrics
+
+---
+`owner/name`, as the query string names a repository.
+---
+type RepoName = String where Matches("^[^/\\s]+/[^/\\s]+$")
+
+---
+How many days back a window reaches: 7 (the default), 30 or 90. The routes
+are public and cached per URL, so only those three are answered (others are
+`400`): every shape the page asks for is then a cache hit for everyone else.
+---
+type WindowDays = Int where InRange(1, 90)
+
+---
+What triggered a run, as GitHub names the events a workflow can run on. Any
+other value is `400` at the boundary rather than a fresh, uncached query.
+---
+type Trigger = String where Matches("^(push|pull_request|pull_request_target|merge_group|schedule|workflow_dispatch|workflow_run|workflow_call|repository_dispatch|release|deployment|deployment_status|check_run|check_suite|issues|issue_comment|discussion|discussion_comment|create|delete|fork|gollum|label|milestone|page_build|public|registry_package|status|watch|dynamic)$")
+
+---
+A branch name: the characters a Git ref may hold, at most 200 of them.
+---
+type BranchName = String where Matches("^[A-Za-z0-9._/+-]{1,200}$")
+
+---
+`GET /metrics/ci`'s query: every filter optional.
+`?repo=bynk-lang/bynk&branch=main&event=merge_group&days=30`.
+---
+type CiQuery = {
+	repo: Option[RepoName],
+	branch: Option[BranchName],
+	event: Option[Trigger],
+	days: WindowDays = 7,
+}
+
+---
+`GET /metrics/ci/now`'s query.
+---
+type NowQuery = {
+	repo: Option[RepoName],
+}
+
+---
+One workflow's health over the window, from its completed attempts (#20).
+`pass_percent` is `success / (success + failure + timed_out)`, rounded, and
+`None` when nothing in the window was judged; `cancelled`, `skipped` and
+the rest are counted but don't count against it. The wall-clock times are
+nearest-rank percentiles of `completed_at - queued_at` over successful
+attempts. `flaky` counts runs whose first attempt failed and a re-run passed.
+---
+type WorkflowHealth = {
+	repo: String,
+	path: String,
+	workflow: String,
+	runs: Int,
+	success: Int,
+	failure: Int,
+	timed_out: Int,
+	cancelled: Int,
+	skipped: Int,
+	other: Int,
+	pass_percent: Option[Int],
+	wall_p50_seconds: Option[Int],
+	wall_p95_seconds: Option[Int],
+	flaky: Int,
+}
+
+---
+`GET /metrics/ci`: the window asked for, how much of it has data, and each
+workflow's health. `data_since` is the first completion ever recorded, so a
+reader can tell "7-day window" from "7-day window, 3 days of data" (no
+backfill).
+---
+type CiMetrics = {
+	since: String,
+	until: String,
+	data_since: Option[String],
+	workflows: List[WorkflowHealth],
+}
+
+---
+A run attempt not yet completed.
+---
+type InFlight = {
+	repo: String,
+	path: String,
+	workflow: String,
+	run_id: Int,
+	attempt: Int,
+	branch: Option[String],
+	event: String,
+	status: String,
+	queued_at: String,
+}
+
+---
+A workflow's latest judged result on its repository's default branch (a
+`push` to it that concluded `success`, `failure` or `timed_out`). When that
+was a failure, `red_since` is the first failure after the last success.
+`merge_group` runs don't count: a failed one is a pull request the merge
+queue rejected, which is exactly what keeps the default branch green.
+---
+type MainState = {
+	repo: String,
+	path: String,
+	workflow: String,
+	branch: String,
+	conclusion: String,
+	completed_at: String,
+	red_since: Option[String],
+}
+
+---
+`GET /metrics/ci/now`: what is running, and the state of each default branch.
+---
+type CiNow = {
+	in_flight: List[InFlight],
+	main: List[MainState],
+}
+
+---
+When collection began, decoded from `SELECT min(completed_at) AS first`.
+---
+type FirstRun = {
+	first: Option[String],
+}

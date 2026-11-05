@@ -22,11 +22,13 @@ type VisibilityDelivery = {
 type RepoVisibilityRef = {
 	full_name: String,
 	private: Option[Bool],
+	default_branch: Option[String],
 }
 
 type RepoVisibility = {
 	repo: String,
 	isPublic: Bool,
+	defaultBranch: Option[String],
 }
 
 fn visibilityOf(body: Bytes) -> Option[RepoVisibility] {
@@ -34,7 +36,11 @@ fn visibilityOf(body: Bytes) -> Option[RepoVisibility] {
 	let Ok(v) = Json.decode[VisibilityDelivery](text) else { None }
 	let Some(r) = v.repository else { None }
 	let Some(isPrivate) = r.private else { None }
-	Some(RepoVisibility { repo: r.full_name, isPublic: !isPrivate })
+	Some(RepoVisibility {
+		repo: r.full_name,
+		isPublic: !isPrivate,
+		defaultBranch: r.default_branch,
+	})
 }
 
 ---
