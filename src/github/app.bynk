@@ -110,3 +110,17 @@ fn refusal(status: Int, body: String) -> String {
 		Err(_) => "\(status)",
 	}
 }
+
+---
+A GitHub call that didn't give what was asked: GitHub's status when it
+answered (`404` for a repository it no longer has), and why.
+---
+type ApiFailure = {
+	status: Option[Int],
+	message: String,
+}
+
+--- Whether a failure means GitHub no longer has what was asked for.
+fn isGone(f: ApiFailure) -> Bool {
+	f.status == Some(404) || f.status == Some(410)
+}

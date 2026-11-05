@@ -22,8 +22,13 @@ type UserRef = {
 	type: String,
 }
 
+---
+A branch as a pull request names it. `repo` is the repository it belongs to,
+under the name GitHub uses now (after any rename).
+---
 type BranchRef = {
 	ref: String,
+	repo: Option[RepoRef],
 }
 
 ---
