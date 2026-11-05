@@ -1,5 +1,13 @@
 # CI metrics
 
+The **CI health page** at `/` shows these figures for every public
+repository, refreshing every 30 seconds (and pausing while the tab is
+hidden): each workflow's state on its default branch, pass rate, run count,
+median and 95th-percentile time, flaky runs and a bar of how its runs ended.
+It is plain HTML, CSS and JavaScript (`embeds/dashboard.html`, `assets/`),
+with colour tokens in one place for branding later. The routes below are
+what it reads, and are public for anyone else to read too.
+
 Phase 4 (#20) of github-hooks: the health of the organisation's CI, built
 from the `workflow_run` deliveries the service already receives. These routes
 are **public**: no token. They show only repositories whose latest delivery

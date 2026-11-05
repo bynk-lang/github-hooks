@@ -28,6 +28,8 @@ suite github.hooks as system {
 		expect forged is Rejected(Unauthorized)
 	}
 
+	// The page's HTML and content type are checked in tests/hooks.bynk; over
+	// the wire, a 200 comes back as `Ok`.
 	case "the root is public" {
 		let r <- api.GET("/")
 		expect r is Ok(_)

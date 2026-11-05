@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bynk-lang CI health</title>
+<meta name="description" content="Live CI health for the bynk-lang organisation's public repositories.">
+<link rel="stylesheet" href="{css}">
+<script src="{js}" defer></script>
+</head>
+<body>
+<header class="masthead">
+  <div>
+    <h1>CI health</h1>
+    <p class="subtitle">Public repositories in <a href="https://github.com/bynk-lang">bynk-lang</a>, from the GitHub App's webhook deliveries.</p>
+  </div>
+  <div class="controls">
+    <fieldset class="window" aria-label="Window">
+      <legend class="visually-hidden">Window</legend>
+      <label><input type="radio" name="days" value="7" checked> 7 days</label>
+      <label><input type="radio" name="days" value="30"> 30 days</label>
+      <label><input type="radio" name="days" value="90"> 90 days</label>
+    </fieldset>
+    <p class="freshness" id="freshness" aria-live="polite">Loading…</p>
+  </div>
+</header>
+<main>
+  <p class="coverage" id="coverage"></p>
+  <ul class="legend" aria-label="Run conclusions">
+    <li><span class="swatch passed" aria-hidden="true"></span>Passed</li>
+    <li><span class="swatch failed" aria-hidden="true"></span>Failed or timed out</li>
+    <li><span class="swatch other" aria-hidden="true"></span>Cancelled, skipped or other (not counted in the pass rate)</li>
+  </ul>
+  <div id="repos"></div>
+  <noscript><p>This page needs JavaScript. The same numbers are at <a href="/metrics/ci">/metrics/ci</a> and <a href="/metrics/ci/now">/metrics/ci/now</a>.</p></noscript>
+</main>
+<footer>
+  <p>Pass rate is passed ÷ (passed + failed + timed out). Wall-clock time runs from when CI was triggered to when it finished, including waiting for runners, over passed runs. A run is flaky when its first attempt failed and a re-run passed. Data: <a href="/metrics/ci">/metrics/ci</a>, <a href="/metrics/ci/now">/metrics/ci/now</a>. Source: <a href="https://github.com/bynk-lang/github-hooks">bynk-lang/github-hooks</a>, written in Bynk.</p>
+</footer>
+</body>
+</html>

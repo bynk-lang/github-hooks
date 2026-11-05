@@ -24,6 +24,17 @@ credential: it expires within the hour and is never logged.
 capability Tokens = Kv
 
 ---
+The CI health page (#20, step 3): its template, with the stylesheet and script
+it loads. Those two are content-hashed, so each deploy's page loads its own
+and browsers may cache them for good.
+---
+embed dashboardTemplate = "embeds/dashboard.html"
+
+asset dashboardCss = "assets/dashboard.css"
+
+asset dashboardJs = "assets/dashboard.js"
+
+---
 The public metrics routes' per-address limit: 60 uncached requests a minute
 is ample for a page polling every 30 seconds, and bounds what anyone can make
 D1 read by varying the query string past the cache.
@@ -436,7 +447,17 @@ service api from http {
 		options: plain,
 	}
 
+	// The CI health page: public, and the same for everyone, so cached five
+	// minutes; its figures come from the metrics routes, which it polls.
+	@cache(maxAge: 300.seconds, scope: public)
 	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = dashboardTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", dashboardJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	on GET("/about") () -> Effect[HttpResult[String]] by v: Visitor {
 		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
 	}
 
