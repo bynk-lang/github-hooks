@@ -22,8 +22,13 @@ type UserRef = {
 	type: String,
 }
 
+---
+A branch as a pull request names it. `repo` is the repository it belongs to,
+under the name GitHub uses now (after any rename).
+---
 type BranchRef = {
 	ref: String,
+	repo: Option[RepoRef],
 }
 
 ---
@@ -86,7 +91,21 @@ fn pullOf(body: Bytes) -> Result[PullFact, String] {
 	let Ok(p) = Json.decode[PullDelivery](text) else match {
 		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
 	}
-	let pr = p.pull_request
+	pullFact(p.repository.full_name, p.action, p.reason, p.pull_request)
+}
+
+---
+A pull request as `pull_requests` stores it, from GitHub's PR object: a
+delivery's, or one from the REST API (`action` is then `sync`, which says
+nothing about when the PR became ready). The list endpoint omits the size
+fields and `commits`, which then keep their stored values.
+---
+fn pullFact(
+	repo: String,
+	action: String,
+	reason: Option[String],
+	pr: PullPayload
+) -> Result[PullFact, String] {
 	let Some(created) = isoTime(pr.created_at) else {
 		Err("created_at is not a time: \(pr.created_at)")
 	}
@@ -96,9 +115,9 @@ fn pullOf(body: Bytes) -> Result[PullFact, String] {
 	let merged = pr.merged_at.andThen((t) => isoTime(t))
 	let draft = pr.draft.getOrElse(false)
 	Ok(PullFact {
-		repo: p.repository.full_name,
+		repo: repo,
 		number: pr.number,
-		action: p.action,
+		action: action,
 		title: pr.title,
 		author: pr.user.login,
 		authorIsBot: pr.user.type == "Bot",
@@ -107,9 +126,9 @@ fn pullOf(body: Bytes) -> Result[PullFact, String] {
 		draft: draft,
 		state: if merged.isSome() { "merged" } else { pr.state },
 		openedAt: created,
-		readyAt: if p.action == "opened" && !draft {
+		readyAt: if action == "opened" && !draft {
 			Some(created)
-		} else if p.action == "ready_for_review" { Some(updated) } else { None },
+		} else if action == "ready_for_review" { Some(updated) } else { None },
 		closedAt: pr.closed_at.andThen((t) => isoTime(t)),
 		mergedAt: merged,
 		commits: pr.commits,
@@ -117,7 +136,7 @@ fn pullOf(body: Bytes) -> Result[PullFact, String] {
 		deletions: pr.deletions,
 		changedFiles: pr.changed_files,
 		updatedAt: updated,
-		reason: p.reason,
+		reason: reason,
 	})
 }
 
@@ -187,4 +206,22 @@ fn reviewOf(body: Bytes) -> Result[ReviewFact, String] {
 		state: r.state.toLower(),
 		submittedAt: r.submitted_at.andThen((t) => isoTime(t)),
 	})
+}
+
+---
+A public repository the open-PR sync visits (#26): the installation that
+last delivered for it, which is the one whose token can read it.
+---
+type SyncTarget = {
+	repo: String,
+	installation: Option[Int],
+}
+
+---
+A pull request the sync holds open: its repository, as its row names it, and
+its number.
+---
+type PullNumber = {
+	repo: String,
+	number: Int,
 }

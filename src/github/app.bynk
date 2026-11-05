@@ -94,13 +94,10 @@ it (`422 Validation Failed (Body is too long)`), so the log says why.
 fn refusal(status: Int, body: String) -> String {
 	match Json.decode[ApiError](body) {
 		Ok(e) => {
-			let details = e.errors.getOrElse([]).map((d) => d.message.getOrElse(d.code.getOrElse(
+			let reasons = e.errors.getOrElse([]).map((d) => d.message.getOrElse(d.code.getOrElse(
 				""
-			))).filter((m) => m != "").fold("", (all, m) => if all == "" {
-				m
-			} else {
-				"\(all); \(m)"
-			})
+			))).filter((m) => m != "")
+			let details = joined(reasons, "; ")
 			if details == "" {
 				"\(status) \(e.message)"
 			} else {
@@ -109,4 +106,23 @@ fn refusal(status: Int, body: String) -> String {
 		},
 		Err(_) => "\(status)",
 	}
+}
+
+---
+A GitHub call that didn't give what was asked: GitHub's status when it
+answered (`404` for a repository it no longer has), and why.
+---
+type ApiFailure = {
+	status: Option[Int],
+	message: String,
+}
+
+--- Whether a failure means GitHub no longer has what was asked for.
+fn isGone(f: ApiFailure) -> Bool {
+	f.status == Some(404) || f.status == Some(410)
+}
+
+--- The strings in order, with `sep` between each pair.
+fn joined(parts: List[String], sep: String) -> String {
+	parts.fold("", (all, part) => if all == "" { part } else { "\(all)\(sep)\(part)" })
 }

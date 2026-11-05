@@ -1,0 +1,325 @@
+// Phase 4, slice 2, step 2 (#26): the daily open-PR sync, against an
+// in-memory D1 with the migrations applied. GitHub is stubbed at the wire
+// (`AppAuth` for the token, `GitHubHttp` for each response), so the real
+// `GitHubApi` decodes GitHub's JSON. The helpers build that JSON as strings
+// rather than `PullPayload` values: on Bynk v0.508.4 a suite helper naming a
+// commons type fails `tsc` once the suite has a stub (bynk-lang/bynk#2947,
+// fixed in v0.510.2).
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+---
+A pull request in `bynk-lang/bynk` as GitHub's JSON: `state`, `updated_at`,
+and `merged_at`/`closed_at` as JSON.
+---
+fn pr(number: Int, draft: Bool, state: String, updated: String, ended: String) -> String {
+	prIn("bynk-lang/bynk", number, draft, state, updated, ended)
+}
+
+--- The same, in the repository GitHub names `repo`.
+fn prIn(
+	repo: String,
+	number: Int,
+	draft: Bool,
+	state: String,
+	updated: String,
+	ended: String
+) -> String {
+	"{\"number\": \(number), \"title\": \"Pull request \(number)\", \"user\": {\"login\": \"a-contributor\", \"type\": \"User\"}, \"base\": {\"ref\": \"main\", \"repo\": {\"full_name\": \"\(repo)\"}}, \"head\": {\"ref\": \"branch-\(number)\"}, \"draft\": \(if draft { "true" } else { "false" }), \"state\": \"\(state)\", \"created_at\": \"2026-11-01T09:00:00Z\", \"updated_at\": \"\(updated)\", \"closed_at\": \(ended), \"merged_at\": \(ended)}"
+}
+
+--- An open pull request, as the list endpoint gives it (no sizes, no `commits`).
+fn listed(number: Int, draft: Bool, updated: String) -> String {
+	pr(number, draft, "open", updated, "null")
+}
+
+--- A response from GitHub.
+fn ok(body: String) -> Result[Response, String] {
+	Ok(Response { status: 200, headers: Map.empty(), body: body })
+}
+
+--- One page of `n` open pull requests.
+fn page(n: Int) -> String {
+	"[\(items(n))]"
+}
+
+fn items(n: Int) -> String {
+	if n <= 1 {
+		listed(n, false, "2026-11-05T08:00:00Z")
+	} else {
+		"\(listed(n, false, "2026-11-05T08:00:00Z")), \(items(n - 1))"
+	}
+}
+
+---
+`bynk-lang/bynk` is public, and installation 42 last delivered for it (7
+before that; a delivery with none after). A private repository and an
+excluded one have deliveries too, and must never be asked about.
+---
+fn repositories() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES
+				  ('d-old', 'push', 'bynk-lang/bynk', 7, 1, '2026-11-01T00:00:00.000Z'),
+				  ('d-new', 'push', 'bynk-lang/bynk', 42, 1, '2026-11-05T00:00:00.000Z'),
+				  ('d-none', 'push', 'bynk-lang/bynk', NULL, 1, '2026-11-05T01:00:00.000Z'),
+				  ('d-secret', 'push', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z'),
+				  ('d-sandbox', 'push', 'bynk-lang/sandbox', 42, 1, '2026-11-05T00:00:00.000Z')
+			""",
+			params: [],
+		},
+	]
+}
+
+case "open pull requests the service never saw are filled in, as the installation that last delivered" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok("[\(listed(10, true, "2026-11-05T08:00:00Z")), \(listed(11, false, "2026-11-05T08:30:00Z"))]")
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect AppAuth.token called once with installation == 42
+	expect GitHubHttp.get called once with url == "https://api.github.com/repos/bynk-lang/bynk/pulls?state=open&per_page=100&page=1"
+	let rows <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || draft || ':' || coalesce(ready_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY number)",
+		[]
+	)
+	// When they became ready isn't known: the sync never invents it.
+	expect rows == Ok(Some("{\"rows\":\"10:open:1:- 11:open:0:-\"}"))
+	expect Logger.info called once with msg == "pull request sync: bynk-lang/bynk has 2 open, 0 repaired"
+}
+
+case "a pull request held open that GitHub no longer lists is read and saved as it is now" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("[\(listed(10, false, "2026-11-05T08:00:00Z"))]"), ok(pr(5, false, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\""))]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+		                           opened_at, ready_at, additions, updated_at)
+		VALUES ('bynk-lang/bynk', 5, 'Pull request 5', 'a-contributor', 0, 'main', 'branch-5', 0, 'open',
+		        '2026-11-01T09:00:00.000Z', '2026-11-01T10:00:00.000Z', 40, '2026-11-03T09:00:00.000Z')
+		""",
+		[]
+	)
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/pulls/5"
+	let row <- Deliveries.first(
+		"SELECT state, ready_at, merged_at, additions FROM pull_requests WHERE number = 5",
+		[]
+	)
+	// Merged now; its ready time (from a delivery) and size are kept.
+	expect row == Ok(Some("{\"state\":\"merged\",\"ready_at\":\"2026-11-01T10:00:00.000Z\",\"merged_at\":\"2026-11-04T12:00:00.000Z\",\"additions\":40}"))
+	expect Logger.info called once with msg == "pull request sync: bynk-lang/bynk has 1 open, 1 repaired"
+}
+
+case "a listed pull request older than its row changes nothing" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok("[\(listed(10, true, "2026-11-05T08:00:00Z"))]")
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+		                           opened_at, updated_at)
+		VALUES ('bynk-lang/bynk', 10, 'Renamed since', 'a-contributor', 0, 'main', 'branch-10', 0, 'open',
+		        '2026-11-01T09:00:00.000Z', '2026-11-05T09:00:00.000Z')
+		""",
+		[]
+	)
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let row <- Deliveries.first("SELECT title, draft FROM pull_requests", [])
+	expect row == Ok(Some("{\"title\":\"Renamed since\",\"draft\":0}"))
+}
+
+case "a repository no installation has delivered for is skipped with a warning, and the others still sync" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok("[\(listed(10, false, "2026-11-05T08:00:00Z"))]")
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let quiet <- Deliveries.run(
+		"INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/aaa-quiet', 1, 'main')",
+		[]
+	)
+	expect quiet is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	// Only bynk-lang/bynk is asked about: not the private, excluded or quiet ones.
+	expect GitHubHttp.get called once with url == "https://api.github.com/repos/bynk-lang/bynk/pulls?state=open&per_page=100&page=1"
+	expect Logger.warn called once with msg == "bynk-lang/aaa-quiet: no installation has delivered for it; skipped"
+}
+
+case "GitHub refusing one repository fails the run, naming it, after the rest have synced" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" }), ok("[\(listed(10, false, "2026-11-05T08:00:00Z"))]")]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let other <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/aaa-first', 1, 'main')",
+				params: [],
+			},
+			SqlStatement {
+				sql: "INSERT INTO deliveries (id, event, repo, installation, size) VALUES ('d-first', 'push', 'bynk-lang/aaa-first', 42, 1)",
+				params: [],
+			},
+		]
+	)
+	expect other is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Err("bynk-lang/aaa-first: GitHub refused bynk-lang/aaa-first's open pull requests: 500 Server Error")
+	let n <- Deliveries.first(
+		"SELECT count(*) AS n FROM pull_requests WHERE repo = 'bynk-lang/bynk'",
+		[]
+	)
+	expect n == Ok(Some("{\"n\":1}"))
+}
+
+case "open pull requests are read a page at a time until a short page" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(page(100)), ok(page(1))]
+	let r <- GitHubApi.openPulls(42, "bynk-lang/bynk")
+	let Ok(pulls) = r else {
+		expect false
+	}
+	expect pulls.length() == 101
+	expect GitHubHttp.get called 2 times
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/pulls?state=open&per_page=100&page=2"
+}
+
+case "a refused read drops the cached token and tries once more with a fresh one" {
+	stub AppAuth.token(_) returns each [Ok("ghs_stale"), Ok("ghs_fresh")]
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), ok(page(1))]
+	let r <- GitHubApi.openPulls(42, "bynk-lang/bynk")
+	expect r is Ok(_)
+	expect AppAuth.forget called once with installation == 42
+	expect GitHubHttp.get called with token == "ghs_fresh"
+}
+
+--- `bynk-lang/bynk` holds pull request `number` open, last updated at `updated`.
+fn heldOpen(number: Int, updated: String) -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+			                           opened_at, updated_at)
+			VALUES ('bynk-lang/bynk', ?1, 'Held', 'a-contributor', 0, 'main', 'h', 0, 'open', '2026-11-01T09:00:00.000Z', ?2)
+		""",
+		params: [Integer(number), Text(updated)],
+	}
+}
+
+case "a repository GitHub no longer has is skipped with a warning" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect Logger.warn called once with msg == "bynk-lang/bynk: GitHub no longer has it; skipped (GitHub refused bynk-lang/bynk's open pull requests: 404 Not Found)"
+	expect Logger.error never called
+}
+
+case "a renamed repository is skipped: its pull requests sync under the new name" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok("[\(prIn("bynk-lang/bynk-renamed", 10, false, "open", "2026-11-05T08:00:00Z", "null"))]")
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect Logger.warn called once with msg == "bynk-lang/bynk: GitHub now calls it bynk-lang/bynk-renamed; skipped"
+	let n <- Deliveries.first("SELECT count(*) AS n FROM pull_requests", [])
+	expect n == Ok(Some("{\"n\":0}"))
+}
+
+case "a held pull request GitHub no longer has is marked gone, and leaves the repair window" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("[]"), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), ok("[]")]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.batch([heldOpen(5, "2026-11-03T09:00:00.000Z")])
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let row <- Deliveries.first("SELECT state FROM pull_requests WHERE number = 5", [])
+	expect row == Ok(Some("{\"state\":\"gone\"}"))
+	expect Logger.info called once with msg == "pull request sync: bynk-lang/bynk has 0 open, 1 repaired"
+	// The next run lists nothing and has nothing left to repair.
+	let again <- pullSync.schedule("41 4 * * *", 1793966400000)
+	expect again == Ok(())
+	expect GitHubHttp.get called 3 times
+}
+
+case "a repair GitHub still calls open isn't counted as repaired, and a failed one is counted once" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("[]"), ok(pr(5, false, "open", "2026-11-05T08:00:00Z", "null")), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.batch([
+		heldOpen(5, "2026-11-03T09:00:00.000Z"),
+		heldOpen(6, "2026-11-04T09:00:00.000Z"),
+	])
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Err("bynk-lang/bynk: GitHub refused bynk-lang/bynk#6: 500 Server Error")
+	expect Logger.info called once with msg == "pull request sync: bynk-lang/bynk has 0 open, 0 repaired, 1 failed"
+}
+
+case "repairs go oldest first" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("[]"), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" }), ok(pr(3, false, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\""))]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.batch([
+		heldOpen(3, "2026-11-04T09:00:00.000Z"),
+		heldOpen(7, "2026-11-02T09:00:00.000Z"),
+	])
+	expect held is Ok(_)
+	// #7 has waited longer, so it is tried first (and here fails); #3 is still repaired.
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Err("bynk-lang/bynk: GitHub refused bynk-lang/bynk#7: 500 Server Error")
+	let rows <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state, ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY number)",
+		[]
+	)
+	expect rows == Ok(Some("{\"rows\":\"3:merged 7:open\"}"))
+}
+
+case "a pull request held under a differently cased name is still repaired, under that name" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("[]"), ok(prIn("Bynk-Lang/Bynk", 5, false, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\""))]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, updated_at)
+		VALUES ('Bynk-Lang/Bynk', 5, 'Held', 'a-contributor', 0, 'main', 'h', 0, 'open', '2026-11-01T09:00:00.000Z', '2026-11-03T09:00:00.000Z')
+		""",
+		[]
+	)
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/Bynk-Lang/Bynk/pulls/5"
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || state, ' ') AS rows FROM pull_requests",
+		[]
+	)
+	expect rows == Ok(Some("{\"rows\":\"Bynk-Lang/Bynk#5:merged\"}"))
+}

@@ -28,6 +28,19 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 2, step 2 (#26): the daily open-PR sync. A `pullSync` cron
+  service (04:41 UTC) lists each public repository's open pull requests
+  through the REST API, as the installation that last delivered for it, and
+  saves each, filling in those opened before the service saw them. Each pull
+  request still held open that GitHub no longer lists is read on its own and
+  saved as it now is, repairing a lost `closed` delivery (at most 50 a
+  repository per run, oldest first; one GitHub no longer has is marked
+  `gone`). `DASHBOARD_EXCLUDE` repositories are skipped, and so, with a
+  warning, are repositories with no known installation, ones GitHub answers
+  `404`/`410` for, and renamed ones. Any other failure fails the run, after the
+  rest have synced. Each repository's open list is saved in one D1 batch. Deliveries and the sync now save
+  pull requests through one function, with the same ordering rules. See
+  docs/pr-flow.md.
 - Phase 4, slice 2, step 1 (#26): pull request facts. Every `pull_request`
   delivery creates or refreshes a `pull_requests` row (migration `0006`), one
   per PR: title, author and whether it is a bot, branches, draft, state

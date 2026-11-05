@@ -111,14 +111,30 @@ provides AppAuth = GitHubAppAuth given Secrets, Clock, Crypto, Fetch, Tokens {
 }
 
 ---
-One authenticated POST to GitHub's REST API, answering GitHub's response.
-Kept apart from `GitHubApi` so `comment` can post again with a fresh token.
+One authenticated call to GitHub's REST API, answering GitHub's response.
+Kept apart from `GitHubApi` so a call can be made again with a fresh token.
 ---
 capability GitHubHttp {
 	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]]
+	fn get(token: String, url: String) -> Effect[Result[Response, String]]
 }
 
 provides GitHubHttp = FetchGitHubHttp given Fetch {
+	fn get(token: String, url: String) -> Effect[Result[Response, String]] {
+		let sent <- Fetch.send(Request {
+			method: Get,
+			url: url,
+			contentType: None,
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: None,
+		})
+		match sent {
+			Ok(res) => Effect.pure(Ok(res)),
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+	}
+
 	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]] {
 		let sent <- Fetch.send(Request {
 			method: Post,
@@ -145,13 +161,41 @@ capability GitHubApi {
 		number: Int,
 		body: String
 	) -> Effect[Result[(), String]]
+	--- A repository's open pull requests, every page (at most `MAX_PULL_PAGES`).
+	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]]
+	--- One pull request, whatever its state.
+	fn pull(installation: Int, repo: String, number: Int) -> Effect[Result[PullPayload, ApiFailure]]
 }
 
 provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
-	// An installation token carries the permissions the installation had when it
-	// was minted. A 401 or 403 may only mean the cached token predates a change
-	// (write access just approved, a token revoked), so drop it and try once more
-	// with a fresh one before giving up.
+	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]] {
+		openPullsFrom(installation, repo, 1, [])
+	}
+
+	fn pull(
+		installation: Int,
+		repo: String,
+		number: Int
+	) -> Effect[Result[PullPayload, ApiFailure]] {
+		let url = "https://api.github.com/repos/\(repo)/pulls/\(number)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused \(repo)#\(number): \(refusal(res.status, res.body))",
+			}))
+		}
+		match Json.decode[PullPayload](res.body) {
+			Ok(pr) => Effect.pure(Ok(pr)),
+			Err(e) => Effect.pure(Err(ApiFailure {
+				status: None,
+				message: "\(repo)#\(number) did not decode: \(e.kind) at \(e.path)",
+			})),
+		}
+	}
+
 	fn comment(
 		installation: Int,
 		repo: String,
@@ -160,25 +204,74 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	) -> Effect[Result[(), String]] {
 		let url = "https://api.github.com/repos/\(repo)/issues/\(number)/comments"
 		let payload = Json.encode(NewComment { body: body })
-		let Ok(token) <- AppAuth.token(installation) else match {
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.post(token, url, payload)) else match {
 			Err(why) => Effect.pure(Err(why)),
 		}
-		let Ok(first) <- GitHubHttp.post(token, url, payload) else match {
-			Err(why) => Effect.pure(Err(why)),
-		}
-		let true = first.status == 401 || first.status == 403 else {
-			Effect.pure(answered(first, repo, number))
-		}
-		let _ <- AppAuth.forget(installation)
-		let Ok(fresh) <- AppAuth.token(installation) else match {
-			Err(why) => Effect.pure(Err(why)),
-		}
-		let Ok(again) <- GitHubHttp.post(fresh, url, payload) else match {
-			Err(why) => Effect.pure(Err(why)),
-		}
-		Effect.pure(answered(again, repo, number))
+		Effect.pure(answered(res, repo, number))
 	}
 }
+
+// One page of open pull requests after another, until a short page says it
+// was the last, or `MAX_PULL_PAGES` have been read.
+fn openPullsFrom(
+	installation: Int,
+	repo: String,
+	page: Int,
+	sofar: List[PullPayload]
+) -> Effect[Result[List[PullPayload], ApiFailure]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/pulls?state=open&per_page=\(PULL_PAGE)&page=\(page)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err(ApiFailure {
+			status: Some(res.status),
+			message: "GitHub refused \(repo)'s open pull requests: \(refusal(res.status, res.body))",
+		}))
+	}
+	let Ok(pulls) = Json.decode[List[PullPayload]](res.body) else match {
+		Err(e) => Effect.pure(Err(ApiFailure {
+			status: None,
+			message: "\(repo)'s open pull requests did not decode: \(e.kind) at \(e.path)",
+		})),
+	}
+	let all = sofar.concat(pulls)
+	if pulls.length() < PULL_PAGE || page >= MAX_PULL_PAGES {
+		Effect.pure(Ok(all))
+	} else {
+		openPullsFrom(installation, repo, page + 1, all)
+	}
+}
+
+// One call to GitHub as the App's installation, given the token. An
+// installation token carries the permissions the installation had when it was
+// minted, so a 401 or 403 may only mean the cached one predates a change
+// (write access just approved, a token revoked): it is dropped and the call
+// made once more with a fresh one before giving up. Every GitHubApi call goes
+// through here.
+fn asApp(
+	installation: Int,
+	call: String -> Effect[Result[Response, String]]
+) -> Effect[Result[Response, String]] given AppAuth {
+	let Ok(token) <- AppAuth.token(installation) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let Ok(first) <- call(token) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let true = first.status == 401 || first.status == 403 else { Effect.pure(Ok(first)) }
+	let _ <- AppAuth.forget(installation)
+	let Ok(fresh) <- AppAuth.token(installation) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	call(fresh)
+}
+
+// GitHub's largest page, and how many the sync reads: 500 open pull requests
+// in one repository is far past anything bynk-lang has.
+const PULL_PAGE: Int = 100
+
+const MAX_PULL_PAGES: Int = 5
 
 fn answered(res: Response, repo: String, number: Int) -> Result[(), String] {
 	if res.status == 201 {
@@ -241,69 +334,16 @@ fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
 	Effect.pure(())
 }
 
-// Records a pull request (#26). Every `pull_request` delivery carries the
-// whole PR, so any of them refreshes the row, unless the row already holds a
-// later state (by `updated_at`): a late `synchronize` never reopens a merged
-// PR. GitHub's times are whole seconds, so on a tie the delivery applies
-// unless it would take the PR out of `merged`, which is final. `ready_at` is apart from that: it only moves earlier, whatever order the
-// deliveries arrive in. Sizes and `commits` keep their last known value when a
-// delivery lacks them.
+// Records a pull request from a delivery (#26). Every `pull_request`
+// delivery carries the whole PR, so any of them refreshes its row (see
+// `savePull` for the ordering rules); the moments the row can't hold go to
+// `pull_request_events`.
 fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 	let Ok(p) = pullOf(body) else match {
 		Err(why) => Logger.error("could not read pull request from \(d.id): \(why)"),
 	}
-	let Ok(_) <- Deliveries.run(
-		"""
-		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
-		                           opened_at, ready_at, closed_at, merged_at, commits, additions, deletions,
-		                           changed_files, updated_at)
-		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
-		ON CONFLICT (repo, number) DO UPDATE SET
-		  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
-		  base = excluded.base, head = excluded.head, draft = excluded.draft, state = excluded.state,
-		  opened_at = excluded.opened_at, closed_at = excluded.closed_at, merged_at = excluded.merged_at,
-		  commits = coalesce(excluded.commits, pull_requests.commits),
-		  additions = coalesce(excluded.additions, pull_requests.additions),
-		  deletions = coalesce(excluded.deletions, pull_requests.deletions),
-		  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
-		  updated_at = excluded.updated_at
-		WHERE excluded.updated_at > pull_requests.updated_at
-		   OR (excluded.updated_at = pull_requests.updated_at
-		       AND (pull_requests.state != 'merged' OR excluded.state = 'merged'))
-		""",
-		[
-			Text(p.repo),
-			Integer(p.number),
-			Text(p.title),
-			Text(p.author),
-			Boolean(p.authorIsBot),
-			Text(p.base),
-			Text(p.head),
-			Boolean(p.draft),
-			Text(p.state),
-			Text(p.openedAt),
-			text(p.readyAt),
-			text(p.closedAt),
-			text(p.mergedAt),
-			integer(p.commits),
-			integer(p.additions),
-			integer(p.deletions),
-			integer(p.changedFiles),
-			Text(p.updatedAt),
-		]
-	) else match {
-		Err(e) => Logger.error("could not record \(p.repo)#\(p.number): \(sqlError(e))"),
-	}
-	let Ok(_) <- Deliveries.run(
-		"""
-		UPDATE pull_requests SET ready_at = ?3
-		WHERE repo = ?1 AND number = ?2 AND ?3 IS NOT NULL AND (ready_at IS NULL OR ready_at > ?3)
-		""",
-		[Text(p.repo), Integer(p.number), text(p.readyAt)]
-	) else match {
-		Err(e) => Logger.error(
-			"could not record when \(p.repo)#\(p.number) was ready: \(sqlError(e))"
-		),
+	let Ok(_) <- savePull(p) else match {
+		Err(why) => Logger.error(why),
 	}
 	let true = isPullMoment(p.action) else { Effect.pure(()) }
 	// Keyed by delivery, so a redelivery adds nothing; timed by when the
@@ -321,6 +361,73 @@ fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 		),
 	}
 	Effect.pure(())
+}
+
+// Creates or refreshes a pull request's row, from a delivery or the sync.
+// The row moves forward only (by `updated_at`); on a same-second tie a
+// delivery applies unless it would take the PR out of `merged`, which is
+// final. `ready_at` only moves earlier. Sizes and `commits` keep their last
+// known values when a source lacks them.
+fn savePull(p: PullFact) -> Effect[Result[(), String]] given Deliveries {
+	let Ok(_) <- Deliveries.batch(pullStatements(p)) else match {
+		Err(e) => Effect.pure(Err("could not record \(p.repo)#\(p.number): \(sqlError(e))")),
+	}
+	Effect.pure(Ok(()))
+}
+
+// The two statements that save a pull request, so a run can save many in one
+// batch: the row itself, then `ready_at`, which moves only earlier whatever
+// the row's ordering says.
+fn pullStatements(p: PullFact) -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+				                           opened_at, ready_at, closed_at, merged_at, commits, additions, deletions,
+				                           changed_files, updated_at)
+				VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+				ON CONFLICT (repo, number) DO UPDATE SET
+				  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
+				  base = excluded.base, head = excluded.head, draft = excluded.draft, state = excluded.state,
+				  opened_at = excluded.opened_at, closed_at = excluded.closed_at, merged_at = excluded.merged_at,
+				  commits = coalesce(excluded.commits, pull_requests.commits),
+				  additions = coalesce(excluded.additions, pull_requests.additions),
+				  deletions = coalesce(excluded.deletions, pull_requests.deletions),
+				  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
+				  updated_at = excluded.updated_at
+				WHERE excluded.updated_at > pull_requests.updated_at
+				   OR (excluded.updated_at = pull_requests.updated_at
+				       AND (pull_requests.state != 'merged' OR excluded.state = 'merged'))
+			""",
+			params: [
+				Text(p.repo),
+				Integer(p.number),
+				Text(p.title),
+				Text(p.author),
+				Boolean(p.authorIsBot),
+				Text(p.base),
+				Text(p.head),
+				Boolean(p.draft),
+				Text(p.state),
+				Text(p.openedAt),
+				text(p.readyAt),
+				text(p.closedAt),
+				text(p.mergedAt),
+				integer(p.commits),
+				integer(p.additions),
+				integer(p.deletions),
+				integer(p.changedFiles),
+				Text(p.updatedAt),
+			],
+		},
+		SqlStatement {
+			sql: """
+				UPDATE pull_requests SET ready_at = ?3
+				WHERE repo = ?1 AND number = ?2 AND ?3 IS NOT NULL AND (ready_at IS NULL OR ready_at > ?3)
+			""",
+			params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
+		},
+	]
 }
 
 // Records a review (#26): submitted, edited or dismissed. Review payloads
@@ -1221,6 +1328,164 @@ service retention from cron {
 		Ok(())
 	}
 }
+
+---
+The open-PR sync, daily (#26): for each public repository, every pull request
+GitHub lists as open is saved (filling in those opened before the service saw
+them), and each one the table still holds open that GitHub no longer lists is
+read on its own and saved as it is now (a `closed` delivery that was lost).
+Repositories in `DASHBOARD_EXCLUDE` are skipped. One repository failing
+doesn't stop the others; the run then fails, naming each.
+---
+service pullSync from cron {
+	on schedule("41 4 * * *") (
+		at: Int
+	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, GitHubApi {
+		// The installation that last delivered for a repository is the one whose
+		// token can read it. Compared without case, as GitHub names are, so
+		// `deliveries_by_repo_nocase` answers each lookup.
+		let Ok(rows) <- Deliveries.all(
+			"""
+			SELECT r.repo,
+			  (SELECT d.installation FROM deliveries d
+			   WHERE d.repo = r.repo COLLATE NOCASE AND d.installation IS NOT NULL
+			   ORDER BY d.received_at DESC LIMIT 1) AS installation
+			FROM repositories r WHERE r.public = 1
+			ORDER BY r.repo
+			""",
+			[]
+		) else match {
+			Err(e) => syncFailed("could not list repositories to sync: \(sqlError(e))"),
+		}
+		let Ok(targets) = Json.decodeSql[List[SyncTarget]](rows) else match {
+			Err(e) => syncFailed("repositories to sync did not decode: \(jsonError(e))"),
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let results <- targets.filter((t) => !allows(excluded, t.repo)).traverseAll((t) => syncRepo(
+			t
+		))
+		let failures = errorsOf(results)
+		let true = failures.length() > 0 else { Effect.pure(Ok(())) }
+		Effect.pure(Err(joined(failures, "; ")))
+	}
+}
+
+// Syncs one repository: saves every open pull request GitHub lists, in one
+// batch, then reads each one still open here that GitHub didn't list (oldest
+// first, at most `MAX_REPAIRS` a run) and saves it as it now is. A repository
+// that can't be synced for good (no installation known, GitHub no longer has
+// it, or renamed) is skipped with a warning rather than failing every run.
+fn syncRepo(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+	let Some(installation) = t.installation else {
+		syncSkipped("\(t.repo): no installation has delivered for it; skipped")
+	}
+	let Ok(open) <- GitHubApi.openPulls(installation, t.repo) else match {
+		Err(f) => if isGone(f) {
+			syncSkipped("\(t.repo): GitHub no longer has it; skipped (\(f.message))")
+		} else {
+			syncFailed("\(t.repo): \(f.message)")
+		},
+	}
+	// GitHub redirects a renamed repository's old name. Its pull requests
+	// belong to the new name, which syncs under its own `repositories` row.
+	let current = open
+		.first()
+		.andThen((pr) => pr.base.repo)
+		.map((r) => r.full_name)
+		.getOrElse(t.repo)
+	let true = current == t.repo else {
+		syncSkipped("\(t.repo): GitHub now calls it \(current); skipped")
+	}
+	let facts = open.map((pr) => pullFact(t.repo, "sync", None, pr))
+	let none: List[SqlStatement] = []
+	let statements = facts.fold(none, (all, f) => match f {
+		Ok(p) => all.concat(pullStatements(p)),
+		Err(_) => all,
+	})
+	let unread = errorsOf(facts.map((f) => f.map((_) => ())))
+	let Ok(_) <- Deliveries.batch(statements) else match {
+		Err(e) => syncFailed("\(t.repo): could not save its open pull requests: \(sqlError(e))"),
+	}
+	let Ok(held) <- Deliveries.all(
+		"SELECT repo, number FROM pull_requests WHERE repo = ?1 COLLATE NOCASE AND state = 'open' ORDER BY updated_at, number",
+		[Text(t.repo)]
+	) else match {
+		Err(e) => syncFailed(
+			"\(t.repo): could not read the pull requests held open: \(sqlError(e))"
+		),
+	}
+	let Ok(heldOpen) = Json.decodeSql[List[PullNumber]](held) else match {
+		Err(e) => syncFailed(
+			"\(t.repo): the pull requests held open did not decode: \(jsonError(e))"
+		),
+	}
+	let gone = heldOpen.filter((h) => !open.any((pr) => pr.number == h.number)).take(MAX_REPAIRS)
+	// Each is saved under the name its row has, so a difference in case can't
+	// make a second row.
+	let repairs <- gone.traverseAll((h) => repair(installation, h.repo, h.number))
+	let repaired = repairs.filter((r) => r == Ok(true)).length()
+	let failed = unread.concat(errorsOf(repairs.map((r) => r.map((_) => ()))))
+	let _ <- Logger.info(
+		"pull request sync: \(t.repo) has \(open.length()) open, \(repaired) repaired\(if failed.length() > 0 { ", \(failed.length()) failed" } else { "" })"
+	)
+	let true = failed.length() == 0 else { Effect.pure(Err("\(t.repo): \(joined(failed, "; "))")) }
+	Effect.pure(Ok(()))
+}
+
+// A pull request held open here that GitHub no longer lists as open: read it
+// on its own and save it as it now is. `true` when that moved it out of
+// `open`. One GitHub no longer has (moved with a transferred repository, or
+// removed) is marked `gone`, so it leaves the open set and the repair window.
+fn repair(
+	installation: Int,
+	repo: String,
+	number: Int
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi {
+	let Ok(pr) <- GitHubApi.pull(installation, repo, number) else match {
+		Err(f) => if isGone(f) { markGone(repo, number) } else { Effect.pure(Err(f.message)) },
+	}
+	let Ok(p) = pullFact(repo, "sync", None, pr) else match {
+		Err(why) => Effect.pure(Err("\(repo)#\(number): \(why)")),
+	}
+	let Ok(_) <- savePull(p) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	Effect.pure(Ok(p.state != "open"))
+}
+
+fn markGone(repo: String, number: Int) -> Effect[Result[Bool, String]] given Deliveries {
+	let Ok(_) <- Deliveries.run(
+		"UPDATE pull_requests SET state = 'gone' WHERE repo = ?1 AND number = ?2 AND state = 'open'",
+		[Text(repo), Integer(number)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not mark \(repo)#\(number) gone: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(true))
+}
+
+fn syncSkipped(why: String) -> Effect[Result[(), String]] given Logger {
+	let _ <- Logger.warn(why)
+	Effect.pure(Ok(()))
+}
+
+// The reasons in a list of results, in order.
+fn errorsOf(results: List[Result[(), String]]) -> List[String] {
+	let none: List[String] = []
+	results.fold(none, (all, r) => match r {
+		Ok(_) => all,
+		Err(why) => all.append(why),
+	})
+}
+
+fn syncFailed(why: String) -> Effect[Result[(), String]] given Logger {
+	let _ <- Logger.error(why)
+	Effect.pure(Err(why))
+}
+
+// How many pull requests one run reads on their own, per repository: enough
+// for any realistic run of lost deliveries, and bounded so one run can't make
+// hundreds of calls.
+const MAX_REPAIRS: Int = 50
 
 // Counts one metrics request against the caller's address. A request with
 // no address (not through Cloudflare's edge) shares one bucket.
