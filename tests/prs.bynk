@@ -25,15 +25,19 @@ fn viewer() -> RequestHeaders {
   11:20, enqueued again 11:40, merged 12:00. 3600 s, 21600 s, 1200 s,
   requeued, size 10.
 - #3: opened 3 Nov 00:00, ready before the service saw it (no `ready_at`),
-  never seen in the queue, size unknown, merged 12:00. Open to merge 43200 s.
+  enqueued 09:00 but dequeued (CI_FAILURE) 09:10, then merged around the
+  queue at 12:00, so it has no queue time; size unknown. Open to merge
+  43200 s.
 
 So 3 merged; ready to merge over 2 [3600, 7200]: p50 3600, p95 7200; open to
 merge [21600, 43200, 86400]: p50 43200, p95 86400; queue [1200, 1800]: p50
 1200, p95 1800; size [10, 120]: p50 10. #4 closed unmerged (and a bot's #13, which
 doesn't count); #5 merged before the window. A bot's #6 merged in an hour; its #7 is open. #8 is a
-draft, #9 has been ready since 25 Oct, #10 is in the queue (after a dequeue
-GitHub gave no reason for), and #12 was dequeued (CI_FAILURE) and is back to
-ready. #11 is gone. A private repository and an excluded
+draft, #9 has been ready since 25 Oct (an enqueue on 1 Nov with no dequeue
+seen is too old to mean it is still queued), #10 is in the queue (after a
+dequeue GitHub gave no reason for), #12 was dequeued (CI_FAILURE) and is back
+to ready, and #14, first ready on 1 Oct, went back to draft and was made ready
+again at 11:30 today. #11 is gone. A private repository and an excluded
 one have a merged and an open pull request each, and must not appear.
 ---
 fn seed() -> List[SqlStatement] {
@@ -73,6 +77,8 @@ fn seed() -> List[SqlStatement] {
 				   '2026-11-05T09:30:00.000Z', '2026-11-05T09:45:00.000Z', NULL, NULL, NULL, NULL, '2026-11-05T10:45:01.000Z'),
 				  ('bynk-lang/bynk', 13, 'Bump closed', 'a-bot[bot]', 1, 'main', 'h13', 0, 'closed',
 				   '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', '2026-11-03T01:00:00.000Z', NULL, 2, 2, '2026-11-03T01:00:01.000Z'),
+				  ('bynk-lang/bynk', 14, 'Fourteen', 'a-person', 0, 'main', 'h14', 0, 'open',
+				   '2026-09-30T00:00:00.000Z', '2026-10-01T00:00:00.000Z', NULL, NULL, NULL, NULL, '2026-11-05T11:30:01.000Z'),
 				  ('bynk-lang/bynk', 11, 'Eleven', 'a-person', 0, 'main', 'h11', 0, 'gone',
 				   '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', NULL, NULL, NULL, NULL, '2026-11-01T00:00:01.000Z'),
 				  ('bynk-lang/secret', 1, 'Secret', 'a-person', 0, 'main', 's1', 0, 'merged',
@@ -100,6 +106,12 @@ fn seed() -> List[SqlStatement] {
 				  ('e9', 'bynk-lang/bynk', 10, 'enqueued', NULL, '2026-11-05T11:00:00.000Z'),
 				  ('e12', 'bynk-lang/bynk', 12, 'enqueued', NULL, '2026-11-05T10:15:00.000Z'),
 				  ('e13', 'bynk-lang/bynk', 12, 'dequeued', 'CI_FAILURE', '2026-11-05T10:45:00.000Z'),
+				  ('e14', 'bynk-lang/bynk', 3, 'enqueued', NULL, '2026-11-03T09:00:00.000Z'),
+				  ('e15', 'bynk-lang/bynk', 3, 'dequeued', 'CI_FAILURE', '2026-11-03T09:10:00.000Z'),
+				  ('e16', 'bynk-lang/bynk', 9, 'enqueued', NULL, '2026-11-01T00:00:00.000Z'),
+				  ('e17', 'bynk-lang/bynk', 14, 'ready_for_review', NULL, '2026-10-01T00:00:00.000Z'),
+				  ('e18', 'bynk-lang/bynk', 14, 'converted_to_draft', NULL, '2026-10-02T00:00:00.000Z'),
+				  ('e19', 'bynk-lang/bynk', 14, 'ready_for_review', NULL, '2026-11-05T11:30:00.000Z'),
 				  ('e10', 'bynk-lang/sandbox', 1, 'dequeued', 'CI_FAILURE', '2026-11-05T00:30:00.000Z'),
 				  ('e11', 'bynk-lang/secret', 1, 'dequeued', 'CI_FAILURE', '2026-11-05T00:30:00.000Z')
 			""",
@@ -117,7 +129,8 @@ case "a week of PR flow for people, with bots apart, from public repositories" {
 	}
 	expect m.since == "2026-10-29T12:00:00.000Z"
 	expect m.until == "2026-11-05T12:00:00.000Z"
-	expect m.data_since == Some("2026-11-04T11:10:00.000Z")
+	// The first merge recorded, in any repository (#5).
+	expect m.data_since == Some("2026-10-20T00:00:00.000Z")
 	expect m.repos.map((f) => f.repo) == ["bynk-lang/bynk"]
 	let Some(f) = m.repos.first() else {
 		expect false
@@ -150,7 +163,7 @@ case "queue exits other than a merge, and merges by day" {
 	// MERGE is the normal way out; the excluded and private repositories' exits don't show.
 	expect m.queue_exits.map(
 		(x) => "\(x.repo) \(x.reason) \(x.count)"
-	) == ["bynk-lang/bynk CI_FAILURE 2", "bynk-lang/bynk unknown 1"]
+	) == ["bynk-lang/bynk CI_FAILURE 3", "bynk-lang/bynk unknown 1"]
 	expect m.daily.map(
 		(d) => "\(d.day) \(d.merged)"
 	) == ["2026-11-03 1", "2026-11-04 1", "2026-11-05 1"]
@@ -186,7 +199,7 @@ case "a longer window reaches further back, and a repository filter narrows it" 
 	expect o.daily.length() == 0
 }
 
-case "open pull requests, longest waiting first, with where each one is" {
+case "open pull requests, longest waiting first and drafts last, with where each one is" {
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
 	let r <- api.GET("/metrics/prs/open", NowQuery { repo: None }, viewer()) by Visitor
@@ -195,11 +208,15 @@ case "open pull requests, longest waiting first, with where each one is" {
 	}
 	expect o.open.map(
 		(p) => "#\(p.number) \(p.stage)\(if p.stale { " stale" } else { "" })\(if p.author_is_bot { " bot" } else { "" })"
-	) == ["#9 ready stale", "#7 ready bot", "#8 draft", "#10 queued", "#12 ready"]
+	) == ["#9 ready stale", "#7 ready bot", "#10 queued", "#12 ready", "#14 ready", "#8 draft"]
 	let Some(nine) = o.open.first() else {
 		expect false
 	}
-	expect nine.ready_at == Some("2026-10-25T00:00:00.000Z")
+	expect nine.ready_since == Some("2026-10-25T00:00:00.000Z")
+	// Made ready again today, so it waits from today, not from 1 October.
+	expect o.open
+		.filter((p) => p.number == 14)
+		.map((p) => p.ready_since) == [Some("2026-11-05T11:30:00.000Z")]
 	expect nine.title == "Nine"
 }
 

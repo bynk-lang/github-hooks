@@ -115,8 +115,10 @@ nearest-rank percentiles in seconds, over pull requests merged in the window:
   `ready_to_merge_counted` says how many of `merged` were counted.
 - **`open_to_merge_*`**: `merged_at − opened_at`, over all of `merged`.
 - **`queue_*`**: from the last `enqueued` before the merge to the merge, over
-  those seen enqueued (`queue_counted`). `requeued` counts those enqueued more
-  than once.
+  those whose last queue moment before merging was that enqueue
+  (`queue_counted`). One dequeued and then merged around the queue (by an
+  admin, say) isn't counted, so its time out of the queue isn't either.
+  `requeued` counts those enqueued more than once.
 - **`size_p50_lines`**: the median of additions plus deletions, over those whose
   size is known (`size_counted`).
 - **`closed_unmerged`**: closed without merging in the window.
@@ -124,15 +126,18 @@ nearest-rank percentiles in seconds, over pull requests merged in the window:
   merging in the window (`MERGE` is the normal way out, so isn't listed;
   `unknown` when GitHub gave none).
 - **`daily`**: merges by people per UTC day.
-- **`data_since`**: when the first pull request moment was recorded, so a
-  reader can tell a full window from a partly covered one (no backfill).
+- **`data_since`**: the first merge recorded (in any repository), so a reader
+  can tell a full window from a partly covered one (no backfill), as the CI
+  route's first completion does.
 
-`gone` pull requests count nowhere.
+`gone` pull requests count nowhere. Each query applies the visibility rule
+(public, the `repo` filter, not in `DASHBOARD_EXCLUDE`) in one `shown` CTE.
 
 ## `GET /metrics/prs/open`
 
-Every open pull request in public repositories (at most 500), longest waiting
-first: by when it became ready, or opened if that isn't known.
+Every open pull request in public repositories (at most 500, after
+`DASHBOARD_EXCLUDE` is applied), longest waiting first: ready ones by when they
+last became ready (or opened, if that isn't known), then drafts.
 `?repo=owner/name` narrows it. Cached and limited as above.
 
 ```json
@@ -140,14 +145,16 @@ first: by when it became ready, or opened if that isn't known.
   "open": [
     {
       "repo": "bynk-lang/bynk", "number": 2961, "title": "…", "author": "…", "author_is_bot": false,
-      "stage": "ready", "opened_at": "2026-11-05T08:40:00.000Z", "ready_at": "2026-11-05T09:01:24.000Z",
+      "stage": "ready", "opened_at": "2026-11-05T08:40:00.000Z", "ready_since": "2026-11-05T09:01:24.000Z",
       "stale": false
     }
   ]
 }
 ```
 
-- **`stage`**: `draft`, `queued` (its latest queue moment is an enqueue) or
-  `ready`.
+- **`stage`**: `draft`, `queued` or `ready`. `queued` when its latest queue
+  moment is an enqueue from the last day: a merge-queue run takes minutes, so
+  an older one means the `dequeued` delivery was lost, and it reads as ready.
+- **`ready_since`**: when it last became ready, so a draft made ready again
+  waits from then. `null` for one that became ready before the service saw it.
 - **`stale`**: ready for more than 7 days and not in the queue.
-- **`ready_at`**: `null` for one that became ready before the service saw it.

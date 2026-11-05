@@ -227,8 +227,9 @@ percentiles, in seconds, of merged pull requests:
   left out; `ready_to_merge_counted` says how many were counted of `merged`.
 - `open_to_merge_*`: `merged_at - opened_at`, over every merged pull request.
 - `queue_*`: from the last `enqueued` before the merge to the merge, over
-  those the service saw enqueued (`queue_counted`). `requeued` counts merged
-  pull requests enqueued more than once.
+  those whose last queue moment before merging was that enqueue
+  (`queue_counted`): one dequeued and then merged around the queue isn't
+  counted. `requeued` counts merged pull requests enqueued more than once.
 - `size_p50_lines`: the median of additions plus deletions, over those whose
   size is known (`size_counted`).
 
@@ -273,8 +274,8 @@ type MergedDay = {
 }
 
 ---
-`GET /metrics/prs`: the window, how much of it has data (`data_since`, when
-the first pull request delivery was recorded), and each repository's flow.
+`GET /metrics/prs`: the window, how much of it has data (`data_since`, the
+first merge recorded), and each repository's flow.
 ---
 type PrMetrics = {
 	since: String,
@@ -287,9 +288,9 @@ type PrMetrics = {
 
 ---
 An open pull request. `stage` is `draft`, `queued` (in the merge queue) or
-`ready`. `stale` when it has been ready for more than 7 days and isn't
-queued. `ready_at` is unknown for one that became ready before the service
-saw it.
+`ready`. `ready_since` is when it last became ready (a draft made ready again
+counts from then), unknown for one that became ready before the service saw
+it. `stale` when it has been ready for more than 7 days and isn't queued.
 ---
 type OpenPull = {
 	repo: String,
@@ -299,12 +300,13 @@ type OpenPull = {
 	author_is_bot: Bool,
 	stage: String,
 	opened_at: String,
-	ready_at: Option[String],
+	ready_since: Option[String],
 	stale: Bool,
 }
 
 ---
-`GET /metrics/prs/open`: every open pull request, longest waiting first.
+`GET /metrics/prs/open`: every open pull request, longest waiting first, then
+drafts.
 ---
 type PrsOpen = {
 	open: List[OpenPull],
