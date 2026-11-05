@@ -32,7 +32,8 @@ All notable changes to github-hooks. The format follows
   WebSocket to `/live`, and each time a public, non-excluded run's facts
   change (not on redeliveries) the service pushes a small event to every open
   page through a `LiveBoard` agent (one Durable Object, at most 500
-  connections). The page refetches 3 seconds after the last event, polls only
+  connections; the oldest is evicted to make room, so vanished clients age
+  out). The page refetches 3 seconds after the last event, polls only
   every 2 minutes while live, and falls back to 30-second polling if the feed
   drops. `scripts/live.mjs` checks the socket end to end in CI.
 - Phase 4, step 3 (#20): the CI health page at `/`. One table per public

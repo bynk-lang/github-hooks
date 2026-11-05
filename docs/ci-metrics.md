@@ -144,8 +144,13 @@ polls every 30 seconds meanwhile.
   nothing, sends nothing), and only for a repository the page may show
   (public, not in `DASHBOARD_EXCLUDE`).
 - **Who may connect:** anyone, like the page. The connections live in one
-  Durable Object (`LiveBoard`), which holds at most 500; past that a new one is
-  closed at once and that page keeps polling.
+  Durable Object (`LiveBoard`), which holds at most 500. Past that the
+  *oldest* is closed to make room, so connections whose clients vanished
+  without a close (a shut laptop, a dropped network) age out instead of
+  filling the board, and no one client can hold it. An evicted page sees its
+  socket close, polls, and reconnects.
+- **Each connection has its own id,** made afresh by the page every time it
+  connects, so an old socket's late close can never remove its replacement.
 - **`board`** is always `ci`. It is a route parameter rather than fixed in the
   code because of bynk-lang/bynk#2959.
 - **Testing:** suites can't drive a WebSocket yet, so the rule for what is

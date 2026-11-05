@@ -24,3 +24,28 @@ refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
 [[agents."github.hooks.LiveBoard".shapes.fields.paths]]
 path = "conns#1"
 type = "<non-boundary>"
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "joined"
+kind = "Map"
+type = "String, Int"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$"), Int'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "joined#0"
+type = "String"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "joined#1"
+type = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "joins"
+kind = "Cell"
+type = "Int"
+refinement = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "joins"
+type = "Int"

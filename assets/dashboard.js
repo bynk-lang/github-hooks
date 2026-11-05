@@ -295,13 +295,15 @@
   let settle = null;
   let retryMs = 5_000;
   let retry = null;
-  const client = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
+  // A fresh id per connection: the server drops a connection by id when it
+  // closes, so reusing one would let an old socket's late close remove the new.
+  const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
     : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
   function connect() {
     if (socket || !("WebSocket" in globalThis)) return;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${scheme}://${location.host}/live?board=ci&client=${client}`);
+    const ws = new WebSocket(`${scheme}://${location.host}/live?board=ci&client=${newClientId()}`);
     socket = ws;
     ws.onopen = () => {
       live = true;
