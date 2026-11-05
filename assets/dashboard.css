@@ -140,6 +140,16 @@ td.none { color: var(--ink-muted); }
 .run.failed { background: var(--failed); }
 .run.other { background: var(--other); height: 9px; }
 .run:hover { outline: 2px solid var(--ink); outline-offset: 1px; }
+.strip-wrap { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+/* The strip's keyboard link: out of sight until focused, then shown in full. */
+.strip-runs {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; font-size: 0.82rem;
+}
+.strip-runs:focus-visible {
+  position: static; width: auto; height: auto; overflow: visible; clip: auto;
+  outline: 2px solid var(--link); outline-offset: 2px;
+}
 
 .trend-toggle {
   display: inline-block; margin-top: 4px; padding: 0; border: 0; background: none;

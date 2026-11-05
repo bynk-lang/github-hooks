@@ -212,9 +212,11 @@
 
   // The latest attempts as a strip, oldest left. Passed and failed are full
   // height; runs the pass rate doesn't count are half height, so the
-  // difference never rests on colour alone. Each mark links to its run; the
-  // strip's label carries the same facts for screen readers.
-  function recentStrip(runs, workflowName) {
+  // difference never rests on colour alone. Each mark links to its run for a
+  // pointer; they aren't tab stops (20 a row would be too many), so one link
+  // carries the strip's summary to the workflow's runs on GitHub, for
+  // keyboards and screen readers. It shows when focused.
+  function recentStrip(runs, workflowName, repo, path) {
     if (!runs || runs.length === 0) return null;
     const counts = { passed: 0, failed: 0, other: 0 };
     for (const r of runs) counts[conclusionClass(r.conclusion)] += 1;
@@ -222,19 +224,26 @@
     const label = `${workflowName}: last ${runs.length} runs, oldest first: ${counts.passed} passed, ` +
       `${counts.failed} failed or timed out, ${counts.other} not counted. The latest, at ` +
       `${when(latest.completed_at)}, ${conclusionText(latest.conclusion)}.`;
-    const strip = el("span", { class: "strip", role: "img", "aria-label": label });
+    const marks = el("span", { class: "strip", "aria-hidden": "true" });
     for (const r of runs) {
       const what = `Run ${r.run_id}${r.attempt > 1 ? ` attempt ${r.attempt}` : ""}: ${conclusionText(r.conclusion)}, ` +
         `${when(r.completed_at)}, took ${duration(r.wall_seconds)}` +
         ` · ${r.event}${r.branch ? ` on ${r.branch}` : ""}`;
-      strip.append(el("a", {
+      marks.append(el("a", {
         class: `run ${conclusionClass(r.conclusion)}`,
         href: `https://github.com/${r.repo}/actions/runs/${r.run_id}/attempts/${r.attempt}`,
         title: what,
         tabindex: "-1",
       }));
     }
-    return strip;
+    const file = path.split("/").pop();
+    const runsLink = el("a", {
+      class: "strip-runs",
+      href: `https://github.com/${repo}/actions/workflows/${file}`,
+      "data-key": `runs:${repo} ${path}`,
+      "aria-label": `${label} All ${workflowName} runs on GitHub.`,
+    }, "All runs on GitHub");
+    return el("span", { class: "strip-wrap" }, marks, runsLink);
   }
 
   // Every UTC day the window touches, oldest first.
@@ -327,7 +336,7 @@
   }
   const shortDuration = (s) => (s === 0 ? "0" : s < 3600 ? `${Math.round(s / 60)} m` : `${+(s / 3600).toFixed(1)} h`);
 
-  function trendPanel(name, entry) {
+  function trendPanel(name, key, entry) {
     const daily = entry ? entry.daily : [];
     const byDay = new Map(daily.map((d) => [d.day, d]));
     const allDays = windowDays(history);
@@ -368,8 +377,8 @@
         el("td", { class: "num" }, d.pass_percent == null ? "—" : `${d.pass_percent}%`),
         el("td", { class: "num" }, duration(d.wall_p50_seconds) || "—")));
     }
-    panel.append(el("details", { class: "trend-table", "data-key": `table:${name}` },
-      el("summary", {}, "Daily figures"),
+    panel.append(el("details", { class: "trend-table", "data-key": `table:${key}` },
+      el("summary", { "data-key": `table-summary:${key}` }, "Daily figures"),
       el("table", {},
         el("caption", { class: "visually-hidden" }, `${name}, by day (UTC)`),
         el("thead", {}, el("tr", {},
@@ -475,7 +484,7 @@
             renderRepos();
           });
         }
-        const strip = history ? recentStrip(entry && entry.recent, nameText) : null;
+        const strip = history ? recentStrip(entry && entry.recent, nameText, name, path) : null;
         body.append(el("tr", {},
           el("td", { class: "workflow" }, nameText, el("small", {}, path), toggle),
           el("td", { class: "state-cell", "data-label": "Default branch" }, stateCell(state)),
@@ -492,7 +501,7 @@
             : el("td", { class: "strip-cell none", "data-label": "Recent runs" }, "—")));
         if (history && isOpen) {
           body.append(el("tr", { class: "trend-row", id: trendId },
-            el("td", { colspan: "9" }, trendPanel(nameText, entry))));
+            el("td", { colspan: "9" }, trendPanel(nameText, key, entry))));
         }
       }
       table.append(body);

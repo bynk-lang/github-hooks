@@ -885,7 +885,7 @@ service api from http {
 			text(query.branch),
 			text(query.event),
 		]
-		let Ok(latest) <- Deliveries.all(
+		let Ok(recentRows) <- Deliveries.all(
 			"""
 			WITH ranked AS (
 			  SELECT w.repo, w.path, w.run_id, w.attempt, w.branch, w.event,
@@ -911,7 +911,7 @@ service api from http {
 				ServerError("could not read recent runs")
 			},
 		}
-		let Ok(days) <- Deliveries.all(
+		let Ok(dayRows) <- Deliveries.all(
 			"""
 			WITH win AS (
 			  SELECT w.repo, w.path, substr(w.completed_at, 1, 10) AS day, w.conclusion,
@@ -956,13 +956,13 @@ service api from http {
 				ServerError("could not compute daily CI health")
 			},
 		}
-		let Ok(recent) = Json.decodeSql[List[RecentRun]](latest) else match {
+		let Ok(recent) = Json.decodeSql[List[RecentRun]](recentRows) else match {
 			Err(e) => {
 				let _ <- Logger.error("could not decode recent runs: \(jsonError(e))")
 				ServerError("recent runs did not decode")
 			},
 		}
-		let Ok(daily) = Json.decodeSql[List[DailyHealth]](days) else match {
+		let Ok(daily) = Json.decodeSql[List[DailyHealth]](dayRows) else match {
 			Err(e) => {
 				let _ <- Logger.error("could not decode daily CI health: \(jsonError(e))")
 				ServerError("daily CI health did not decode")
