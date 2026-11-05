@@ -28,6 +28,11 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Retention (#6): an hourly `retention` cron service deletes deliveries older
+  than 90 days, `workflow_run` progress (`requested`, `in_progress`) older than
+  7 days, and `actions` older than 90 days, at most 5,000 rows per delete per
+  run, oldest first. `welcomed` is kept. Sized from the load test's ~3,200
+  deliveries a day, two thirds of them workflow runs.
 - Phase 3: the service acts as the GitHub App. It welcomes a first-time
   contributor's first issue or pull request with a comment (`embeds/welcome.md`),
   in the repositories `ACTION_REPOS` lists.

@@ -485,6 +485,68 @@ service api from http {
 }
 
 ---
+Retention, hourly: deletes `workflow_run` progress (`requested`,
+`in_progress`) older than 7 days and every delivery older than 90 days, at
+most `RETENTION_BATCH` rows of each per run, and actions older than 90 days.
+`welcomed` is kept: it is what makes a welcome once per person. `at` is the
+scheduled time, so a run deletes against when it was due, not when it ran.
+---
+service retention from cron {
+	on schedule("23 * * * *") (at: Int) -> Effect[Result[(), String]] given Deliveries, Logger {
+		let c = cutoffs(Instant.fromEpochMillis(at))
+		// SQLite's `DELETE … LIMIT` is a compile-time option D1 doesn't promise,
+		// so each batch is chosen by rowid in a subquery on the time index.
+		let Ok(progress) <- Deliveries.run(
+			"""
+			DELETE FROM deliveries WHERE rowid IN (
+			  SELECT rowid FROM deliveries
+			  WHERE received_at < ?1
+			    AND event = 'workflow_run' AND action IN ('requested', 'in_progress')
+			  ORDER BY received_at
+			  LIMIT ?2
+			)
+			""",
+			[Text(c.runProgress), Integer(RETENTION_BATCH)]
+		) else match {
+			Err(e) => retentionFailed("workflow-run progress", e),
+		}
+		let Ok(expired) <- Deliveries.run(
+			"""
+			DELETE FROM deliveries WHERE rowid IN (
+			  SELECT rowid FROM deliveries
+			  WHERE received_at < ?1
+			  ORDER BY received_at
+			  LIMIT ?2
+			)
+			""",
+			[Text(c.deliveries), Integer(RETENTION_BATCH)]
+		) else match {
+			Err(e) => retentionFailed("deliveries", e),
+		}
+		let Ok(acted) <- Deliveries.run(
+			"DELETE FROM actions WHERE at < ?1",
+			[Text(c.deliveries)]
+		) else match {
+			Err(e) => retentionFailed("actions", e),
+		}
+		let removed = progress.changes + expired.changes + acted.changes
+		let true = removed > 0 else { Ok(()) }
+		let more = progress.changes == RETENTION_BATCH || expired.changes == RETENTION_BATCH
+		let _ <- Logger.info(
+			"retention removed \(progress.changes) workflow-run progress, \(expired.changes) deliveries and \(acted.changes) actions\(if more { "; more remain for the next run" } else { "" })"
+		)
+		Ok(())
+	}
+}
+
+// A function with `given` (bynk-lang/bynk#2868): the three deletes share it.
+fn retentionFailed(what: String, e: SqlError) -> Effect[Result[(), String]] given Logger {
+	let why = "retention could not delete \(what): \(sqlError(e))"
+	let _ <- Logger.error(why)
+	Err(why)
+}
+
+---
 Why rows did not decode, for the log: `StructuralMismatch at $[0].size:
 expected number, got string`.
 ---

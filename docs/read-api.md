@@ -97,6 +97,10 @@ What the counts mean:
 
 ## Limits
 
+Deliveries are kept 90 days, so a digest for an older day is empty. A
+`workflow_run` that is only `requested` or `in_progress` is kept 7 days, so a
+digest older than a week counts only `completed` runs.
+
 The routes are paths, not query strings, because Bynk handlers can't read a
 query string yet (bynk-lang/bynk#2854). So there is no filter by event, no
 `since`, and no paging past the most recent 50. Those come with typed query

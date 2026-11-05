@@ -56,3 +56,12 @@ case "29 February exists in leap years" {
 	expect rangeOf("2024-02-29").isSome()
 	expect rangeOf("2000-02-29").isSome()
 }
+
+case "retention keeps 90 days of deliveries and 7 days of workflow-run progress" {
+	let Some(now) = Instant.fromIso("2026-11-05T00:00:00Z") else {
+		expect false
+	}
+	let c = cutoffs(now)
+	expect c.deliveries == "2026-08-07T00:00:00.000Z"
+	expect c.runProgress == "2026-10-29T00:00:00.000Z"
+}
