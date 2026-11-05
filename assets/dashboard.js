@@ -6,12 +6,15 @@
 
   const NOW_EVERY_MS = 30_000;      // what is running, and the default-branch state
   const METRICS_EVERY_MS = 60_000;  // the window's figures move more slowly
+  const LIVE_POLL_MS = 120_000;     // while the live feed is up, polling is only a safety net
+  const LIVE_SETTLE_MS = 3_000;     // a burst of runs costs one refresh, not one each
   let days = 7;
   let metrics = null;
   let now = null;
   // Each source keeps its own freshness, so one succeeding never hides the
   // other failing.
   const fresh = { metrics: { lastOk: null, failing: false }, now: { lastOk: null, failing: false } };
+  let live = false;
 
   const $ = (id) => document.getElementById(id);
   const el = (tag, attrs = {}, ...children) => {
@@ -97,7 +100,9 @@
     if (problems.length > 0) {
       f.textContent = `${problems.join("; ")}.`;
     } else if (latest) {
-      f.textContent = `Updated ${clock(latest)} UTC · refreshes every 30 seconds`;
+      f.textContent = live
+        ? `Live · updated ${clock(latest)} UTC as runs change`
+        : `Updated ${clock(latest)} UTC · refreshes every 30 seconds`;
     } else {
       f.textContent = "Loading…";
     }
@@ -263,16 +268,74 @@
   }
 
   // Poll only while the page is visible; catch up at once when it returns.
+  // While the live feed is connected, polling slows to a safety net.
   let timers = [];
+  function poll() {
+    timers.forEach(clearInterval);
+    timers = live
+      ? [setInterval(refreshMetrics, LIVE_POLL_MS), setInterval(refreshNow, LIVE_POLL_MS)]
+      : [setInterval(refreshMetrics, METRICS_EVERY_MS), setInterval(refreshNow, NOW_EVERY_MS)];
+  }
   function start() {
-    stop();
     refreshMetrics();
     refreshNow();
-    timers = [setInterval(refreshMetrics, METRICS_EVERY_MS), setInterval(refreshNow, NOW_EVERY_MS)];
+    poll();
+    connect();
   }
   function stop() {
     timers.forEach(clearInterval);
     timers = [];
+    disconnect();
+  }
+
+  // The live feed: the server pushes an event whenever a public run changes.
+  // The page refetches rather than patching itself, so it always shows the
+  // routes' own definitions. Reconnects with backoff, falling back to polling.
+  let socket = null;
+  let settle = null;
+  let retryMs = 5_000;
+  let retry = null;
+  // A fresh id per connection: the server drops a connection by id when it
+  // closes, so reusing one would let an old socket's late close remove the new.
+  const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+
+  function connect() {
+    if (socket || !("WebSocket" in globalThis)) return;
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${scheme}://${location.host}/live?board=ci&client=${newClientId()}`);
+    socket = ws;
+    ws.onopen = () => {
+      live = true;
+      retryMs = 5_000;
+      poll();
+      renderFreshness();
+    };
+    ws.onmessage = () => {
+      clearTimeout(settle);
+      settle = setTimeout(() => { refreshNow(); refreshMetrics(); }, LIVE_SETTLE_MS);
+    };
+    ws.onclose = () => {
+      if (socket !== ws) return;
+      socket = null;
+      const wasLive = live;
+      live = false;
+      if (wasLive) poll();
+      renderFreshness();
+      if (!document.hidden) {
+        retry = setTimeout(connect, retryMs);
+        retryMs = Math.min(retryMs * 2, 60_000);
+      }
+    };
+  }
+
+  function disconnect() {
+    clearTimeout(retry);
+    clearTimeout(settle);
+    const ws = socket;
+    socket = null;
+    live = false;
+    if (ws) ws.close();
   }
 
   document.addEventListener("DOMContentLoaded", () => {
