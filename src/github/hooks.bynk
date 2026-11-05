@@ -244,7 +244,8 @@ fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
 // Records a pull request (#26). Every `pull_request` delivery carries the
 // whole PR, so any of them refreshes the row, unless the row already holds a
 // later state (by `updated_at`): a late `synchronize` never reopens a merged
-// PR. `ready_at` is apart from that: it only moves earlier, whatever order the
+// PR. GitHub's times are whole seconds, so on a tie the delivery applies
+// unless it would take the PR out of `merged`, which is final. `ready_at` is apart from that: it only moves earlier, whatever order the
 // deliveries arrive in. Sizes and `commits` keep their last known value when a
 // delivery lacks them.
 fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
@@ -266,7 +267,9 @@ fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 		  deletions = coalesce(excluded.deletions, pull_requests.deletions),
 		  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
 		  updated_at = excluded.updated_at
-		WHERE excluded.updated_at >= pull_requests.updated_at
+		WHERE excluded.updated_at > pull_requests.updated_at
+		   OR (excluded.updated_at = pull_requests.updated_at
+		       AND (pull_requests.state != 'merged' OR excluded.state = 'merged'))
 		""",
 		[
 			Text(p.repo),
@@ -320,8 +323,10 @@ fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 	Effect.pure(())
 }
 
-// Records a review (#26): submitted, edited or dismissed, the latest delivery
-// wins. Kept for later; the page doesn't show reviews yet.
+// Records a review (#26): submitted, edited or dismissed. Review payloads
+// carry no `updated_at` to order them by, but a dismissal is final, so it
+// sticks: a `submitted` arriving after its `dismissed` changes nothing. Kept
+// for later; the page doesn't show reviews yet.
 fn recordReview(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 	let Ok(r) = reviewOf(body) else match {
 		Err(why) => Logger.error("could not read review from \(d.id): \(why)"),
@@ -331,7 +336,8 @@ fn recordReview(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger
 		INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at)
 		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
 		ON CONFLICT (review_id) DO UPDATE SET
-		  state = excluded.state, submitted_at = coalesce(excluded.submitted_at, pull_request_reviews.submitted_at)
+		  state = CASE WHEN pull_request_reviews.state = 'dismissed' THEN 'dismissed' ELSE excluded.state END,
+		  submitted_at = coalesce(excluded.submitted_at, pull_request_reviews.submitted_at)
 		""",
 		[
 			Integer(r.reviewId),

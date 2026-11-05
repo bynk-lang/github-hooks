@@ -258,3 +258,50 @@ case "a pull_request that doesn't decode is logged, and the delivery is still re
 	let n <- Deliveries.first("SELECT count(*) AS n FROM pull_requests", [])
 	expect n == Ok(Some("{\"n\":0}"))
 }
+
+case "a dismissal is final, whichever order the deliveries arrive in" {
+	let dismissed = Bytes.fromUtf8(review
+		.replace("\"action\": \"submitted\"", "\"action\": \"dismissed\"")
+		.replace("\"state\": \"COMMENTED\"", "\"state\": \"DISMISSED\""))
+	let approved = Bytes.fromUtf8(review.replace(
+		"\"state\": \"COMMENTED\"",
+		"\"state\": \"APPROVED\""
+	))
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request_review", "rv-dismissed"),
+		dismissed
+	) by GitHub
+	let _ <- api.POST("/github", headers("pull_request_review", "rv-approved"), approved) by GitHub
+	let row <- Deliveries.first("SELECT state FROM pull_request_reviews", [])
+	expect row == Ok(Some("{\"state\":\"dismissed\"}"))
+}
+
+case "in the same second, a delivery never takes a PR out of merged, but still moves an open one on" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-merged"),
+		Bytes.fromUtf8(mergedPull)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-labelled"),
+		openPull("labeled", false, "2026-11-05T08:10:14Z")
+	) by GitHub
+	let merged <- Deliveries.first("SELECT state, merged_at FROM pull_requests", [])
+	expect merged == Ok(Some("{\"state\":\"merged\",\"merged_at\":\"2026-11-05T08:10:11.000Z\"}"))
+	// Opened as a draft and marked ready within one second: the ready one applies.
+	let _ <- Deliveries.run("DELETE FROM pull_requests", [])
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-open"),
+		openPull("opened", true, "2026-11-05T07:54:42Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-ready"),
+		openPull("ready_for_review", false, "2026-11-05T07:54:42Z")
+	) by GitHub
+	let ready <- Deliveries.first("SELECT state, draft, ready_at FROM pull_requests", [])
+	expect ready == Ok(Some("{\"state\":\"open\",\"draft\":0,\"ready_at\":\"2026-11-05T07:54:42.000Z\"}"))
+}
