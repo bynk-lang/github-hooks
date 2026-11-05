@@ -1,0 +1,243 @@
+// Phase 4, slice 2, step 3 (#26): the public PR flow routes, against an
+// in-memory D1 with the migrations applied and a hand-built set of pull
+// requests whose numbers are worked out below. The clock is fixed at
+// 2026-11-05T12:00:00Z, so the default 7-day window opens at
+// 2026-10-29T12:00:00Z.
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+--- A viewer's request headers: one address, well within the limit.
+fn viewer() -> RequestHeaders {
+	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7"])
+}
+
+---
+`bynk-lang/bynk`, by people, merged in the window:
+
+- #1: opened 4 Nov 10:00, ready 5 Nov 08:00, enqueued 09:30, merged 10:00.
+  Ready to merge 7200 s, open to merge 86400 s, queue 1800 s, size 120.
+- #2: opened 4 Nov 06:00, ready 11:00, enqueued 11:10, dequeued (CI_FAILURE)
+  11:20, enqueued again 11:40, merged 12:00. 3600 s, 21600 s, 1200 s,
+  requeued, size 10.
+- #3: opened 3 Nov 00:00, ready before the service saw it (no `ready_at`),
+  enqueued 09:00 but dequeued (CI_FAILURE) 09:10, then merged around the
+  queue at 12:00, so it has no queue time; size unknown. Open to merge
+  43200 s.
+
+So 3 merged; ready to merge over 2 [3600, 7200]: p50 3600, p95 7200; open to
+merge [21600, 43200, 86400]: p50 43200, p95 86400; queue [1200, 1800]: p50
+1200, p95 1800; size [10, 120]: p50 10. #4 closed unmerged (and a bot's #13, which
+doesn't count); #5 merged before the window. A bot's #6 merged in an hour; its #7 is open. #8 is a
+draft, #9 has been ready since 25 Oct (an enqueue on 1 Nov with no dequeue
+seen is too old to mean it is still queued), #10 is in the queue (after a
+dequeue GitHub gave no reason for), #12 was dequeued (CI_FAILURE) and is back
+to ready, and #14, first ready on 1 Oct, went back to draft and was made ready
+again at 11:30 today. #11 is gone. A private repository and an excluded
+one have a merged and an open pull request each, and must not appear.
+---
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+				                           opened_at, ready_at, closed_at, merged_at, additions, deletions, updated_at) VALUES
+				  ('bynk-lang/bynk', 1, 'One', 'a-person', 0, 'main', 'h1', 0, 'merged',
+				   '2026-11-04T10:00:00.000Z', '2026-11-05T08:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', 100, 20, '2026-11-05T10:00:01.000Z'),
+				  ('bynk-lang/bynk', 2, 'Two', 'a-person', 0, 'main', 'h2', 0, 'merged',
+				   '2026-11-04T06:00:00.000Z', '2026-11-04T11:00:00.000Z', '2026-11-04T12:00:00.000Z', '2026-11-04T12:00:00.000Z', 10, 0, '2026-11-04T12:00:01.000Z'),
+				  ('bynk-lang/bynk', 3, 'Three', 'a-person', 0, 'main', 'h3', 0, 'merged',
+				   '2026-11-03T00:00:00.000Z', NULL, '2026-11-03T12:00:00.000Z', '2026-11-03T12:00:00.000Z', NULL, NULL, '2026-11-03T12:00:01.000Z'),
+				  ('bynk-lang/bynk', 4, 'Four', 'a-person', 0, 'main', 'h4', 0, 'closed',
+				   '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', '2026-11-02T12:00:00.000Z', NULL, 1, 1, '2026-11-02T12:00:01.000Z'),
+				  ('bynk-lang/bynk', 5, 'Five', 'a-person', 0, 'main', 'h5', 0, 'merged',
+				   '2026-10-19T00:00:00.000Z', '2026-10-19T00:00:00.000Z', '2026-10-20T00:00:00.000Z', '2026-10-20T00:00:00.000Z', 1, 1, '2026-10-20T00:00:01.000Z'),
+				  ('bynk-lang/bynk', 6, 'Bump', 'a-bot[bot]', 1, 'main', 'h6', 0, 'merged',
+				   '2026-11-05T05:00:00.000Z', '2026-11-05T05:00:00.000Z', '2026-11-05T06:00:00.000Z', '2026-11-05T06:00:00.000Z', 2, 2, '2026-11-05T06:00:01.000Z'),
+				  ('bynk-lang/bynk', 7, 'Bump again', 'a-bot[bot]', 1, 'main', 'h7', 0, 'open',
+				   '2026-11-05T05:30:00.000Z', '2026-11-05T05:30:00.000Z', NULL, NULL, 2, 2, '2026-11-05T05:30:01.000Z'),
+				  ('bynk-lang/bynk', 8, 'Eight', 'a-person', 0, 'main', 'h8', 1, 'open',
+				   '2026-11-05T07:00:00.000Z', NULL, NULL, NULL, NULL, NULL, '2026-11-05T07:00:01.000Z'),
+				  ('bynk-lang/bynk', 9, 'Nine', 'a-person', 0, 'main', 'h9', 0, 'open',
+				   '2026-10-24T00:00:00.000Z', '2026-10-25T00:00:00.000Z', NULL, NULL, NULL, NULL, '2026-10-25T00:00:01.000Z'),
+				  ('bynk-lang/bynk', 10, 'Ten', 'a-person', 0, 'main', 'h10', 0, 'open',
+				   '2026-11-05T08:30:00.000Z', '2026-11-05T09:00:00.000Z', NULL, NULL, NULL, NULL, '2026-11-05T11:00:01.000Z'),
+				  ('bynk-lang/bynk', 12, 'Twelve', 'a-person', 0, 'main', 'h12', 0, 'open',
+				   '2026-11-05T09:30:00.000Z', '2026-11-05T09:45:00.000Z', NULL, NULL, NULL, NULL, '2026-11-05T10:45:01.000Z'),
+				  ('bynk-lang/bynk', 13, 'Bump closed', 'a-bot[bot]', 1, 'main', 'h13', 0, 'closed',
+				   '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', '2026-11-03T01:00:00.000Z', NULL, 2, 2, '2026-11-03T01:00:01.000Z'),
+				  ('bynk-lang/bynk', 14, 'Fourteen', 'a-person', 0, 'main', 'h14', 0, 'open',
+				   '2026-09-30T00:00:00.000Z', '2026-10-01T00:00:00.000Z', NULL, NULL, NULL, NULL, '2026-11-05T11:30:01.000Z'),
+				  ('bynk-lang/bynk', 11, 'Eleven', 'a-person', 0, 'main', 'h11', 0, 'gone',
+				   '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', NULL, NULL, NULL, NULL, '2026-11-01T00:00:01.000Z'),
+				  ('bynk-lang/secret', 1, 'Secret', 'a-person', 0, 'main', 's1', 0, 'merged',
+				   '2026-11-05T00:00:00.000Z', '2026-11-05T00:00:00.000Z', '2026-11-05T01:00:00.000Z', '2026-11-05T01:00:00.000Z', 1, 1, '2026-11-05T01:00:01.000Z'),
+				  ('bynk-lang/secret', 2, 'Secret open', 'a-person', 0, 'main', 's2', 0, 'open',
+				   '2026-11-05T00:00:00.000Z', '2026-11-05T00:00:00.000Z', NULL, NULL, 1, 1, '2026-11-05T00:00:01.000Z'),
+				  ('bynk-lang/sandbox', 1, 'Sandbox', 'a-person', 0, 'main', 'x1', 0, 'merged',
+				   '2026-11-05T00:00:00.000Z', '2026-11-05T00:00:00.000Z', '2026-11-05T01:00:00.000Z', '2026-11-05T01:00:00.000Z', 1, 1, '2026-11-05T01:00:01.000Z'),
+				  ('bynk-lang/sandbox', 2, 'Sandbox open', 'a-person', 0, 'main', 'x2', 0, 'open',
+				   '2026-11-05T00:00:00.000Z', '2026-11-05T00:00:00.000Z', NULL, NULL, 1, 1, '2026-11-05T00:00:01.000Z')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_request_events (delivery, repo, number, action, reason, at) VALUES
+				  ('e1', 'bynk-lang/bynk', 1, 'enqueued', NULL, '2026-11-05T09:30:00.000Z'),
+				  ('e2', 'bynk-lang/bynk', 1, 'dequeued', 'MERGE', '2026-11-05T10:00:01.000Z'),
+				  ('e3', 'bynk-lang/bynk', 2, 'enqueued', NULL, '2026-11-04T11:10:00.000Z'),
+				  ('e4', 'bynk-lang/bynk', 2, 'dequeued', 'CI_FAILURE', '2026-11-04T11:20:00.000Z'),
+				  ('e5', 'bynk-lang/bynk', 2, 'enqueued', NULL, '2026-11-04T11:40:00.000Z'),
+				  ('e6', 'bynk-lang/bynk', 2, 'dequeued', 'MERGE', '2026-11-04T12:00:01.000Z'),
+				  ('e7', 'bynk-lang/bynk', 10, 'enqueued', NULL, '2026-11-05T09:30:00.000Z'),
+				  ('e8', 'bynk-lang/bynk', 10, 'dequeued', NULL, '2026-11-05T10:00:00.000Z'),
+				  ('e9', 'bynk-lang/bynk', 10, 'enqueued', NULL, '2026-11-05T11:00:00.000Z'),
+				  ('e12', 'bynk-lang/bynk', 12, 'enqueued', NULL, '2026-11-05T10:15:00.000Z'),
+				  ('e13', 'bynk-lang/bynk', 12, 'dequeued', 'CI_FAILURE', '2026-11-05T10:45:00.000Z'),
+				  ('e14', 'bynk-lang/bynk', 3, 'enqueued', NULL, '2026-11-03T09:00:00.000Z'),
+				  ('e15', 'bynk-lang/bynk', 3, 'dequeued', 'CI_FAILURE', '2026-11-03T09:10:00.000Z'),
+				  ('e16', 'bynk-lang/bynk', 9, 'enqueued', NULL, '2026-11-01T00:00:00.000Z'),
+				  ('e17', 'bynk-lang/bynk', 14, 'ready_for_review', NULL, '2026-10-01T00:00:00.000Z'),
+				  ('e18', 'bynk-lang/bynk', 14, 'converted_to_draft', NULL, '2026-10-02T00:00:00.000Z'),
+				  ('e19', 'bynk-lang/bynk', 14, 'ready_for_review', NULL, '2026-11-05T11:30:00.000Z'),
+				  ('e10', 'bynk-lang/sandbox', 1, 'dequeued', 'CI_FAILURE', '2026-11-05T00:30:00.000Z'),
+				  ('e11', 'bynk-lang/secret', 1, 'dequeued', 'CI_FAILURE', '2026-11-05T00:30:00.000Z')
+			""",
+			params: [],
+		},
+	]
+}
+
+case "a week of PR flow for people, with bots apart, from public repositories" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/prs", PrQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.since == "2026-10-29T12:00:00.000Z"
+	expect m.until == "2026-11-05T12:00:00.000Z"
+	// The first merge recorded, in any repository (#5).
+	expect m.data_since == Some("2026-10-20T00:00:00.000Z")
+	expect m.repos.map((f) => f.repo) == ["bynk-lang/bynk"]
+	let Some(f) = m.repos.first() else {
+		expect false
+	}
+	expect f.merged == 3
+	expect f.closed_unmerged == 1
+	expect f.ready_to_merge_counted == 2
+	expect f.ready_to_merge_p50_seconds == Some(3600)
+	expect f.ready_to_merge_p95_seconds == Some(7200)
+	expect f.open_to_merge_p50_seconds == Some(43200)
+	expect f.open_to_merge_p95_seconds == Some(86400)
+	expect f.queue_counted == 2
+	expect f.queue_p50_seconds == Some(1200)
+	expect f.queue_p95_seconds == Some(1800)
+	expect f.requeued == 1
+	expect f.size_counted == 2
+	expect f.size_p50_lines == Some(10)
+	expect f.bots_merged == 1
+	expect f.bots_open == 1
+	expect f.bots_merge_p50_seconds == Some(3600)
+}
+
+case "queue exits other than a merge, and merges by day" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/prs", PrQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	// MERGE is the normal way out; the excluded and private repositories' exits don't show.
+	expect m.queue_exits.map(
+		(x) => "\(x.repo) \(x.reason) \(x.count)"
+	) == ["bynk-lang/bynk CI_FAILURE 3", "bynk-lang/bynk unknown 1"]
+	expect m.daily.map(
+		(d) => "\(d.day) \(d.merged)"
+	) == ["2026-11-03 1", "2026-11-04 1", "2026-11-05 1"]
+}
+
+case "a longer window reaches further back, and a repository filter narrows it" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let month <- api.GET(
+		"/metrics/prs",
+		PrQuery {
+			repo: Some("Bynk-Lang/Bynk"),
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(m) = month else {
+		expect false
+	}
+	expect m.repos.map((f) => "\(f.repo) \(f.merged)") == ["bynk-lang/bynk 4"]
+	let other <- api.GET(
+		"/metrics/prs",
+		PrQuery {
+			repo: Some("bynk-lang/other"),
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let Ok(o) = other else {
+		expect false
+	}
+	expect o.repos.length() == 0
+	expect o.daily.length() == 0
+}
+
+case "open pull requests, longest waiting first and drafts last, with where each one is" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/prs/open", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(o) = r else {
+		expect false
+	}
+	expect o.open.map(
+		(p) => "#\(p.number) \(p.stage)\(if p.stale { " stale" } else { "" })\(if p.author_is_bot { " bot" } else { "" })"
+	) == ["#9 ready stale", "#7 ready bot", "#10 queued", "#12 ready", "#14 ready", "#8 draft"]
+	let Some(nine) = o.open.first() else {
+		expect false
+	}
+	expect nine.ready_since == Some("2026-10-25T00:00:00.000Z")
+	// Made ready again today, so it waits from today, not from 1 October.
+	expect o.open
+		.filter((p) => p.number == 14)
+		.map((p) => p.ready_since) == [Some("2026-11-05T11:30:00.000Z")]
+	expect nine.title == "Nine"
+}
+
+case "an empty table is empty lists, not an error" {
+	let r <- api.GET("/metrics/prs", PrQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.repos.length() == 0
+	expect m.data_since == None
+	let o <- api.GET("/metrics/prs/open", NowQuery { repo: None }, viewer()) by Visitor
+	expect o == Ok(PrsOpen { open: [] })
+}
+
+case "a window other than 7, 30 or 90 days is refused, and the limit applies to both routes" {
+	stub MetricsLimit.allow(_) returns each [true, false, false]
+	let bad <- api.GET("/metrics/prs", PrQuery { repo: None, days: 14 }, viewer()) by Visitor
+	expect bad is BadRequest("days must be 7, 30 or 90")
+	let limited <- api.GET("/metrics/prs", PrQuery { repo: None, days: 7 }, viewer()) by Visitor
+	expect limited is TooManyRequests(_)
+	let open <- api.GET("/metrics/prs/open", NowQuery { repo: None }, viewer()) by Visitor
+	expect open is TooManyRequests(_)
+	expect Deliveries.all never called
+}

@@ -621,6 +621,13 @@ const LIVE_LIMIT: Int = 500
 // How many of a workflow's latest completed attempts `/metrics/ci/history` lists.
 const RECENT_RUNS: Int = 20
 
+// How many open pull requests `/metrics/prs/open` lists at most.
+const MAX_OPEN_PULLS: Int = 500
+
+// How long an enqueue still means "in the merge queue" without a dequeue: far
+// past any merge-queue run, so only a lost `dequeued` delivery reaches it.
+const QUEUE_TIMEOUT: Duration = 1.days
+
 ---
 Pushes a changed run to every open dashboard. A capability (not a direct agent
 call) so the rule for *when* to push is observable in tests.
@@ -1209,6 +1216,272 @@ service api from http {
 		})
 	}
 
+	// PR flow over a window (#26): pull requests merged or closed in it, from
+	// public repositories less `DASHBOARD_EXCLUDE`, which each query applies
+	// through its `shown` CTE. Cached and limited like the CI routes. `gone`
+	// pull requests count nowhere. The four reads run concurrently.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/prs") (query: PrQuery, headers: RequestHeaders) -> Effect[HttpResult[PrMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+			BadRequest("days must be 7, 30 or 90")
+		}
+		let now <- Clock.now()
+		let since = now - Duration.millis(query.days * 86_400_000)
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let window = [
+			Text(since.toIso()),
+			Text(now.toIso()),
+			text(query.repo.map((r) => "\(r)")),
+			Text(excludedNames(excluded)),
+		]
+		// Each read is a literal (Bynk checks SQL at compile time), chosen by
+		// position, so the four run concurrently: 0 the flow, 1 queue exits,
+		// 2 merges by day, 3 when collection began (the first merge recorded,
+		// which `pull_requests_by_merged` answers without scanning).
+		let reads <- [0, 1, 2, 3].parTraverseAll(
+			(read) => match read {
+				0 => Deliveries.all(
+					"""
+						WITH shown AS (
+						  SELECT repo FROM repositories
+						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+						),
+						merged AS MATERIALIZED (
+						  SELECT p.*,
+						    (SELECT e.action FROM pull_request_events e
+						     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued') AND e.at <= p.merged_at
+						     ORDER BY e.at DESC LIMIT 1) AS last_queue,
+						    (SELECT max(e.at) FROM pull_request_events e
+						     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'enqueued' AND e.at <= p.merged_at) AS enqueued_at,
+						    (SELECT count(*) FROM pull_request_events e
+						     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'enqueued') AS enqueues
+						  FROM pull_requests p JOIN shown s ON s.repo = p.repo
+						  WHERE p.merged_at >= ?1 AND p.merged_at < ?2
+						),
+						closed AS (
+						  SELECT p.repo, p.author_is_bot FROM pull_requests p JOIN shown s ON s.repo = p.repo
+						  WHERE p.state = 'closed' AND p.closed_at >= ?1 AND p.closed_at < ?2
+						),
+						open_bots AS (
+						  SELECT p.repo FROM pull_requests p JOIN shown s ON s.repo = p.repo
+						  WHERE p.state = 'open' AND p.author_is_bot = 1
+						),
+						repos AS (
+						  SELECT repo FROM merged UNION SELECT repo FROM closed UNION SELECT repo FROM open_bots
+						),
+						counts AS (
+						  SELECT repo, sum(author_is_bot = 0) AS merged, sum(author_is_bot = 0 AND enqueues > 1) AS requeued,
+						    sum(author_is_bot = 1) AS bots_merged
+						  FROM merged GROUP BY repo
+						),
+						closed_counts AS (
+						  SELECT repo, sum(author_is_bot = 0) AS n FROM closed GROUP BY repo
+						),
+						bot_counts AS (
+						  SELECT repo, count(*) AS n FROM open_bots GROUP BY repo
+						),
+						measures AS (
+						  SELECT repo, 'ready' AS k,
+						    CAST(round((julianday(merged_at) - julianday(ready_at)) * 86400) AS INTEGER) AS v
+						  FROM merged WHERE author_is_bot = 0 AND ready_at IS NOT NULL
+						  UNION ALL
+						  SELECT repo, 'open', CAST(round((julianday(merged_at) - julianday(opened_at)) * 86400) AS INTEGER)
+						  FROM merged WHERE author_is_bot = 0
+						  UNION ALL
+						  SELECT repo, 'queue', CAST(round((julianday(merged_at) - julianday(enqueued_at)) * 86400) AS INTEGER)
+						  FROM merged WHERE author_is_bot = 0 AND last_queue = 'enqueued'
+						  UNION ALL
+						  SELECT repo, 'size', additions + deletions
+						  FROM merged WHERE author_is_bot = 0 AND additions IS NOT NULL AND deletions IS NOT NULL
+						  UNION ALL
+						  SELECT repo, 'bot', CAST(round((julianday(merged_at) - julianday(opened_at)) * 86400) AS INTEGER)
+						  FROM merged WHERE author_is_bot = 1
+						),
+						ranked AS (
+						  SELECT repo, k, v,
+						    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
+						    count(*) OVER (PARTITION BY repo, k) AS n
+						  FROM measures
+						),
+						pct AS (
+						  SELECT repo, k, max(n) AS n,
+						    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
+						    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
+						  FROM ranked GROUP BY repo, k
+						)
+						SELECT r.repo,
+						  coalesce(c.merged, 0) AS merged,
+						  coalesce(cc.n, 0) AS closed_unmerged,
+						  coalesce(rd.n, 0) AS ready_to_merge_counted, rd.p50 AS ready_to_merge_p50_seconds, rd.p95 AS ready_to_merge_p95_seconds,
+						  op.p50 AS open_to_merge_p50_seconds, op.p95 AS open_to_merge_p95_seconds,
+						  coalesce(qu.n, 0) AS queue_counted, qu.p50 AS queue_p50_seconds, qu.p95 AS queue_p95_seconds,
+						  coalesce(c.requeued, 0) AS requeued,
+						  coalesce(sz.n, 0) AS size_counted, sz.p50 AS size_p50_lines,
+						  coalesce(c.bots_merged, 0) AS bots_merged,
+						  coalesce(bc.n, 0) AS bots_open,
+						  bt.p50 AS bots_merge_p50_seconds
+						FROM repos r
+						LEFT JOIN counts c ON c.repo = r.repo
+						LEFT JOIN closed_counts cc ON cc.repo = r.repo
+						LEFT JOIN bot_counts bc ON bc.repo = r.repo
+						LEFT JOIN pct rd ON rd.repo = r.repo AND rd.k = 'ready'
+						LEFT JOIN pct op ON op.repo = r.repo AND op.k = 'open'
+						LEFT JOIN pct qu ON qu.repo = r.repo AND qu.k = 'queue'
+						LEFT JOIN pct sz ON sz.repo = r.repo AND sz.k = 'size'
+						LEFT JOIN pct bt ON bt.repo = r.repo AND bt.k = 'bot'
+						ORDER BY r.repo
+					""",
+					window
+				),
+				1 => Deliveries.all(
+					"""
+						WITH shown AS (
+						  SELECT repo FROM repositories
+						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+						)
+						SELECT e.repo, coalesce(e.reason, 'unknown') AS reason, count(*) AS count
+						FROM pull_request_events e JOIN shown s ON s.repo = e.repo
+						WHERE e.action = 'dequeued' AND coalesce(e.reason, '') != 'MERGE'
+						  AND e.at >= ?1 AND e.at < ?2
+						GROUP BY e.repo, coalesce(e.reason, 'unknown')
+						ORDER BY e.repo, count DESC, reason
+					""",
+					window
+				),
+				2 => Deliveries.all(
+					"""
+						WITH shown AS (
+						  SELECT repo FROM repositories
+						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+						)
+						SELECT p.repo, substr(p.merged_at, 1, 10) AS day, count(*) AS merged
+						FROM pull_requests p JOIN shown s ON s.repo = p.repo
+						WHERE p.author_is_bot = 0 AND p.merged_at >= ?1 AND p.merged_at < ?2
+						GROUP BY p.repo, day
+						ORDER BY p.repo, day
+					""",
+					window
+				),
+				_ => Deliveries.all(
+					"SELECT min(merged_at) AS first FROM pull_requests WHERE merged_at IS NOT NULL",
+					[]
+				),
+			}
+		)
+		let Some(Ok(flowRows)) = reads.get(0) else {
+			let _ <- Logger.error("could not compute PR flow: \(readError(reads.get(0)))")
+			ServerError("could not compute PR flow")
+		}
+		let Some(Ok(exitRows)) = reads.get(1) else {
+			let _ <- Logger.error("could not read merge-queue exits: \(readError(reads.get(1)))")
+			ServerError("could not read merge-queue exits")
+		}
+		let Some(Ok(dayRows)) = reads.get(2) else {
+			let _ <- Logger.error("could not count merges by day: \(readError(reads.get(2)))")
+			ServerError("could not count merges by day")
+		}
+		let Ok(flow) = Json.decodeSql[List[PrFlow]](flowRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode PR flow: \(jsonError(e))")
+				ServerError("PR flow did not decode")
+			},
+		}
+		let Ok(exits) = Json.decodeSql[List[QueueExit]](exitRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode merge-queue exits: \(jsonError(e))")
+				ServerError("merge-queue exits did not decode")
+			},
+		}
+		let Ok(days) = Json.decodeSql[List[MergedDay]](dayRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode merges by day: \(jsonError(e))")
+				ServerError("merges by day did not decode")
+			},
+		}
+		// Only a hint of how much of the window has data, so a failed read is "unknown".
+		let dataSince: Option[String] = match reads.get(3) {
+			Some(Ok(rows)) => match Json.decodeSql[List[FirstRun]](rows) {
+				Ok([f]) => f.first,
+				_ => None,
+			},
+			_ => None,
+		}
+		Ok(PrMetrics {
+			since: since.toIso(),
+			until: now.toIso(),
+			data_since: dataSince,
+			repos: flow,
+			queue_exits: exits,
+			daily: days,
+		})
+	}
+
+	// Every open pull request in public repositories less
+	// `DASHBOARD_EXCLUDE`, longest waiting first, at most `MAX_OPEN_PULLS`:
+	// ready ones by when they last became ready (or opened, if that isn't
+	// known), then drafts. `queued` when its latest queue moment is an enqueue
+	// from the last `QUEUE_TIMEOUT`: a merge-queue run takes minutes, so an
+	// older one means its `dequeued` delivery was lost.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/prs/open") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[PrsOpen]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		let now <- Clock.now()
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let Ok(rows) <- Deliveries.all(
+			"""
+			WITH shown AS (
+			  SELECT repo FROM repositories
+			  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?5, ',' || lower(repo) || ',') = 0
+			),
+			open AS (
+			  SELECT p.repo, p.number, p.title, p.author, p.author_is_bot, p.draft, p.opened_at,
+			    coalesce(
+			      (SELECT max(e.at) FROM pull_request_events e
+			       WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'),
+			      p.ready_at) AS ready_since,
+			    (SELECT CASE WHEN e.action = 'enqueued' AND e.at >= ?3 THEN 1 ELSE 0 END FROM pull_request_events e
+			     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued')
+			     ORDER BY e.at DESC LIMIT 1) AS queued
+			  FROM pull_requests p JOIN shown s ON s.repo = p.repo
+			  WHERE p.state = 'open'
+			)
+			SELECT repo, number, title, author, author_is_bot = 1 AS author_is_bot,
+			  CASE WHEN draft = 1 THEN 'draft' WHEN queued = 1 THEN 'queued' ELSE 'ready' END AS stage,
+			  opened_at, ready_since,
+			  (draft = 0 AND coalesce(queued, 0) = 0 AND ready_since IS NOT NULL AND ready_since < ?2) AS stale
+			FROM open
+			ORDER BY draft, coalesce(ready_since, opened_at), repo, number
+			LIMIT ?4
+			""",
+			[
+				text(query.repo.map((r) => "\(r)")),
+				Text((now - 7.days).toIso()),
+				Text((now - QUEUE_TIMEOUT).toIso()),
+				Integer(MAX_OPEN_PULLS),
+				Text(excludedNames(excluded)),
+			]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not list open pull requests: \(sqlError(e))")
+				ServerError("could not list open pull requests")
+			},
+		}
+		let Ok(open) = Json.decodeSql[List[OpenPull]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode open pull requests: \(jsonError(e))")
+				ServerError("open pull requests did not decode")
+			},
+		}
+		Ok(PrsOpen { open: open })
+	}
+
 	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
 	// records the delivery and answers; work done in response belongs elsewhere.
 	@raw(contentType: "application/json")
@@ -1486,6 +1759,22 @@ fn syncFailed(why: String) -> Effect[Result[(), String]] given Logger {
 // for any realistic run of lost deliveries, and bounded so one run can't make
 // hundreds of calls.
 const MAX_REPAIRS: Int = 50
+
+// `DASHBOARD_EXCLUDE` for SQL, as `allows` reads it (names compared trimmed and
+// without case): `,owner/a,owner/b,`, matched with `instr(?, ',' || lower(repo) || ',')`.
+// `instr` rather than `LIKE`, whose `_` is a wildcard and may be in a name.
+fn excludedNames(list: Option[String]) -> String {
+	let names = list.getOrElse("").split(",").map((n) => n.trim().toLower()).filter((n) => n != "")
+	",\(joined(names, ",")),"
+}
+
+// Why one of a route's concurrent reads gave no rows.
+fn readError(r: Option[Result[String, SqlError]]) -> String {
+	match r {
+		Some(Err(e)) => sqlError(e),
+		_ => "no result",
+	}
+}
 
 // Counts one metrics request against the caller's address. A request with
 // no address (not through Cloudflare's edge) shares one bucket.
