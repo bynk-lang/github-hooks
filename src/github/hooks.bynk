@@ -325,22 +325,23 @@ service api from http {
 
 	// The 50 most recent deliveries, across every repository.
 	on GET("/activity") () -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
-		let Ok(rows) <- Deliveries.all(
+		// `select[Activity]` writes the column list from `Activity`'s fields. The
+		// annotation is load-bearing until bynk-lang/bynk#2957 is fixed: without
+		// it the emitted error type does not narrow on `Sql`/`Decode`.
+		let read: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
 			"""
-			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
 			FROM deliveries
 			ORDER BY received_at DESC, rowid DESC
 			LIMIT 50
 			""",
 			[]
-		) else match {
-			Err(e) => {
+		)
+		let Ok(list) = read else match {
+			Err(Sql(e)) => {
 				let _ <- Logger.error("could not list activity: \(sqlError(e))")
 				ServerError("could not read recorded activity")
 			},
-		}
-		let Ok(list) = Json.decodeSql[List[Activity]](rows) else match {
-			Err(e) => {
+			Err(Decode(e)) => {
 				let _ <- Logger.error("could not decode activity rows: \(jsonError(e))")
 				ServerError("recorded activity did not decode")
 			},
@@ -354,23 +355,21 @@ service api from http {
 		owner: String,
 		name: String
 	) -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
-		let Ok(rows) <- Deliveries.all(
+		let read: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
 			"""
-			SELECT id, event, action, repo, sender, org, installation, deleted, size, received_at
 			FROM deliveries
 			WHERE repo = ?1 COLLATE NOCASE
 			ORDER BY received_at DESC, rowid DESC
 			LIMIT 50
 			""",
 			[Text("\(owner)/\(name)")]
-		) else match {
-			Err(e) => {
+		)
+		let Ok(list) = read else match {
+			Err(Sql(e)) => {
 				let _ <- Logger.error("could not list \(owner)/\(name) activity: \(sqlError(e))")
 				ServerError("could not read recorded activity")
 			},
-		}
-		let Ok(list) = Json.decodeSql[List[Activity]](rows) else match {
-			Err(e) => {
+			Err(Decode(e)) => {
 				let _ <- Logger.error(
 					"could not decode \(owner)/\(name) activity rows: \(jsonError(e))"
 				)
@@ -395,7 +394,8 @@ service api from http {
 		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
 		// three-digit milliseconds, so the range compares as text, in time order,
 		// and uses the time index. The bound depends on the two formats matching:
-		// change either and the digest's day-boundary test should fail.
+		// change either and the digest's day-boundary test should fail. It stays
+		// `all`, not `select[Tally]`: `deliveries` is a `count(*)`, not a column.
 		let Ok(rows) <- Deliveries.all(
 			"""
 			SELECT repo, event, action, count(*) AS deliveries
