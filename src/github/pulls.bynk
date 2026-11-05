@@ -1,0 +1,190 @@
+commons github.pulls
+
+uses github.events
+uses github.runs
+
+---
+The parts of a `pull_request` delivery the PR flow dashboard needs (#26).
+`reason` comes with `dequeued`: why the PR left the merge queue.
+---
+type PullDelivery = {
+	action: String,
+	pull_request: PullPayload,
+	repository: RepoRef,
+	reason: Option[String],
+}
+
+---
+An account as a pull request or review names it. `type` is `User` or `Bot`.
+---
+type UserRef = {
+	login: String,
+	type: String,
+}
+
+type BranchRef = {
+	ref: String,
+}
+
+---
+`pull_request` as GitHub sends it. The size fields and `commits` are optional
+so that a delivery without them still records the rest.
+---
+type PullPayload = {
+	number: Int,
+	title: String,
+	user: UserRef,
+	base: BranchRef,
+	head: BranchRef,
+	draft: Option[Bool],
+	state: String,
+	created_at: String,
+	updated_at: String,
+	closed_at: Option[String],
+	merged_at: Option[String],
+	commits: Option[Int],
+	additions: Option[Int],
+	deletions: Option[Int],
+	changed_files: Option[Int],
+}
+
+---
+One pull request, as `pull_requests` stores it. `state` is `merged` once
+merged, else GitHub's `open` or `closed`. `readyAt` is set only when this
+delivery says when the PR became ready: opened not as a draft (its
+`createdAt`), or `ready_for_review` (its `updatedAt`, which GitHub moves to
+that moment).
+---
+type PullFact = {
+	repo: String,
+	number: Int,
+	action: String,
+	title: String,
+	author: String,
+	authorIsBot: Bool,
+	base: String,
+	head: String,
+	draft: Bool,
+	state: String,
+	openedAt: String,
+	readyAt: Option[String],
+	closedAt: Option[String],
+	mergedAt: Option[String],
+	commits: Option[Int],
+	additions: Option[Int],
+	deletions: Option[Int],
+	changedFiles: Option[Int],
+	updatedAt: String,
+	reason: Option[String],
+}
+
+---
+The pull request a `pull_request` delivery describes, or why it couldn't be read.
+---
+fn pullOf(body: Bytes) -> Result[PullFact, String] {
+	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
+	let Ok(p) = Json.decode[PullDelivery](text) else match {
+		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	let pr = p.pull_request
+	let Some(created) = isoTime(pr.created_at) else {
+		Err("created_at is not a time: \(pr.created_at)")
+	}
+	let Some(updated) = isoTime(pr.updated_at) else {
+		Err("updated_at is not a time: \(pr.updated_at)")
+	}
+	let merged = pr.merged_at.andThen((t) => isoTime(t))
+	let draft = pr.draft.getOrElse(false)
+	Ok(PullFact {
+		repo: p.repository.full_name,
+		number: pr.number,
+		action: p.action,
+		title: pr.title,
+		author: pr.user.login,
+		authorIsBot: pr.user.type == "Bot",
+		base: pr.base.ref,
+		head: pr.head.ref,
+		draft: draft,
+		state: if merged.isSome() { "merged" } else { pr.state },
+		openedAt: created,
+		readyAt: if p.action == "opened" && !draft {
+			Some(created)
+		} else if p.action == "ready_for_review" { Some(updated) } else { None },
+		closedAt: pr.closed_at.andThen((t) => isoTime(t)),
+		mergedAt: merged,
+		commits: pr.commits,
+		additions: pr.additions,
+		deletions: pr.deletions,
+		changedFiles: pr.changed_files,
+		updatedAt: updated,
+		reason: p.reason,
+	})
+}
+
+---
+Whether a `pull_request` action is one of the moments `pull_request_events`
+keeps.
+---
+fn isPullMoment(action: String) -> Bool {
+	action == "enqueued"
+		|| action == "dequeued"
+		|| action == "ready_for_review"
+		|| action == "converted_to_draft"
+		|| action == "closed"
+		|| action == "reopened"
+}
+
+---
+The parts of a `pull_request_review` delivery kept (#26). `user` is null for
+a deleted account, and `submitted_at` for a review still pending.
+---
+type ReviewDelivery = {
+	action: String,
+	review: ReviewPayload,
+	pull_request: ReviewedPull,
+	repository: RepoRef,
+}
+
+type ReviewPayload = {
+	id: Int,
+	user: Option[UserRef],
+	state: String,
+	submitted_at: Option[String],
+}
+
+type ReviewedPull = {
+	number: Int,
+}
+
+---
+One review, as `pull_request_reviews` stores it: `state` in lower case.
+---
+type ReviewFact = {
+	reviewId: Int,
+	repo: String,
+	number: Int,
+	reviewer: Option[String],
+	reviewerIsBot: Bool,
+	state: String,
+	submittedAt: Option[String],
+}
+
+---
+The review a `pull_request_review` delivery describes, or why it couldn't be read.
+---
+fn reviewOf(body: Bytes) -> Result[ReviewFact, String] {
+	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
+	let Ok(p) = Json.decode[ReviewDelivery](text) else match {
+		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	let r = p.review
+	Ok(ReviewFact {
+		reviewId: r.id,
+		repo: p.repository.full_name,
+		number: p.pull_request.number,
+		reviewer: r.user.map((u) => u.login),
+		reviewerIsBot: r.user.map((u) => u.type == "Bot").getOrElse(false),
+		state: r.state.toLower(),
+		submittedAt: r.submitted_at.andThen((t) => isoTime(t)),
+	})
+}

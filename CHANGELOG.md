@@ -28,6 +28,17 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 2, step 1 (#26): pull request facts. Every `pull_request`
+  delivery creates or refreshes a `pull_requests` row (migration `0006`), one
+  per PR: title, author and whether it is a bot, branches, draft, state
+  (`open`, `merged` or `closed`), when it opened, became ready, closed and
+  merged, and its commits and size. A row never moves backwards (a late
+  `synchronize` can't reopen a merged PR), and `ready_at` only moves earlier.
+  The moments the row can't hold (enqueued, dequeued and why, ready, back to
+  draft, closed, reopened) go to `pull_request_events`, keyed by delivery so a
+  redelivery adds nothing. `pull_request_review` deliveries fill
+  `pull_request_reviews`, recorded for later and not shown yet. Kept
+  indefinitely; data starts at deploy.
 - Phase 4, history (#20): `GET /metrics/ci/history` gives each workflow's
   latest 20 completed attempts in the window and its runs, pass rate and
   median wall-clock time by UTC day, with `/metrics/ci`'s window, filters,
