@@ -334,7 +334,7 @@ service api from http {
 		// `select[Activity]` writes the column list from `Activity`'s fields. The
 		// annotation is load-bearing until bynk-lang/bynk#2957 is fixed: without
 		// it the emitted error type does not narrow on `Sql`/`Decode`.
-		let read: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
+		let listed: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
 			"""
 			FROM deliveries
 			ORDER BY received_at DESC, rowid DESC
@@ -342,7 +342,7 @@ service api from http {
 			""",
 			[]
 		)
-		let Ok(list) = read else match {
+		let Ok(list) = listed else match {
 			Err(Sql(e)) => {
 				let _ <- Logger.error("could not list activity: \(sqlError(e))")
 				ServerError("could not read recorded activity")
@@ -361,7 +361,7 @@ service api from http {
 		owner: String,
 		name: String
 	) -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
-		let read: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
+		let listed: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
 			"""
 			FROM deliveries
 			WHERE repo = ?1 COLLATE NOCASE
@@ -370,7 +370,7 @@ service api from http {
 			""",
 			[Text("\(owner)/\(name)")]
 		)
-		let Ok(list) = read else match {
+		let Ok(list) = listed else match {
 			Err(Sql(e)) => {
 				let _ <- Logger.error("could not list \(owner)/\(name) activity: \(sqlError(e))")
 				ServerError("could not read recorded activity")
