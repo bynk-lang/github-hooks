@@ -32,8 +32,8 @@ All notable changes to github-hooks. The format follows
   latest 20 completed attempts in the window and its runs, pass rate and
   median wall-clock time by UTC day, with `/metrics/ci`'s window, filters,
   caching and rate limit. The page shows the recent runs as a strip in each
-  workflow's row (each mark links to its run; not-counted runs are half
-  height) and, under **Trend**, daily charts of pass rate and median
+  workflow's row (each mark links to its run, and one keyboard-reachable
+  link per strip opens the workflow's runs; not-counted runs are half height) and, under **Trend**, daily charts of pass rate and median
   wall-clock time with a table of the same figures. On the live feed the page
   refetches the window figures and history only when a run completes.
 - Phase 4, step 4 (#20): the CI health page updates live. It opens a

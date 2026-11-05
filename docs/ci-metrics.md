@@ -148,8 +148,10 @@ cached and rate-limited the same way.
   The window's first and last days are partial.
 
 On the page, the recent runs are a strip in each workflow's row (each mark
-links to the run on GitHub; runs the pass rate doesn't count are drawn half
-height), and **Trend** opens a chart of the daily pass rate, a chart of the
+links to the run on GitHub for a pointer; runs the pass rate doesn't count
+are drawn half height). For keyboards and screen readers, one link per strip
+carries its summary and opens the workflow's runs on GitHub; it shows when
+focused. **Trend** **Trend** opens a chart of the daily pass rate, a chart of the
 daily median wall-clock time, and a table of the same figures.
 
 ## Settings
