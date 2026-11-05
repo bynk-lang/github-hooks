@@ -72,6 +72,7 @@ post 401 "an unsigned delivery is refused" "" "$DELIVERY-unsigned"
 get 200 "CI metrics are public" /metrics/ci
 get 200 "what CI is running now is public" /metrics/ci/now
 get 400 "a CI window longer than 90 days is refused" "/metrics/ci?days=91"
+get 400 "a CI window other than 7, 30 or 90 days is refused" "/metrics/ci?days=14"
 
 if [ -n "${API_TOKEN_SECRET:-}" ]; then
   # `bynk token` reads API_TOKEN_SECRET from the environment, as the Worker does.

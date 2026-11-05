@@ -3,8 +3,9 @@
 Phase 4 (#20) of github-hooks: the health of the organisation's CI, built
 from the `workflow_run` deliveries the service already receives. These routes
 are **public**: no token. They show only repositories whose latest delivery
-says they're public, less any named in `DASHBOARD_EXCLUDE`, and each answer is
-cached for 30 seconds (`Cache-Control: public, max-age=30`).
+says they're public, less any named in `DASHBOARD_EXCLUDE`. Each answer is
+cached for 30 seconds (`Cache-Control: public, max-age=30`), and each address
+may make 60 uncached requests a minute; past that the answer is `429`.
 
 There is no backfill: data starts when `workflow_runs` was deployed.
 `data_since` says when, so a 30-day window with 3 days of data reads as that.
@@ -17,12 +18,13 @@ by when they completed.
 | Query | Meaning | Default |
 |---|---|---|
 | `repo` | `owner/name`, matched whatever its case | every public repository |
-| `branch` | the run's head branch, as GitHub names it | every branch |
-| `event` | what triggered the run: `push`, `pull_request`, `merge_group`, `schedule`, … | every trigger |
-| `days` | how far back the window reaches, 1 to 90 | 7 |
+| `branch` | the run's head branch: letters, digits and `. _ / + -`, at most 200 | every branch |
+| `event` | what triggered the run, one of the events GitHub defines: `push`, `pull_request`, `merge_group`, `schedule`, … | every trigger |
+| `days` | how far back the window reaches: `7`, `30` or `90` | 7 |
 
-A `repo` that isn't `owner/name`, or `days` outside 1 to 90, is `400` before
-anything is read.
+Anything else is `400` before anything is read. The routes are public and
+cached per URL, so the query is kept to values the page actually asks for:
+each is then a cache hit for every other viewer.
 
 ```sh
 curl "https://github-hooks.<subdomain>.workers.dev/metrics/ci?repo=bynk-lang/bynk&event=merge_group&days=30"
@@ -94,7 +96,10 @@ default branch. `?repo=owner/name` narrows both.
   branch (recorded from the deliveries; not assumed to be `main`) that
   concluded `success`, `failure` or `timed_out`, from the last 90 days.
   `red_since` is set when that was a failure: the first failure after the last
-  success. `cancelled` and `skipped` runs don't change the state.
+  success. `cancelled` and `skipped` runs don't change the state, and neither
+  do `merge_group` runs: a failed one is a pull request the merge queue
+  rejected, which is what keeps the default branch green. A workflow that never
+  runs on a `push` to the default branch doesn't appear here.
 
 ## Settings
 

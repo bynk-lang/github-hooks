@@ -6,10 +6,22 @@ commons github.metrics
 type RepoName = String where Matches("^[^/\\s]+/[^/\\s]+$")
 
 ---
-How many days back a window reaches: a week by default, at most the 90 days
-raw deliveries are kept, though `workflow_runs` itself is kept for good.
+How many days back a window reaches: 7 (the default), 30 or 90. The routes
+are public and cached per URL, so only those three are answered (others are
+`400`): every shape the page asks for is then a cache hit for everyone else.
 ---
 type WindowDays = Int where InRange(1, 90)
+
+---
+What triggered a run, as GitHub names the events a workflow can run on. Any
+other value is `400` at the boundary rather than a fresh, uncached query.
+---
+type Trigger = String where Matches("^(push|pull_request|pull_request_target|merge_group|schedule|workflow_dispatch|workflow_run|workflow_call|repository_dispatch|release|deployment|deployment_status|check_run|check_suite|issues|issue_comment|discussion|discussion_comment|create|delete|fork|gollum|label|milestone|page_build|public|registry_package|status|watch|dynamic)$")
+
+---
+A branch name: the characters a Git ref may hold, at most 200 of them.
+---
+type BranchName = String where Matches("^[A-Za-z0-9._/+-]{1,200}$")
 
 ---
 `GET /metrics/ci`'s query: every filter optional.
@@ -17,8 +29,8 @@ type WindowDays = Int where InRange(1, 90)
 ---
 type CiQuery = {
 	repo: Option[RepoName],
-	branch: Option[String],
-	event: Option[String],
+	branch: Option[BranchName],
+	event: Option[Trigger],
 	days: WindowDays = 7,
 }
 
@@ -86,6 +98,8 @@ type InFlight = {
 A workflow's latest judged result on its repository's default branch (a
 `push` to it that concluded `success`, `failure` or `timed_out`). When that
 was a failure, `red_since` is the first failure after the last success.
+`merge_group` runs don't count: a failed one is a pull request the merge
+queue rejected, which is exactly what keeps the default branch green.
 ---
 type MainState = {
 	repo: String,

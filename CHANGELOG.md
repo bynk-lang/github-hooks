@@ -35,7 +35,10 @@ All notable changes to github-hooks. The format follows
   repository, branch and trigger. `GET /metrics/ci/now` gives running attempts
   and each workflow's latest result on its repository's default branch, with
   `red_since`. No token; public repositories only, less `DASHBOARD_EXCLUDE`;
-  cached 30 seconds. Migration `0005` records each repository's default
+  cached 30 seconds; `days` is 7, 30 or 90, `event` a GitHub trigger and
+  `branch` a ref name, and each address may make 60 uncached requests a
+  minute (`bynk.cloudflare.RateLimit`), so the public routes' D1 reads stay
+  bounded. Migration `0005` records each repository's default
   branch and indexes `workflow_runs` by completion time. See
   docs/ci-metrics.md.
 - Phase 4, step 1 (#20): every `workflow_run` delivery updates a

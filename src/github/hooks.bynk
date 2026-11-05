@@ -8,7 +8,7 @@ uses github.runs
 uses github.metrics
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
-consumes bynk.cloudflare { D1, Kv }
+consumes bynk.cloudflare { D1, Kv, RateLimit }
 
 ---
 Every delivery this service has accepted, one row each, keyed by GitHub's
@@ -22,6 +22,13 @@ mints one token, not one each. Keyed `installation:<id>`. A token here is a
 credential: it expires within the hour and is never logged.
 ---
 capability Tokens = Kv
+
+---
+The public metrics routes' per-address limit: 60 uncached requests a minute
+is ample for a page polling every 30 seconds, and bounds what anyone can make
+D1 read by varying the query string past the cache.
+---
+capability MetricsLimit = RateLimit @limit(60) @period(60.seconds)
 
 ---
 Acting as the GitHub App. `token` gives an installation token: from `Tokens`
@@ -537,9 +544,14 @@ service api from http {
 	// `DASHBOARD_EXCLUDE` names. Cached 30 seconds per URL, so heavy viewing
 	// doesn't become D1 reads. The window counts runs by when they completed.
 	@cache(maxAge: 30.seconds, scope: public)
-	on GET("/metrics/ci") (
-		query: CiQuery
-	) -> Effect[HttpResult[CiMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets {
+	on GET("/metrics/ci") (query: CiQuery, headers: RequestHeaders) -> Effect[HttpResult[CiMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+			BadRequest("days must be 7, 30 or 90")
+		}
 		let now <- Clock.now()
 		let since = now - Duration.millis(query.days * 86_400_000)
 		let Ok(rows) <- Deliveries.all(
@@ -644,9 +656,11 @@ service api from http {
 	// state looks back 90 days, so a workflow quiet for longer drops out, and
 	// `red_since` is at most that old: the query stays bounded as runs pile up.
 	@cache(maxAge: 30.seconds, scope: public)
-	on GET("/metrics/ci/now") (
-		query: NowQuery
-	) -> Effect[HttpResult[CiNow]] by v: Visitor given Deliveries, Logger, Clock, Secrets {
+	on GET("/metrics/ci/now") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[CiNow]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
 		let now <- Clock.now()
 		let repo = text(query.repo.map((r) => "\(r)"))
 		let Ok(running) <- Deliveries.all(
@@ -832,6 +846,12 @@ service retention from cron {
 		)
 		Ok(())
 	}
+}
+
+// Counts one metrics request against the caller's address. A request with
+// no address (not through Cloudflare's edge) shares one bucket.
+fn withinMetricsLimit(headers: RequestHeaders) -> Effect[Bool] given MetricsLimit {
+	MetricsLimit.allow("metrics:\(headers.clientIp().getOrElse("unknown"))")
 }
 
 // A function with `given` (bynk-lang/bynk#2868): the three deletes share it.

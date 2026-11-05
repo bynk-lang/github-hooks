@@ -10,6 +10,11 @@ env {
 
 stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
+--- A viewer's request headers: one address, well within the limit.
+fn viewer() -> RequestHeaders {
+	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7"])
+}
+
 ---
 The runs every case reads. In `bynk-lang/bynk`'s CI (`ci.yml`), within the
 window: r1 600 s, r2 1200 s, r3 1800 s (a PR branch) and r4's re-run 600 s
@@ -70,12 +75,16 @@ fn seed() -> List[SqlStatement] {
 case "a week of CI health, from completed attempts in public repositories" {
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
-	let r <- api.GET("/metrics/ci", CiQuery {
-		repo: None,
-		branch: None,
-		event: None,
-		days: 7,
-	}) by Visitor
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
 	let Ok(m) = r else {
 		expect false
 	}
@@ -107,12 +116,16 @@ case "filters narrow the window: branch, trigger, repository (any case) and leng
 	expect seeded is Ok(_)
 	// On main: r1, r2, r4 (both attempts), r5, r6, r7 = 7 runs; 3 of 5 judged pass;
 	// successful 600, 1200, 600 s: p50 600, p95 1200. CodeQL runs on main too.
-	let onMain <- api.GET("/metrics/ci", CiQuery {
-		repo: None,
-		branch: Some("main"),
-		event: None,
-		days: 7,
-	}) by Visitor
+	let onMain <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: Some("main"),
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
 	let Ok(m) = onMain else {
 		expect false
 	}
@@ -125,12 +138,16 @@ case "filters narrow the window: branch, trigger, repository (any case) and leng
 	expect ci.wall_p95_seconds == Some(1200)
 	expect m.workflows.length() == 2
 	// Pull requests only: r3, one run, 30 minutes.
-	let prs <- api.GET("/metrics/ci", CiQuery {
-		repo: None,
-		branch: None,
-		event: Some("pull_request"),
-		days: 7,
-	}) by Visitor
+	let prs <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: Some("pull_request"),
+			days: 7,
+		},
+		viewer()
+	) by Visitor
 	let Ok(p) = prs else {
 		expect false
 	}
@@ -138,12 +155,16 @@ case "filters narrow the window: branch, trigger, repository (any case) and leng
 		(w) => "\(w.path) \(w.runs) \(w.pass_percent.getOrElse(-1)) \(w.wall_p50_seconds.getOrElse(-1)) \(w.wall_p95_seconds.getOrElse(-1))"
 	) == [".github/workflows/ci.yml 1 100 1800 1800"]
 	// 30 days reach r8 too; the repository matches whatever its case.
-	let month <- api.GET("/metrics/ci", CiQuery {
-		repo: Some("Bynk-Lang/BYNK"),
-		branch: None,
-		event: None,
-		days: 30,
-	}) by Visitor
+	let month <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: Some("Bynk-Lang/BYNK"),
+			branch: None,
+			event: None,
+			days: 30,
+		},
+		viewer()
+	) by Visitor
 	let Ok(mo) = month else {
 		expect false
 	}
@@ -156,12 +177,16 @@ case "filters narrow the window: branch, trigger, repository (any case) and leng
 }
 
 case "an empty window is an empty list, not an error" {
-	let r <- api.GET("/metrics/ci", CiQuery {
-		repo: None,
-		branch: None,
-		event: None,
-		days: 7,
-	}) by Visitor
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
 	let Ok(m) = r else {
 		expect false
 	}
@@ -172,7 +197,7 @@ case "an empty window is an empty list, not an error" {
 case "now: what is running, and each workflow's latest result on the default branch" {
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
-	let r <- api.GET("/metrics/ci/now", NowQuery { repo: None }) by Visitor
+	let r <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
 	let Ok(n) = r else {
 		expect false
 	}
@@ -200,7 +225,11 @@ case "red since the first failure after the last success" {
 		""",
 		[]
 	)
-	let r <- api.GET("/metrics/ci/now", NowQuery { repo: Some("bynk-lang/bynk") }) by Visitor
+	let r <- api.GET(
+		"/metrics/ci/now",
+		NowQuery { repo: Some("bynk-lang/bynk") },
+		viewer()
+	) by Visitor
 	let Ok(n) = r else {
 		expect false
 	}
@@ -228,18 +257,23 @@ case "a re-run after a cancelled first attempt is not flaky" {
 		""",
 		[]
 	)
-	let r <- api.GET("/metrics/ci", CiQuery {
-		repo: None,
-		branch: None,
-		event: None,
-		days: 7,
-	}) by Visitor
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
 	let Ok(m) = r else {
 		expect false
 	}
 	let Some(ci) = m.workflows.first() else {
 		expect false
 	}
+	// Still 1: r4 from the seed. Run 21, re-run after a cancellation, adds none.
 	expect ci.flaky == 1
 }
 
@@ -257,11 +291,45 @@ case "only the default branch decides a workflow's state" {
 		""",
 		[]
 	)
-	let r <- api.GET("/metrics/ci/now", NowQuery { repo: None }) by Visitor
+	let r <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
 	let Ok(n) = r else {
 		expect false
 	}
 	expect n.main.map(
 		(s) => "\(s.path) \(s.branch) \(s.conclusion)"
 	) == [".github/workflows/ci.yml main timed_out", ".github/workflows/codeql.yml main success"]
+}
+
+case "a window other than 7, 30 or 90 days is refused, so the cache covers every shape asked" {
+	let r <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 14,
+		},
+		viewer()
+	) by Visitor
+	expect r is BadRequest("days must be 7, 30 or 90")
+	expect Deliveries.all never called
+}
+
+case "past the per-address limit, metrics are refused before anything is read" {
+	stub MetricsLimit.allow(_) returns false
+	let ci <- api.GET(
+		"/metrics/ci",
+		CiQuery {
+			repo: None,
+			branch: None,
+			event: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let now <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
+	expect ci is TooManyRequests(_)
+	expect now is TooManyRequests(_)
+	expect MetricsLimit.allow called with key == "metrics:203.0.113.7"
+	expect Deliveries.all never called
 }
