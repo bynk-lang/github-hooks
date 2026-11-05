@@ -50,6 +50,20 @@ GitHub App ──POST /github──▶ signature check ──▶ read headers + 
 GitHub signs no timestamp, so there is no replay window; the delivery-id key is
 what makes a replay harmless.
 
+**Facts.** After answering, the service also extracts what the dashboard
+(#20) reads. Each `workflow_run` delivery updates one row per run attempt in
+`workflow_runs`
+([schema](migrations/github-hooks-deliveries/0004_create_workflow_runs.sql)):
+created by the first delivery, moved forward by later ones (`requested` <
+`in_progress` < `completed`, then the newer `updated_at`), never back, so
+deliveries arriving out of order are harmless. Each attempt has its own
+`queued_at`, because GitHub's `created_at` belongs to the run and a re-run
+keeps it. Those rows are kept for good; retention prunes only the raw
+deliveries. Whether a repository is public lives in `repositories`, updated
+from every delivery that says, and is decided when the dashboard reads: making
+a repository private hides its whole history at once. Subscribing the App to
+**Repository** events makes that immediate (`privatized`, `publicized`).
+
 **Retention.** The `retention` cron service runs hourly (at :23). It deletes
 deliveries older than 90 days, `workflow_run` deliveries that are only
 `requested` or `in_progress` after 7 days (the `completed` one carries the
@@ -146,8 +160,10 @@ src/github/events.bynk   commons github.events: payload types and pure decoding
 src/github/activity.bynk commons github.activity: read API types and the digest
 src/github/app.bynk      commons github.app: the App's JWT and GitHub API shapes
 src/github/welcome.bynk  commons github.welcome: who is welcomed, and with what
-src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, KV, AppAuth, Bot, routes)
+src/github/runs.bynk     commons github.runs: a workflow_run delivery as a workflow_runs row
+src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, KV, AppAuth, Bot, Facts, routes)
 embeds/welcome.md        the welcome comment's text
+fixtures/github/         recorded GitHub payloads the suites read (`fixture`)
 migrations/              D1 schema, applied in tests, by bynk dev and by bynk deploy
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker

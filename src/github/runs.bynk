@@ -1,0 +1,125 @@
+commons github.runs
+
+uses github.events
+
+---
+The parts of a `workflow_run` delivery the CI dashboard needs (#20). GitHub's
+payload carries much more; everything else is ignored.
+---
+type RunDelivery = {
+	workflow_run: RunPayload,
+	repository: RepoRef,
+}
+
+---
+Whether a repository is public, from any delivery whose `repository` says.
+The public dashboard shows a repository only while its latest word is public.
+---
+type VisibilityDelivery = {
+	repository: Option[RepoVisibilityRef],
+}
+
+type RepoVisibilityRef = {
+	full_name: String,
+	private: Option[Bool],
+}
+
+type RepoVisibility = {
+	repo: String,
+	isPublic: Bool,
+}
+
+fn visibilityOf(body: Bytes) -> Option[RepoVisibility] {
+	let Some(text) = body.decodeUtf8() else { None }
+	let Ok(v) = Json.decode[VisibilityDelivery](text) else { None }
+	let Some(r) = v.repository else { None }
+	let Some(isPrivate) = r.private else { None }
+	Some(RepoVisibility { repo: r.full_name, isPublic: !isPrivate })
+}
+
+---
+`workflow_run` as GitHub sends it. `head_branch` is absent for some triggers,
+`conclusion` until the run completes, and `run_started_at` until it starts.
+`created_at` belongs to the run, not the attempt: a re-run keeps the original.
+---
+type RunPayload = {
+	id: Int,
+	run_attempt: Int,
+	name: String,
+	path: String,
+	head_branch: Option[String],
+	head_sha: String,
+	event: String,
+	status: String,
+	conclusion: Option[String],
+	created_at: String,
+	run_started_at: Option[String],
+	updated_at: String,
+}
+
+---
+One run attempt, as `workflow_runs` stores it: times in the `received_at`
+format, and `completed_at` set only once the run has completed. `queuedAt` is
+when this attempt was queued: the run's `created_at` for attempt 1, and for a
+re-run this delivery's `updated_at` (the earliest delivery seen wins).
+---
+type RunFact = {
+	repo: String,
+	runId: Int,
+	attempt: Int,
+	workflow: String,
+	path: String,
+	branch: Option[String],
+	sha: String,
+	event: String,
+	status: String,
+	conclusion: Option[String],
+	createdAt: String,
+	queuedAt: String,
+	startedAt: Option[String],
+	completedAt: Option[String],
+	updatedAt: String,
+}
+
+---
+The run a `workflow_run` delivery describes, or why it couldn't be read.
+---
+fn runOf(body: Bytes) -> Result[RunFact, String] {
+	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
+	let Ok(p) = Json.decode[RunDelivery](text) else match {
+		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	let r = p.workflow_run
+	let Some(created) = isoTime(r.created_at) else {
+		Err("created_at is not a time: \(r.created_at)")
+	}
+	let Some(updated) = isoTime(r.updated_at) else {
+		Err("updated_at is not a time: \(r.updated_at)")
+	}
+	let started = r.run_started_at.andThen((t) => isoTime(t))
+	Ok(RunFact {
+		repo: p.repository.full_name,
+		runId: r.id,
+		attempt: r.run_attempt,
+		workflow: r.name,
+		path: r.path,
+		branch: r.head_branch,
+		sha: r.head_sha,
+		event: r.event,
+		status: r.status,
+		conclusion: r.conclusion,
+		createdAt: created,
+		queuedAt: if r.run_attempt == 1 { created } else { updated },
+		startedAt: started,
+		completedAt: if r.status == "completed" { Some(updated) } else { None },
+		updatedAt: updated,
+	})
+}
+
+---
+GitHub's `2026-11-05T06:10:56Z` as `2026-11-05T06:10:56.000Z`, the format
+`received_at` and `toIso()` use, so stored times compare as text.
+---
+fn isoTime(github: String) -> Option[String] {
+	Instant.fromIso(github).map((t) => t.toIso())
+}
