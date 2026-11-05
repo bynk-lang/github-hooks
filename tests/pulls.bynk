@@ -1,0 +1,260 @@
+// Phase 4, slice 2 (#26): `pull_request` and `pull_request_review` deliveries
+// become `pull_requests`, `pull_request_events` and `pull_request_reviews`
+// rows, through the webhook, against an in-memory D1 with the migrations
+// applied. The fixtures are this repository's PR #25 and its first review, as
+// GitHub's REST API returned them, wrapped as the webhook delivers them (the
+// bodies cut short); each case varies them to the state it needs.
+suite github.hooks
+
+fixture mergedPull = "fixtures/github/pull_request.closed.json"
+
+fixture review = "fixtures/github/pull_request_review.submitted.json"
+
+---
+PR #25 at another moment: `action` (with any extra top-level fields after
+it), its state, whether it is a draft, its `updated_at`, and its `merged_at`
+and `closed_at` as JSON (`null` or a quoted time).
+---
+fn pullAt(
+	action: String,
+	extra: String,
+	state: String,
+	draft: Bool,
+	updated: String,
+	merged: String,
+	closed: String
+) -> Bytes {
+	Bytes.fromUtf8(mergedPull
+		.replace("\"action\": \"closed\"", "\"action\": \"\(action)\"\(extra)")
+		.replace("\"state\": \"closed\"", "\"state\": \"\(state)\"")
+		.replace("\"draft\": false", "\"draft\": \(if draft { "true" } else { "false" })")
+		.replace("\"updated_at\": \"2026-11-05T08:10:14Z\"", "\"updated_at\": \"\(updated)\"")
+		.replace("\"merged_at\": \"2026-11-05T08:10:11Z\"", "\"merged_at\": \(merged)")
+		.replace("\"closed_at\": \"2026-11-05T08:10:11Z\"", "\"closed_at\": \(closed)"))
+}
+
+--- PR #25 open, at `updated`, after `action`.
+fn openPull(action: String, draft: Bool, updated: String) -> Bytes {
+	pullAt(action, "", "open", draft, updated, "null", "null")
+}
+
+--- A delivery's headers.
+fn headers(event: String, id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: \(event)", "X-GitHub-Delivery: \(id)"])
+}
+
+case "a merged pull request is recorded with its times, size and author" {
+	let r <- api.POST(
+		"/github",
+		headers("pull_request", "pr-1"),
+		Bytes.fromUtf8(mergedPull)
+	) by GitHub
+	expect r is Accepted(_)
+	let row <- Deliveries.first(
+		"""
+		SELECT repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, ready_at,
+		       closed_at, merged_at, commits, additions, deletions, changed_files, updated_at
+		FROM pull_requests
+		""",
+		[]
+	)
+	expect row == Ok(Some("{\"repo\":\"bynk-lang/github-hooks\",\"number\":25,\"title\":\"CI history: recent runs and daily trends for each workflow\",\"author\":\"accuser\",\"author_is_bot\":0,\"base\":\"main\",\"head\":\"ci-history\",\"draft\":0,\"state\":\"merged\",\"opened_at\":\"2026-11-05T07:54:42.000Z\",\"ready_at\":null,\"closed_at\":\"2026-11-05T08:10:11.000Z\",\"merged_at\":\"2026-11-05T08:10:11.000Z\",\"commits\":4,\"additions\":776,\"deletions\":18,\"changed_files\":10,\"updated_at\":\"2026-11-05T08:10:14.000Z\"}"))
+	// Closing is a moment worth keeping, timed by when the delivery arrived.
+	let moment <- Deliveries.first(
+		"""
+		SELECT e.action, e.reason, e.at = d.received_at AS on_arrival
+		FROM pull_request_events e JOIN deliveries d ON d.id = e.delivery
+		""",
+		[]
+	)
+	expect moment == Ok(Some("{\"action\":\"closed\",\"reason\":null,\"on_arrival\":1}"))
+}
+
+case "a draft's life: ready, pushed to, queued, dequeued and merged" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-open"),
+		openPull("opened", true, "2026-11-05T07:54:42Z")
+	) by GitHub
+	let opened <- Deliveries.first("SELECT state, draft, ready_at FROM pull_requests", [])
+	expect opened == Ok(Some("{\"state\":\"open\",\"draft\":1,\"ready_at\":null}"))
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-ready"),
+		openPull("ready_for_review", false, "2026-11-05T08:03:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-push"),
+		openPull("synchronize", false, "2026-11-05T08:05:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-enq"),
+		openPull("enqueued", false, "2026-11-05T08:06:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-deq"),
+		pullAt(
+			"dequeued",
+			", \"reason\": \"CI_FAILURE\"",
+			"open",
+			false,
+			"2026-11-05T08:07:00Z",
+			"null",
+			"null"
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-merged"),
+		Bytes.fromUtf8(mergedPull)
+	) by GitHub
+	let row <- Deliveries.first(
+		"SELECT state, draft, opened_at, ready_at, merged_at, (SELECT count(*) FROM pull_requests) AS n FROM pull_requests",
+		[]
+	)
+	expect row == Ok(Some("{\"state\":\"merged\",\"draft\":0,\"opened_at\":\"2026-11-05T07:54:42.000Z\",\"ready_at\":\"2026-11-05T08:03:00.000Z\",\"merged_at\":\"2026-11-05T08:10:11.000Z\",\"n\":1}"))
+	// `opened` and `synchronize` are on the row; the rest are moments.
+	let moments <- Deliveries.first(
+		"SELECT group_concat(action || ':' || coalesce(reason, '-'), ' ') AS m FROM (SELECT * FROM pull_request_events ORDER BY rowid)",
+		[]
+	)
+	expect moments == Ok(Some("{\"m\":\"ready_for_review:- enqueued:- dequeued:CI_FAILURE closed:-\"}"))
+}
+
+case "a pull request opened ready is ready when it opened" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-open"),
+		openPull("opened", false, "2026-11-05T07:54:43Z")
+	) by GitHub
+	let row <- Deliveries.first("SELECT ready_at FROM pull_requests", [])
+	expect row == Ok(Some("{\"ready_at\":\"2026-11-05T07:54:42.000Z\"}"))
+}
+
+case "a late delivery never undoes a merge, but still says when the PR was ready" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-merged"),
+		Bytes.fromUtf8(mergedPull)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-push"),
+		openPull("synchronize", false, "2026-11-05T08:05:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-ready"),
+		openPull("ready_for_review", false, "2026-11-05T08:03:00Z")
+	) by GitHub
+	let row <- Deliveries.first(
+		"SELECT state, merged_at, ready_at, updated_at FROM pull_requests",
+		[]
+	)
+	expect row == Ok(Some("{\"state\":\"merged\",\"merged_at\":\"2026-11-05T08:10:11.000Z\",\"ready_at\":\"2026-11-05T08:03:00.000Z\",\"updated_at\":\"2026-11-05T08:10:14.000Z\"}"))
+}
+
+case "ready_at only moves earlier" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-ready-2"),
+		openPull("ready_for_review", false, "2026-11-05T08:04:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-ready-1"),
+		openPull("ready_for_review", false, "2026-11-05T08:01:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-ready-3"),
+		openPull("ready_for_review", false, "2026-11-05T08:06:00Z")
+	) by GitHub
+	let row <- Deliveries.first("SELECT ready_at FROM pull_requests", [])
+	expect row == Ok(Some("{\"ready_at\":\"2026-11-05T08:01:00.000Z\"}"))
+}
+
+case "a redelivered moment is recorded once" {
+	let first <- api.POST(
+		"/github",
+		headers("pull_request", "pr-enq"),
+		openPull("enqueued", false, "2026-11-05T08:06:00Z")
+	) by GitHub
+	let again <- api.POST(
+		"/github",
+		headers("pull_request", "pr-enq"),
+		openPull("enqueued", false, "2026-11-05T08:06:00Z")
+	) by GitHub
+	expect first is Accepted(_)
+	expect again is Ok("duplicate")
+	let n <- Deliveries.first("SELECT count(*) AS n FROM pull_request_events", [])
+	expect n == Ok(Some("{\"n\":1}"))
+	expect Logger.error never called
+}
+
+case "a delivery without sizes keeps the last known ones" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-push"),
+		openPull("synchronize", false, "2026-11-05T08:05:00Z")
+	) by GitHub
+	let bare = Bytes.fromUtf8(mergedPull
+		.replace("\"commits\": 4,", "")
+		.replace("\"additions\": 776,", ""))
+	let _ <- api.POST("/github", headers("pull_request", "pr-merged"), bare) by GitHub
+	let row <- Deliveries.first(
+		"SELECT state, commits, additions, deletions FROM pull_requests",
+		[]
+	)
+	expect row == Ok(Some("{\"state\":\"merged\",\"commits\":4,\"additions\":776,\"deletions\":18}"))
+}
+
+case "a pull request by a bot is marked as one" {
+	let byBot = Bytes.fromUtf8(mergedPull
+		.replace("\"type\": \"User\"", "\"type\": \"Bot\"")
+		.replace("\"login\": \"accuser\"", "\"login\": \"github-actions[bot]\""))
+	let _ <- api.POST("/github", headers("pull_request", "pr-bot"), byBot) by GitHub
+	let row <- Deliveries.first("SELECT author, author_is_bot FROM pull_requests", [])
+	expect row == Ok(Some("{\"author\":\"github-actions[bot]\",\"author_is_bot\":1}"))
+}
+
+case "a review is recorded, and a dismissal updates it" {
+	let r <- api.POST(
+		"/github",
+		headers("pull_request_review", "rv-1"),
+		Bytes.fromUtf8(review)
+	) by GitHub
+	expect r is Accepted(_)
+	let row <- Deliveries.first(
+		"SELECT review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at FROM pull_request_reviews",
+		[]
+	)
+	expect row == Ok(Some("{\"review_id\":5781620014,\"repo\":\"bynk-lang/github-hooks\",\"number\":25,\"reviewer\":\"accuser\",\"reviewer_is_bot\":0,\"state\":\"commented\",\"submitted_at\":\"2026-11-05T08:06:04.000Z\"}"))
+	let dismissed = Bytes.fromUtf8(review
+		.replace("\"action\": \"submitted\"", "\"action\": \"dismissed\"")
+		.replace("\"state\": \"COMMENTED\"", "\"state\": \"DISMISSED\""))
+	let _ <- api.POST("/github", headers("pull_request_review", "rv-2"), dismissed) by GitHub
+	let after <- Deliveries.first(
+		"SELECT state, submitted_at, (SELECT count(*) FROM pull_request_reviews) AS n FROM pull_request_reviews",
+		[]
+	)
+	expect after == Ok(Some("{\"state\":\"dismissed\",\"submitted_at\":\"2026-11-05T08:06:04.000Z\",\"n\":1}"))
+	// A review records no pull request: its payload's PR is a partial view.
+	let prs <- Deliveries.first("SELECT count(*) AS n FROM pull_requests", [])
+	expect prs == Ok(Some("{\"n\":0}"))
+}
+
+case "a pull_request that doesn't decode is logged, and the delivery is still recorded" {
+	let r <- api.POST(
+		"/github",
+		headers("pull_request", "pr-bad"),
+		Bytes.fromUtf8("{\"action\": \"opened\"}")
+	) by GitHub
+	expect r is Accepted(_)
+	expect Logger.error called once with msg.startsWith("could not read pull request from pr-bad")
+	let n <- Deliveries.first("SELECT count(*) AS n FROM pull_requests", [])
+	expect n == Ok(Some("{\"n\":0}"))
+}

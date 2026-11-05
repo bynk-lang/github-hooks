@@ -6,6 +6,7 @@ uses github.app
 uses github.welcome
 uses github.runs
 uses github.metrics
+uses github.pulls
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit }
@@ -188,10 +189,13 @@ fn answered(res: Response, repo: String, number: Int) -> Result[(), String] {
 }
 
 ---
-The facts the dashboard reads (#20), extracted from a delivery after it is
-answered: whether its repository is public (from any delivery that says), and
-for a `workflow_run`, one `workflow_runs` row per run attempt. A redelivery
-records the same facts again, which changes nothing.
+The facts the dashboards read, extracted from a delivery after it is
+answered: whether its repository is public (from any delivery that says); for
+a `workflow_run`, one `workflow_runs` row per run attempt (#20); for a
+`pull_request`, its `pull_requests` row and, for the moments the row can't
+hold, a `pull_request_events` row; for a `pull_request_review`, its
+`pull_request_reviews` row (#26). A redelivery records the same facts again,
+which changes nothing.
 ---
 capability Facts {
 	fn extract(d: Delivery, body: Bytes) -> Effect[()]
@@ -200,6 +204,12 @@ capability Facts {
 provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed {
 	fn extract(d: Delivery, body: Bytes) -> Effect[()] {
 		let _ <- recordVisibility(body)
+		let _ <- if d.event == "pull_request" { recordPull(d, body) } else { Effect.pure(()) }
+		let _ <- if d.event == "pull_request_review" {
+			recordReview(d, body)
+		} else {
+			Effect.pure(())
+		}
 		let true = d.event == "workflow_run" else { Effect.pure(()) }
 		let changed <- recordRun(d, body)
 		let Some(e) = changed else { Effect.pure(()) }
@@ -227,6 +237,115 @@ fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
 		[Text(v.repo), Boolean(v.isPublic), text(v.defaultBranch)]
 	) else match {
 		Err(e) => Logger.error("could not record whether \(v.repo) is public: \(sqlError(e))"),
+	}
+	Effect.pure(())
+}
+
+// Records a pull request (#26). Every `pull_request` delivery carries the
+// whole PR, so any of them refreshes the row, unless the row already holds a
+// later state (by `updated_at`): a late `synchronize` never reopens a merged
+// PR. `ready_at` is apart from that: it only moves earlier, whatever order the
+// deliveries arrive in. Sizes and `commits` keep their last known value when a
+// delivery lacks them.
+fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(p) = pullOf(body) else match {
+		Err(why) => Logger.error("could not read pull request from \(d.id): \(why)"),
+	}
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+		                           opened_at, ready_at, closed_at, merged_at, commits, additions, deletions,
+		                           changed_files, updated_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+		ON CONFLICT (repo, number) DO UPDATE SET
+		  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
+		  base = excluded.base, head = excluded.head, draft = excluded.draft, state = excluded.state,
+		  opened_at = excluded.opened_at, closed_at = excluded.closed_at, merged_at = excluded.merged_at,
+		  commits = coalesce(excluded.commits, pull_requests.commits),
+		  additions = coalesce(excluded.additions, pull_requests.additions),
+		  deletions = coalesce(excluded.deletions, pull_requests.deletions),
+		  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
+		  updated_at = excluded.updated_at
+		WHERE excluded.updated_at >= pull_requests.updated_at
+		""",
+		[
+			Text(p.repo),
+			Integer(p.number),
+			Text(p.title),
+			Text(p.author),
+			Boolean(p.authorIsBot),
+			Text(p.base),
+			Text(p.head),
+			Boolean(p.draft),
+			Text(p.state),
+			Text(p.openedAt),
+			text(p.readyAt),
+			text(p.closedAt),
+			text(p.mergedAt),
+			integer(p.commits),
+			integer(p.additions),
+			integer(p.deletions),
+			integer(p.changedFiles),
+			Text(p.updatedAt),
+		]
+	) else match {
+		Err(e) => Logger.error("could not record \(p.repo)#\(p.number): \(sqlError(e))"),
+	}
+	let Ok(_) <- Deliveries.run(
+		"""
+		UPDATE pull_requests SET ready_at = ?3
+		WHERE repo = ?1 AND number = ?2 AND ?3 IS NOT NULL AND (ready_at IS NULL OR ready_at > ?3)
+		""",
+		[Text(p.repo), Integer(p.number), text(p.readyAt)]
+	) else match {
+		Err(e) => Logger.error(
+			"could not record when \(p.repo)#\(p.number) was ready: \(sqlError(e))"
+		),
+	}
+	let true = isPullMoment(p.action) else { Effect.pure(()) }
+	// Keyed by delivery, so a redelivery adds nothing; timed by when the
+	// delivery arrived, since an enqueue doesn't move the PR's `updated_at`.
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO pull_request_events (delivery, repo, number, action, reason, at)
+		SELECT ?1, ?2, ?3, ?4, ?5, received_at FROM deliveries WHERE id = ?1
+		ON CONFLICT (delivery) DO NOTHING
+		""",
+		[Text(d.id), Text(p.repo), Integer(p.number), Text(p.action), text(p.reason)]
+	) else match {
+		Err(e) => Logger.error(
+			"could not record \(p.action) of \(p.repo)#\(p.number): \(sqlError(e))"
+		),
+	}
+	Effect.pure(())
+}
+
+// Records a review (#26): submitted, edited or dismissed, the latest delivery
+// wins. Kept for later; the page doesn't show reviews yet.
+fn recordReview(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(r) = reviewOf(body) else match {
+		Err(why) => Logger.error("could not read review from \(d.id): \(why)"),
+	}
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+		ON CONFLICT (review_id) DO UPDATE SET
+		  state = excluded.state, submitted_at = coalesce(excluded.submitted_at, pull_request_reviews.submitted_at)
+		""",
+		[
+			Integer(r.reviewId),
+			Text(r.repo),
+			Integer(r.number),
+			text(r.reviewer),
+			Boolean(r.reviewerIsBot),
+			Text(r.state),
+			text(r.submittedAt),
+		]
+	) else match {
+		Err(e) => Logger.error(
+			"could not record review \(r.reviewId) on \(r.repo)#\(r.number): \(sqlError(e))"
+		),
 	}
 	Effect.pure(())
 }
