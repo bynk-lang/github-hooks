@@ -576,7 +576,9 @@
     // change moves what is running.
     ws.onmessage = (m) => {
       try {
-        if (JSON.parse(m.data).status === "completed") completedSince = true;
+        const e = JSON.parse(m.data);
+        if (e.kind === "pull") return; // pull requests are the PR flow page's
+        if (e.status === "completed") completedSince = true;
       } catch {
         completedSince = true; // unreadable: assume the worst and refetch it all
       }

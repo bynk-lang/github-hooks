@@ -16,6 +16,31 @@ case "the root is the CI health page, loading its own stylesheet and script" {
 	expect !page.contains("{js}")
 }
 
+case "/prs is the PR flow page, with the shared stylesheet, its own script, and links between the pages" {
+	let r <- api.GET("/prs") by Visitor
+	let Raw(body, contentType) = r else {
+		expect false
+	}
+	expect contentType == "text/html; charset=utf-8"
+	let Some(page) = body.decodeUtf8() else {
+		expect false
+	}
+	expect page.contains("<title>bynk-lang PR flow</title>")
+	expect page.contains("href=\"\(dashboardCss.url)\"")
+	expect page.contains("src=\"\(prsJs.url)\"")
+	expect page.contains("<a href=\"/prs\" aria-current=\"page\">PR flow</a>")
+	expect page.contains("<a href=\"/\">CI health</a>")
+	expect !page.contains("{css}")
+	expect !page.contains("{js}")
+	let root <- api.GET("/") by Visitor
+	let Raw(rootBody, _) = root else {
+		expect false
+	}
+	expect rootBody
+		.decodeUtf8()
+		.map((p) => p.contains("<a href=\"/prs\">PR flow</a>")) == Some(true)
+}
+
 case "the service describes itself at /about" {
 	let r <- api.GET("/about") by Visitor
 	expect r is Ok("github-hooks: POST GitHub App webhook deliveries to /github")

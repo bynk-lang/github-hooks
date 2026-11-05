@@ -36,6 +36,14 @@ asset dashboardCss = "assets/dashboard.css"
 asset dashboardJs = "assets/dashboard.js"
 
 ---
+The PR flow page (#26, step 4): its template and script. It shares the CI
+page's stylesheet, so both read as one site.
+---
+embed prsTemplate = "embeds/prs.html"
+
+asset prsJs = "assets/prs.js"
+
+---
 The public metrics routes' per-address limit: 60 uncached requests a minute
 is ample for a page polling every 30 seconds, and bounds what anyone can make
 D1 read by varying the query string past the cache.
@@ -291,20 +299,26 @@ hold, a `pull_request_events` row; for a `pull_request_review`, its
 which changes nothing.
 ---
 capability Facts {
-	fn extract(d: Delivery, body: Bytes) -> Effect[()]
+	--- `fresh` when this is the delivery's first arrival, not a redelivery.
+	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()]
 }
 
 provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed {
-	fn extract(d: Delivery, body: Bytes) -> Effect[()] {
+	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()] {
 		let _ <- recordVisibility(body)
-		let _ <- if d.event == "pull_request" { recordPull(d, body) } else { Effect.pure(()) }
 		let _ <- if d.event == "pull_request_review" {
 			recordReview(d, body)
 		} else {
 			Effect.pure(())
 		}
-		let true = d.event == "workflow_run" else { Effect.pure(()) }
-		let changed <- recordRun(d, body)
+		let nothing: Option[LiveEvent] = None
+		let changed <- if d.event == "workflow_run" {
+			recordRun(d, body)
+		} else if d.event == "pull_request" {
+			recordPull(d, body, fresh)
+		} else {
+			Effect.pure(nothing)
+		}
 		let Some(e) = changed else { Effect.pure(()) }
 		let _ <- LiveFeed.publish(e)
 	}
@@ -338,29 +352,65 @@ fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
 // delivery carries the whole PR, so any of them refreshes its row (see
 // `savePull` for the ordering rules); the moments the row can't hold go to
 // `pull_request_events`.
-fn recordPull(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+fn recordPull(
+	d: Delivery,
+	body: Bytes,
+	fresh: Bool
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets {
+	let nothing: Option[LiveEvent] = None
 	let Ok(p) = pullOf(body) else match {
-		Err(why) => Logger.error("could not read pull request from \(d.id): \(why)"),
+		Err(why) => {
+			let _ <- Logger.error("could not read pull request from \(d.id): \(why)")
+			Effect.pure(nothing)
+		},
 	}
 	let Ok(_) <- savePull(p) else match {
-		Err(why) => Logger.error(why),
+		Err(why) => {
+			let _ <- Logger.error(why)
+			Effect.pure(nothing)
+		},
 	}
-	let true = isPullMoment(p.action) else { Effect.pure(()) }
 	// Keyed by delivery, so a redelivery adds nothing; timed by when the
 	// delivery arrived, since an enqueue doesn't move the PR's `updated_at`.
-	let Ok(_) <- Deliveries.run(
-		"""
-		INSERT INTO pull_request_events (delivery, repo, number, action, reason, at)
-		SELECT ?1, ?2, ?3, ?4, ?5, received_at FROM deliveries WHERE id = ?1
-		ON CONFLICT (delivery) DO NOTHING
-		""",
-		[Text(d.id), Text(p.repo), Integer(p.number), Text(p.action), text(p.reason)]
-	) else match {
-		Err(e) => Logger.error(
-			"could not record \(p.action) of \(p.repo)#\(p.number): \(sqlError(e))"
-		),
+	let notAMoment: Result[SqlRun, SqlError] = Ok(SqlRun { changes: 0, lastRowId: 0 })
+	let moment <- if isPullMoment(p.action) {
+		Deliveries.run(
+			"""
+			INSERT INTO pull_request_events (delivery, repo, number, action, reason, at)
+			SELECT ?1, ?2, ?3, ?4, ?5, received_at FROM deliveries WHERE id = ?1
+			ON CONFLICT (delivery) DO NOTHING
+			""",
+			[Text(d.id), Text(p.repo), Integer(p.number), Text(p.action), text(p.reason)]
+		)
+	} else {
+		Effect.pure(notAMoment)
 	}
-	Effect.pure(())
+	let Ok(_) = moment else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not record \(p.action) of \(p.repo)#\(p.number): \(sqlError(e))"
+			)
+			Effect.pure(nothing)
+		},
+	}
+	// Tell open pages of a delivery's first arrival only (a redelivery tells
+	// nothing new), and only for a repository the public pages may show.
+	let true = fresh else { Effect.pure(nothing) }
+	let shown <- shownLive(p.repo)
+	let true = shown else { Effect.pure(nothing) }
+	Effect.pure(Some(pullEventOf(p)))
+}
+
+// Whether the public pages may show a repository: public by its latest
+// delivery, and not in `DASHBOARD_EXCLUDE`.
+fn shownLive(repo: String) -> Effect[Bool] given Deliveries, Secrets {
+	let shown <- Deliveries.first(
+		"SELECT public FROM repositories WHERE repo = ?1 AND public = 1",
+		[Text(repo)]
+	)
+	let Ok(Some(_)) = shown else { Effect.pure(false) }
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Effect.pure(!allows(excluded, repo))
 }
 
 // Creates or refreshes a pull request's row, from a delivery or the sync.
@@ -539,13 +589,8 @@ fn recordRun(
 	// delivery that moved nothing says nothing), and only for a repository the
 	// public page may show.
 	let true = written.changes > 0 else { Effect.pure(nothing) }
-	let shown <- Deliveries.first(
-		"SELECT public FROM repositories WHERE repo = ?1 AND public = 1",
-		[Text(r.repo)]
-	)
-	let Ok(Some(_)) = shown else { Effect.pure(nothing) }
-	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-	let false = allows(excluded, r.repo) else { Effect.pure(nothing) }
+	let shown <- shownLive(r.repo)
+	let true = shown else { Effect.pure(nothing) }
 	Effect.pure(Some(liveEventOf(r)))
 }
 
@@ -808,6 +853,13 @@ service api from http {
 		let page = dashboardTemplate
 			.replace("{css}", dashboardCss.url)
 			.replace("{js}", dashboardJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The PR flow page. Not `@cache`d, for the same reason as `/`: it names
+	// this deploy's assets.
+	on GET("/prs") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = prsTemplate.replace("{css}", dashboardCss.url).replace("{js}", prsJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 
@@ -1528,7 +1580,7 @@ service api from http {
 		// A redelivery reacts too, so a failed action is retried; one that
 		// worked is not repeated (see `Bot`).
 		~> Bot.react(d, body)
-		~> Facts.extract(d, body)
+		~> Facts.extract(d, body, r.changes > 0)
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
 			Ok("duplicate")

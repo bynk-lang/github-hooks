@@ -2,6 +2,7 @@ commons github.pulls
 
 uses github.events
 uses github.runs
+uses github.metrics
 
 ---
 The parts of a `pull_request` delivery the PR flow dashboard needs (#26).
@@ -224,4 +225,21 @@ its number.
 type PullNumber = {
 	repo: String,
 	number: Int,
+}
+
+---
+The live-feed event for a pull request that changed.
+---
+fn pullEventOf(p: PullFact) -> LiveEvent {
+	LiveEvent {
+		kind: "pull",
+		repo: p.repo,
+		number: p.number,
+		path: "",
+		workflow: "",
+		run_id: 0,
+		attempt: 0,
+		status: p.action,
+		conclusion: p.state,
+	}
 }
