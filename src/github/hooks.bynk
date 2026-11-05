@@ -523,15 +523,23 @@ service retention from cron {
 		) else match {
 			Err(e) => retentionFailed("deliveries", e),
 		}
+		// `actions` has no index on `at`, so this scans it: fine while it holds a
+		// row per welcome. Batched like the others, so a growing table stays bounded.
 		let Ok(acted) <- Deliveries.run(
-			"DELETE FROM actions WHERE at < ?1",
-			[Text(c.deliveries)]
+			"""
+			DELETE FROM actions WHERE rowid IN (
+			  SELECT rowid FROM actions WHERE at < ?1 ORDER BY at LIMIT ?2
+			)
+			""",
+			[Text(c.deliveries), Integer(RETENTION_BATCH)]
 		) else match {
 			Err(e) => retentionFailed("actions", e),
 		}
 		let removed = progress.changes + expired.changes + acted.changes
 		let true = removed > 0 else { Ok(()) }
-		let more = progress.changes == RETENTION_BATCH || expired.changes == RETENTION_BATCH
+		let more = progress.changes == RETENTION_BATCH
+			|| expired.changes == RETENTION_BATCH
+			|| acted.changes == RETENTION_BATCH
 		let _ <- Logger.info(
 			"retention removed \(progress.changes) workflow-run progress, \(expired.changes) deliveries and \(acted.changes) actions\(if more { "; more remain for the next run" } else { "" })"
 		)

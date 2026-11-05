@@ -59,25 +59,53 @@ case "a run with nothing to remove logs nothing" {
 }
 
 case "a backlog is removed a batch at a time, oldest first" {
-	// 5,001 deliveries from before the cutoff, one a second from 2026-07-01.
+	// 5,001 workflow-run progress deliveries from June and 5,001 pushes from
+	// July, one a second, all older than both cutoffs. The first run takes
+	// 5,000 progress rows, then the 5,000 oldest of what's left past 90 days:
+	// the last progress row and 4,999 pushes. Both limits are pinned.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, size, received_at)
+		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+		SELECT 'run-' || i, 'workflow_run', 'in_progress', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-06-01', '+' || i || ' seconds')
+		FROM n
+		""",
+		[]
+	)
 	let _ <- Deliveries.run(
 		"""
 		INSERT INTO deliveries (id, event, size, received_at)
 		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
-		SELECT 'old-' || i, 'push', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-07-01', '+' || i || ' seconds')
+		SELECT 'push-' || i, 'push', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-07-01', '+' || i || ' seconds')
 		FROM n
 		""",
 		[]
 	)
 	let first <- retention.schedule("23 * * * *", nowMs())
 	expect first is Ok(_)
-	let left <- Deliveries.all("SELECT id FROM deliveries", [])
-	expect left == Ok("[{\"id\":\"old-5000\"}]")
-	expect Logger.info called once with msg == "retention removed 0 workflow-run progress, 5000 deliveries and 0 actions; more remain for the next run"
+	let left <- Deliveries.all("SELECT id FROM deliveries ORDER BY id", [])
+	expect left == Ok("[{\"id\":\"push-4999\"},{\"id\":\"push-5000\"}]")
+	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress, 5000 deliveries and 0 actions; more remain for the next run"
 	let second <- retention.schedule("23 * * * *", nowMs() + 3600000)
 	expect second is Ok(_)
 	let none <- Deliveries.all("SELECT id FROM deliveries", [])
 	expect none == Ok("[]")
+}
+
+case "a full batch of workflow-run progress alone says more remain" {
+	// 5,001 progress deliveries between the two cutoffs: past 7 days, inside 90.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, size, received_at)
+		WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 5000)
+		SELECT 'run-' || i, 'workflow_run', 'requested', 1, strftime('%Y-%m-%dT%H:%M:%fZ', '2026-10-01', '+' || i || ' seconds')
+		FROM n
+		""",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress, 0 deliveries and 0 actions; more remain for the next run"
 }
 
 case "a failed delete is logged and is the run's error" {
