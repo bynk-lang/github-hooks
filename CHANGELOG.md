@@ -28,6 +28,12 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, step 1 (#20): every `workflow_run` delivery updates a
+  `workflow_runs` row (migration `0004`), one per run attempt, with its
+  workflow, branch, trigger, status, conclusion and queued/started/completed
+  times, and whether the repository is public. A row only moves forward, so
+  out-of-order deliveries can't undo a completed run. Kept indefinitely; the
+  CI dashboard's metrics will read it. Data starts at deploy (no backfill).
 - Retention (#6): an hourly `retention` cron service deletes deliveries older
   than 90 days, `workflow_run` progress (`requested`, `in_progress`) older than
   7 days, and `actions` older than 90 days, at most 5,000 rows per delete per

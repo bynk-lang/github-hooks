@@ -4,6 +4,7 @@ uses github.events
 uses github.activity
 uses github.app
 uses github.welcome
+uses github.runs
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv }
@@ -164,6 +165,68 @@ fn answered(res: Response, repo: String, number: Int) -> Result[(), String] {
 		Ok(())
 	} else {
 		Err("GitHub refused the comment on \(repo)#\(number): \(refusal(res.status, res.body))")
+	}
+}
+
+---
+The facts the dashboard reads (#20), extracted from a delivery after it is
+answered. Today: one `workflow_runs` row per run attempt. A redelivery records
+the same facts again, which changes nothing.
+---
+capability Facts {
+	fn extract(d: Delivery, body: Bytes) -> Effect[()]
+}
+
+provides Facts = DeliveryFacts given Deliveries, Logger {
+	fn extract(d: Delivery, body: Bytes) -> Effect[()] {
+		let true = d.event == "workflow_run" else { Effect.pure(()) }
+		let Ok(r) = runOf(body) else match {
+			Err(why) => Logger.error("could not read workflow run from \(d.id): \(why)"),
+		}
+		// The row only moves forward: a delivery replaces it when its status is
+		// further along (requested/queued/waiting < in_progress < completed), or
+		// equally far and newer. So a late `in_progress` never undoes `completed`.
+		let Ok(_) <- Deliveries.run(
+			"""
+			INSERT INTO workflow_runs (repo, run_id, attempt, public, workflow, path, branch, sha, event,
+			                           status, conclusion, created_at, started_at, completed_at, updated_at)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+			ON CONFLICT (repo, run_id, attempt) DO UPDATE SET
+			  public = excluded.public, workflow = excluded.workflow, path = excluded.path,
+			  branch = excluded.branch, sha = excluded.sha, event = excluded.event,
+			  status = excluded.status, conclusion = excluded.conclusion,
+			  created_at = excluded.created_at,
+			  started_at = coalesce(excluded.started_at, workflow_runs.started_at),
+			  completed_at = excluded.completed_at, updated_at = excluded.updated_at
+			WHERE (CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+			    > (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+			   OR ((CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+			    = (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+			   AND excluded.updated_at > workflow_runs.updated_at)
+			""",
+			[
+				Text(r.repo),
+				Integer(r.runId),
+				Integer(r.attempt),
+				Boolean(r.isPublic),
+				Text(r.workflow),
+				Text(r.path),
+				text(r.branch),
+				Text(r.sha),
+				Text(r.event),
+				Text(r.status),
+				text(r.conclusion),
+				Text(r.createdAt),
+				text(r.startedAt),
+				text(r.completedAt),
+				Text(r.updatedAt),
+			]
+		) else match {
+			Err(e) => Logger.error(
+				"could not record \(r.repo) run \(r.runId) attempt \(r.attempt): \(sqlError(e))"
+			),
+		}
+		Effect.pure(())
 	}
 }
 
@@ -434,7 +497,7 @@ service api from http {
 	on POST("/github") (
 		headers: RequestHeaders,
 		body: Bytes
-	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot {
+	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot, Facts {
 		let Ok(d) = read(
 			headers.get("X-GitHub-Event"),
 			headers.get("X-GitHub-Delivery"),
@@ -474,6 +537,7 @@ service api from http {
 		// A redelivery reacts too, so a failed action is retried; one that
 		// worked is not repeated (see `Bot`).
 		~> Bot.react(d, body)
+		~> Facts.extract(d, body)
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
 			Ok("duplicate")
