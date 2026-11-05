@@ -1,7 +1,8 @@
 // TEST-ONLY KEY: APP_PRIVATE_KEY below (and the public key in the JWT case)
 // was generated for these tests with `openssl genpkey`, has never belonged to
 // any GitHub App, and grants nothing. The same key is in tests/app.bynk; rotate
-// both together. One shared copy waits on suite fixtures in a Bynk release.
+// both together. It stays inline: an `env` value must be a `String` literal,
+// so the suite cannot read it from a fixture.
 //
 // Phase 3 end to end, through the webhook: the delivery is recorded, then the
 // bot reacts. Signing is real (with that test key), D1 is

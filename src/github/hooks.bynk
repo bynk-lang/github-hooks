@@ -175,15 +175,11 @@ redelivery of a failed action retries it, and a redelivery of one that worked
 does nothing. An action runs only in a repository `ACTION_REPOS` allows.
 ---
 capability Bot {
-	fn react(event: String, delivery: String, body: Bytes) -> Effect[()]
+	fn react(d: Delivery, body: Bytes) -> Effect[()]
 }
 
 provides Bot = GitHubBot given GitHubApi, Secrets, Deliveries, Logger {
-	// The delivery arrives as its parts, built-in types only, and is read again
-	// here: a capability operation that takes a commons type emits a test module
-	// that does not compile (Bynk v0.492.1).
-	fn react(event: String, delivery: String, body: Bytes) -> Effect[()] {
-		let Ok(d) = read(Some(event), Some(delivery), body) else { Effect.pure(()) }
+	fn react(d: Delivery, body: Bytes) -> Effect[()] {
 		// WELCOME_ASSOCIATIONS widens who is welcomed, to test in a sandbox where
 		// every author is a member (`FIRST_TIMER,FIRST_TIME_CONTRIBUTOR,OWNER`).
 		let associations <- Secrets.get("WELCOME_ASSOCIATIONS")
@@ -466,7 +462,7 @@ service api from http {
 		// Act after answering: GitHub waits at most 10 seconds for the reply.
 		// A redelivery reacts too, so a failed action is retried; one that
 		// worked is not repeated (see `Bot`).
-		~> Bot.react(d.event, d.id, body)
+		~> Bot.react(d, body)
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
 			Ok("duplicate")
