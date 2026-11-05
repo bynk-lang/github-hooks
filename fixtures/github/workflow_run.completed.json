@@ -295,7 +295,8 @@
     "notifications_url": "https://api.github.com/repos/bynk-lang/github-hooks/notifications{?since,all,participating}",
     "labels_url": "https://api.github.com/repos/bynk-lang/github-hooks/labels{/name}",
     "releases_url": "https://api.github.com/repos/bynk-lang/github-hooks/releases{/id}",
-    "deployments_url": "https://api.github.com/repos/bynk-lang/github-hooks/deployments"
+    "deployments_url": "https://api.github.com/repos/bynk-lang/github-hooks/deployments",
+    "default_branch": "main"
   },
   "organization": {
     "login": "bynk-lang"

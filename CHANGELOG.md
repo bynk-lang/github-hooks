@@ -28,6 +28,16 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, step 2 (#20): public CI metrics. `GET /metrics/ci` gives each
+  workflow's runs, conclusions, pass rate (success over success, failure and
+  timed out), median and 95th-percentile wall-clock time of successful
+  attempts, and flaky runs, over a window of 1 to 90 days, filterable by
+  repository, branch and trigger. `GET /metrics/ci/now` gives running attempts
+  and each workflow's latest result on its repository's default branch, with
+  `red_since`. No token; public repositories only, less `DASHBOARD_EXCLUDE`;
+  cached 30 seconds. Migration `0005` records each repository's default
+  branch and indexes `workflow_runs` by completion time. See
+  docs/ci-metrics.md.
 - Phase 4, step 1 (#20): every `workflow_run` delivery updates a
   `workflow_runs` row (migration `0004`), one per run attempt, with its
   workflow, branch, trigger, status, conclusion and queued/started/completed

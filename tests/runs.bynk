@@ -140,8 +140,8 @@ case "a re-run's queue time is its earliest delivery, whatever order they arrive
 
 case "a repository's visibility is its latest delivery's" {
 	let _ <- api.POST("/github", runHeaders("run-1"), Bytes.fromUtf8(completedRun)) by GitHub
-	let public <- Deliveries.first("SELECT repo, public FROM repositories", [])
-	expect public == Ok(Some("{\"repo\":\"bynk-lang/github-hooks\",\"public\":1}"))
+	let public <- Deliveries.first("SELECT repo, public, default_branch FROM repositories", [])
+	expect public == Ok(Some("{\"repo\":\"bynk-lang/github-hooks\",\"public\":1,\"default_branch\":\"main\"}"))
 	// Made private later: one delivery saying so hides the history recorded before.
 	let _ <- api.POST(
 		"/github",

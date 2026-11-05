@@ -5,6 +5,7 @@ uses github.activity
 uses github.app
 uses github.welcome
 uses github.runs
+uses github.metrics
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv }
@@ -194,12 +195,16 @@ fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
 	let Some(v) = visibilityOf(body) else { Effect.pure(()) }
 	let Ok(_) <- Deliveries.run(
 		"""
-		INSERT INTO repositories (repo, public) VALUES (?1, ?2)
+		INSERT INTO repositories (repo, public, default_branch) VALUES (?1, ?2, ?3)
 		ON CONFLICT (repo) DO UPDATE
-		  SET public = excluded.public, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		  SET public = excluded.public,
+		      default_branch = coalesce(excluded.default_branch, repositories.default_branch),
+		      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		  WHERE repositories.public != excluded.public
+		     OR coalesce(excluded.default_branch, repositories.default_branch)
+		        IS NOT repositories.default_branch
 		""",
-		[Text(v.repo), Boolean(v.isPublic)]
+		[Text(v.repo), Boolean(v.isPublic), text(v.defaultBranch)]
 	) else match {
 		Err(e) => Logger.error("could not record whether \(v.repo) is public: \(sqlError(e))"),
 	}
@@ -525,6 +530,188 @@ service api from http {
 		}
 		let _ <- Logger.info("\(reader.identity) read the \(day) digest")
 		Ok(digest(day, tallies))
+	}
+
+	// Phase 4 (#20): CI health over a window, public. Only repositories whose
+	// latest delivery says they are public appear (`repositories`), less any
+	// `DASHBOARD_EXCLUDE` names. Cached 30 seconds per URL, so heavy viewing
+	// doesn't become D1 reads. The window counts runs by when they completed.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/ci") (
+		query: CiQuery
+	) -> Effect[HttpResult[CiMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets {
+		let now <- Clock.now()
+		let since = now - Duration.millis(query.days * 86_400_000)
+		let Ok(rows) <- Deliveries.all(
+			"""
+			WITH win AS (
+			  SELECT w.* FROM workflow_runs w
+			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
+			  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
+			    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
+			    AND (?4 IS NULL OR w.branch = ?4)
+			    AND (?5 IS NULL OR w.event = ?5)
+			),
+			counts AS (
+			  SELECT repo, path, count(*) AS runs,
+			    sum(conclusion = 'success') AS success,
+			    sum(conclusion = 'failure') AS failure,
+			    sum(conclusion = 'timed_out') AS timed_out,
+			    sum(conclusion = 'cancelled') AS cancelled,
+			    sum(conclusion = 'skipped') AS skipped,
+			    sum(conclusion IS NULL
+			        OR conclusion NOT IN ('success', 'failure', 'timed_out', 'cancelled', 'skipped')) AS other
+			  FROM win GROUP BY repo, path
+			),
+			walls AS (
+			  SELECT repo, path,
+			    CAST(round((julianday(completed_at) - julianday(queued_at)) * 86400) AS INTEGER) AS seconds,
+			    row_number() OVER (PARTITION BY repo, path
+			                       ORDER BY julianday(completed_at) - julianday(queued_at)) AS rn,
+			    count(*) OVER (PARTITION BY repo, path) AS n
+			  FROM win WHERE conclusion = 'success'
+			),
+			pct AS (
+			  SELECT repo, path,
+			    max(CASE WHEN rn = (50 * n + 99) / 100 THEN seconds END) AS p50,
+			    max(CASE WHEN rn = (95 * n + 99) / 100 THEN seconds END) AS p95
+			  FROM walls GROUP BY repo, path
+			),
+			flaky AS (
+			  SELECT s.repo, s.path, count(DISTINCT s.run_id) AS n
+			  FROM win s
+			  JOIN workflow_runs f
+			    ON f.repo = s.repo AND f.run_id = s.run_id AND f.attempt = 1 AND f.conclusion = 'failure'
+			  WHERE s.attempt > 1 AND s.conclusion = 'success'
+			  GROUP BY s.repo, s.path
+			)
+			SELECT c.repo, c.path,
+			  (SELECT l.workflow FROM win l WHERE l.repo = c.repo AND l.path = c.path
+			   ORDER BY l.completed_at DESC LIMIT 1) AS workflow,
+			  c.runs, c.success, c.failure, c.timed_out, c.cancelled, c.skipped, c.other,
+			  CASE WHEN c.success + c.failure + c.timed_out > 0
+			    THEN CAST(round(100.0 * c.success / (c.success + c.failure + c.timed_out)) AS INTEGER)
+			  END AS pass_percent,
+			  p.p50 AS wall_p50_seconds, p.p95 AS wall_p95_seconds,
+			  coalesce(fl.n, 0) AS flaky
+			FROM counts c
+			LEFT JOIN pct p ON p.repo = c.repo AND p.path = c.path
+			LEFT JOIN flaky fl ON fl.repo = c.repo AND fl.path = c.path
+			ORDER BY c.repo, c.path
+			""",
+			[
+				Text(since.toIso()),
+				Text(now.toIso()),
+				text(query.repo.map((r) => "\(r)")),
+				text(query.branch),
+				text(query.event),
+			]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not compute CI metrics: \(sqlError(e))")
+				ServerError("could not compute CI metrics")
+			},
+		}
+		let Ok(health) = Json.decodeSql[List[WorkflowHealth]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode CI metrics: \(jsonError(e))")
+				ServerError("CI metrics did not decode")
+			},
+		}
+		// When collection began: the first completion recorded anywhere, which
+		// `workflow_runs_by_completed` answers without scanning the table.
+		let first <- Deliveries.first("SELECT min(completed_at) AS first FROM workflow_runs", [])
+		// Only a hint of how much of the window has data, so a failed read is "unknown".
+		let dataSince: Option[String] = match first {
+			Ok(Some(row)) => match Json.decodeSql[FirstRun](row) {
+				Ok(f) => f.first,
+				Err(_) => None,
+			},
+			_ => None,
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		Ok(CiMetrics {
+			since: since.toIso(),
+			until: now.toIso(),
+			data_since: dataSince,
+			workflows: health.filter((h) => !allows(excluded, h.repo)),
+		})
+	}
+
+	// What is running now, and each workflow's latest result on its
+	// repository's default branch. A run still "running" a day after it was
+	// queued lost its completed delivery and is left out. The default-branch
+	// state looks back 90 days, so a workflow quiet for longer drops out, and
+	// `red_since` is at most that old: the query stays bounded as runs pile up.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/ci/now") (
+		query: NowQuery
+	) -> Effect[HttpResult[CiNow]] by v: Visitor given Deliveries, Logger, Clock, Secrets {
+		let now <- Clock.now()
+		let repo = text(query.repo.map((r) => "\(r)"))
+		let Ok(running) <- Deliveries.all(
+			"""
+			SELECT w.repo, w.path, w.workflow, w.run_id, w.attempt, w.branch, w.event, w.status, w.queued_at
+			FROM workflow_runs w
+			JOIN repositories r ON r.repo = w.repo AND r.public = 1
+			WHERE w.status != 'completed' AND w.queued_at >= ?2
+			  AND (?1 IS NULL OR w.repo = ?1 COLLATE NOCASE)
+			ORDER BY w.queued_at, w.repo, w.path
+			""",
+			[repo, Text((now - 1.days).toIso())]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not list running workflows: \(sqlError(e))")
+				ServerError("could not read running workflows")
+			},
+		}
+		let Ok(states) <- Deliveries.all(
+			"""
+			WITH judged AS (
+			  SELECT w.repo, w.path, w.workflow, w.branch, w.conclusion, w.completed_at,
+			    row_number() OVER (PARTITION BY w.repo, w.path ORDER BY w.completed_at DESC) AS rn
+			  FROM workflow_runs w
+			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
+			  WHERE w.status = 'completed' AND w.completed_at >= ?2
+			    AND w.event = 'push' AND w.branch = r.default_branch
+			    AND w.conclusion IN ('success', 'failure', 'timed_out')
+			    AND (?1 IS NULL OR w.repo = ?1 COLLATE NOCASE)
+			)
+			SELECT j.repo, j.path, j.workflow, j.branch, j.conclusion, j.completed_at,
+			  CASE WHEN j.conclusion != 'success' THEN (
+			    SELECT min(k.completed_at) FROM judged k
+			    WHERE k.repo = j.repo AND k.path = j.path AND k.conclusion != 'success'
+			      AND k.completed_at > coalesce(
+			        (SELECT max(s.completed_at) FROM judged s
+			         WHERE s.repo = j.repo AND s.path = j.path AND s.conclusion = 'success'), '')
+			  ) END AS red_since
+			FROM judged j WHERE j.rn = 1
+			ORDER BY j.repo, j.path
+			""",
+			[repo, Text((now - 90.days).toIso())]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not read default-branch states: \(sqlError(e))")
+				ServerError("could not read default-branch states")
+			},
+		}
+		let Ok(inFlight) = Json.decodeSql[List[InFlight]](running) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode running workflows: \(jsonError(e))")
+				ServerError("running workflows did not decode")
+			},
+		}
+		let Ok(main) = Json.decodeSql[List[MainState]](states) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode default-branch states: \(jsonError(e))")
+				ServerError("default-branch states did not decode")
+			},
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		Ok(CiNow {
+			in_flight: inFlight.filter((r) => !allows(excluded, r.repo)),
+			main: main.filter((m) => !allows(excluded, m.repo)),
+		})
 	}
 
 	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
