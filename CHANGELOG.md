@@ -43,6 +43,16 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 4, step 3 (#42): runner wait on the CI health page.
+  - **Waiting for runners:** each repository's card gains a section. It
+    shows waits by runner label (median, 95th percentile drawn as a range,
+    longest) beside what is queued or awaiting approval now, with the
+    window's 10 longest waits linking to their jobs.
+  - **Slowest jobs:** each workflow's trend panel lists its jobs among the
+    repository's slowest.
+  - **Polling:** the section polls on its own pace, as jobs have no live
+    feed: every 30 seconds for what's waiting, and every minute for the
+    window.
 - Phase 4, slice 4, step 2 (#42): the runner-wait routes.
   - **`GET /metrics/runners`:** over 7, 30 or 90 days, each public
     repository's waits for a runner by label (p50, p95, longest), its 10

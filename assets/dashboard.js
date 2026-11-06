@@ -12,6 +12,11 @@
   let metrics = null;
   let now = null;
   let history = null;
+  // Runner wait (#42): the window's figures, computed hourly by the server,
+  // and what is waiting for a runner now. Jobs have no live feed, so these
+  // always poll, live or not.
+  let runners = null;
+  let runnersNow = null;
   // Which workflows' trends are open, by "repo path": kept across redraws.
   const openTrends = new Set();
   // Each source keeps its own freshness, so one succeeding never hides the
@@ -20,6 +25,8 @@
     metrics: { lastOk: null, failing: false },
     now: { lastOk: null, failing: false },
     history: { lastOk: null, failing: false },
+    runners: { lastOk: null, failing: false },
+    runnersNow: { lastOk: null, failing: false },
   };
   let live = false;
 
@@ -95,6 +102,30 @@
     refreshHistory();
   }
 
+  async function refreshRunners() {
+    const asked = days;
+    try {
+      const r = await getJson(`/metrics/runners?days=${asked}`);
+      if (asked !== days) return;
+      runners = r;
+      ok("runners");
+    } catch (e) {
+      if (asked !== days) return;
+      failed("runners", e);
+    }
+    render();
+  }
+
+  async function refreshRunnersNow() {
+    try {
+      runnersNow = await getJson("/metrics/runners/now");
+      ok("runnersNow");
+    } catch (e) {
+      failed("runnersNow", e);
+    }
+    render();
+  }
+
   // Group the history by workflow, keyed "repo path".
   function indexHistory(h) {
     const byWorkflow = new Map();
@@ -141,8 +172,10 @@
       describe("now", "Running and default-branch states"),
       describe("metrics", "Window figures"),
       describe("history", "Recent runs and trends"),
+      describe("runnersNow", "What's waiting for a runner"),
+      describe("runners", "Runner waits"),
     ].filter(Boolean);
-    const latest = [fresh.now.lastOk, fresh.metrics.lastOk, fresh.history.lastOk]
+    const latest = Object.values(fresh).map((s) => s.lastOk)
       .filter(Boolean).sort((a, b) => b - a)[0];
     if (problems.length > 0) {
       f.textContent = `${problems.join("; ")}.`;
@@ -338,14 +371,45 @@
   }
   const shortDuration = (s) => (s === 0 ? "0" : s < 3600 ? `${Math.round(s / 60)} m` : `${+(s / 3600).toFixed(1)} h`);
 
-  function trendPanel(name, key, entry) {
+  // This workflow's jobs among the repository's slowest (#42): the figures
+  // keep each repository's 10 slowest jobs by median, with at least 3
+  // successful runs in the window, matched to the workflow by its name.
+  function slowestJobs(repoName, workflowName) {
+    if (!runners || !runners.computed_at) return null;
+    const jobs = runners.slowest.filter((j) => j.repo === repoName && j.workflow === workflowName);
+    const box = el("div", { class: "slowest" }, el("h4", {}, "Slowest jobs"));
+    if (jobs.length === 0) {
+      box.append(el("p", { class: "empty" },
+        "None of this workflow's jobs is among the repository's 10 slowest (with at least 3 successful runs) in this window."));
+      return box;
+    }
+    const rows = el("tbody");
+    for (const j of jobs) {
+      rows.append(el("tr", {},
+        el("th", { scope: "row" }, j.name),
+        el("td", { class: "num", "data-label": "Successful runs" }, j.runs),
+        el("td", { class: "num", "data-label": "Median time" }, duration(j.p50_seconds) || "—"),
+        el("td", { class: "num", "data-label": "95th pct time" }, duration(j.p95_seconds) || "—")));
+    }
+    box.append(el("table", { class: "compact" },
+      el("caption", { class: "visually-hidden" }, `${workflowName}: its slowest jobs, by median time of successful runs`),
+      el("thead", {}, el("tr", {},
+        el("th", { scope: "col" }, "Job"),
+        el("th", { scope: "col", class: "num" }, "Successful runs"),
+        el("th", { scope: "col", class: "num" }, "Median time"),
+        el("th", { scope: "col", class: "num" }, "95th pct time"))),
+      rows));
+    return box;
+  }
+
+  function trendPanel(name, key, entry, repoName) {
     const daily = entry ? entry.daily : [];
     const byDay = new Map(daily.map((d) => [d.day, d]));
     const allDays = windowDays(history);
     const judged = (d) => d.success + d.failed;
     const panel = el("div", { class: "trend" });
     if (daily.length === 0) {
-      panel.append(el("p", { class: "empty" }, "No completed runs in this window."));
+      panel.append(el("p", { class: "empty" }, "No completed runs in this window."), slowestJobs(repoName, name));
       return panel;
     }
     const maxWall = Math.max(0, ...daily.map((d) => d.wall_p50_seconds || 0));
@@ -392,7 +456,113 @@
           el("th", { scope: "col", class: "num" }, "Pass rate"),
           el("th", { scope: "col", class: "num" }, "Median time"))),
         rows)));
+    const slow = slowestJobs(repoName, name);
+    if (slow) panel.append(slow);
     return panel;
+  }
+
+  // Median to 95th percentile as a thin range on a shared scale, with a point
+  // at the median: the spread is the story (most jobs start at once; some
+  // wait minutes). The figures are in the row beside it.
+  function waitRange(w, top) {
+    if (w.p50_seconds == null || w.p95_seconds == null || top <= 0) return null;
+    const at = (s) => `${Math.min(100, (s / top) * 100)}%`;
+    const label = `Median ${duration(w.p50_seconds)}, 95th percentile ${duration(w.p95_seconds)}`;
+    const range = el("div", { class: "range", role: "img", "aria-label": label, title: label });
+    const span = el("span", { class: "range-span" });
+    span.style.left = at(w.p50_seconds);
+    span.style.width = `calc(${at(w.p95_seconds)} - ${at(w.p50_seconds)})`;
+    const dot = el("span", { class: "range-dot" });
+    dot.style.left = at(w.p50_seconds);
+    range.append(span, dot);
+    return range;
+  }
+
+  // What is waiting for a runner, for one runner label.
+  function waitingText(n) {
+    if (!n) return null;
+    const parts = [];
+    if (n.queued > 0) {
+      parts.push(`${n.queued} queued${n.oldest_queued_at ? `, oldest ${since(n.oldest_queued_at)}` : ""}`);
+    }
+    if (n.awaiting_approval > 0) parts.push(`${n.awaiting_approval} awaiting approval`);
+    return parts.length > 0 ? parts.join(" · ") : null;
+  }
+
+  // A repository's runner wait (#42): waits by runner label over the window,
+  // what is waiting now, and the longest waits. The window's figures are
+  // computed hourly, so the note says when.
+  function runnerSection(repoName, r) {
+    if (!runners && !runnersNow) return null;
+    const byRunner = new Map();
+    const runner = (label) => {
+      if (!byRunner.has(label)) byRunner.set(label, { wait: null, now: null });
+      return byRunner.get(label);
+    };
+    for (const w of r.waits) runner(w.runner).wait = w;
+    for (const n of r.waiting) runner(n.runner).now = n;
+    const box = el("div", { class: "runners", "aria-labelledby": `runners-${repoName}` },
+      el("h3", { id: `runners-${repoName}` }, "Waiting for runners"));
+
+    const notes = [];
+    if (runners && runners.computed_at) {
+      notes.push(`Computed hourly, last at ${clock(new Date(runners.computed_at))} UTC`);
+      if (runners.data_since && Date.parse(runners.data_since) > Date.parse(runners.since)) {
+        notes.push(`jobs recorded since ${when(runners.data_since)}`);
+      }
+    } else if (runners) {
+      notes.push("The window's figures are computed hourly; the first computation hasn't run yet");
+    }
+    if (notes.length > 0) box.append(el("p", { class: "aside" }, `${notes.join(" · ")}.`));
+
+    if (byRunner.size === 0) {
+      box.append(el("p", { class: "empty" }, "No job started on a runner in this window, and nothing is waiting."));
+      return box;
+    }
+    // Busiest first, as the figures come; labels with only waiting jobs after.
+    const rows = [...byRunner].sort(([an, a], [bn, b]) =>
+      ((b.wait ? b.wait.jobs : -1) - (a.wait ? a.wait.jobs : -1)) || an.localeCompare(bn));
+    const top = niceTop(Math.max(0, ...rows.map(([, x]) => (x.wait && x.wait.p95_seconds) || 0)) || 60);
+    const body = el("tbody");
+    for (const [label, { wait: w, now: n }] of rows) {
+      const range = w ? waitRange(w, top) : null;
+      const waiting = waitingText(n);
+      body.append(el("tr", {},
+        el("td", { class: "workflow" }, label),
+        cell("Jobs", w ? w.jobs : null),
+        cell("Median wait", w ? duration(w.p50_seconds) : null),
+        cell("95th pct wait", w ? duration(w.p95_seconds) : null),
+        range
+          ? el("td", { class: "bar-cell", "data-label": "Spread" }, range)
+          : el("td", { class: "bar-cell none", "data-label": "Spread" }, "—"),
+        cell("Longest", w ? duration(w.longest_seconds) : null),
+        waiting
+          ? el("td", { class: "waiting", "data-label": "Waiting now" }, waiting)
+          : el("td", { class: "waiting none", "data-label": "Waiting now" }, "Nothing")));
+    }
+    box.append(el("div", { class: "table-wrap" }, el("table", {},
+      el("caption", { class: "visually-hidden" }, `Waits for a runner in ${repoName}, ${days}-day window, by runner label`),
+      el("thead", {}, el("tr", {},
+        el("th", { scope: "col" }, "Runner"),
+        el("th", { scope: "col", class: "num" }, "Jobs"),
+        el("th", { scope: "col", class: "num" }, "Median wait"),
+        el("th", { scope: "col", class: "num" }, "95th pct wait"),
+        el("th", { scope: "col" }, `Median to 95th pct (0 to ${shortDuration(top)})`),
+        el("th", { scope: "col", class: "num" }, "Longest"),
+        el("th", { scope: "col" }, "Waiting now"))),
+      body)));
+
+    if (r.longest.length > 0) {
+      const list = el("ol", { class: "longest" });
+      for (const l of r.longest) {
+        list.append(el("li", {},
+          el("a", { href: l.url, "data-key": `job:${l.url}` }, l.name),
+          ` · ${l.workflow} · ${l.runner} · waited ${duration(l.wait_seconds)}, queued ${when(l.queued_at)}`));
+      }
+      box.append(el("details", { class: "in-flight", "data-key": `longest:${repoName}` },
+        el("summary", { "data-key": `longest-summary:${repoName}` }, `Longest waits (${r.longest.length})`), list));
+    }
+    return box;
   }
 
   function cell(label, value, cls = "num") {
@@ -422,10 +592,10 @@
     const root = $("repos");
     const kept = readerState(root);
     root.replaceChildren();
-    if (!metrics && !now) return;
+    if (!metrics && !now && !runners && !runnersNow) return;
     const repos = new Map();
     const repo = (name) => {
-      if (!repos.has(name)) repos.set(name, { workflows: new Map(), running: [] });
+      if (!repos.has(name)) repos.set(name, { workflows: new Map(), running: [], waits: [], waiting: [], longest: [] });
       return repos.get(name);
     };
     for (const w of metrics ? metrics.workflows : []) repo(w.repo).workflows.set(w.path, { health: w });
@@ -436,6 +606,9 @@
       r.workflows.set(s.path, entry);
     }
     for (const f of now ? now.in_flight : []) repo(f.repo).running.push(f);
+    for (const w of runners ? runners.runners : []) repo(w.repo).waits.push(w);
+    for (const l of runners ? runners.longest : []) repo(l.repo).longest.push(l);
+    for (const n of runnersNow ? runnersNow.waiting : []) repo(n.repo).waiting.push(n);
 
     if (repos.size === 0) {
       root.append(el("p", { class: "empty" }, "No public repository has a completed run in this window yet."));
@@ -503,11 +676,12 @@
             : el("td", { class: "strip-cell none", "data-label": "Recent runs" }, "—")));
         if (history && isOpen) {
           body.append(el("tr", { class: "trend-row", id: trendId },
-            el("td", { colspan: "9" }, trendPanel(nameText, key, entry))));
+            el("td", { colspan: "9" }, trendPanel(nameText, key, entry, name))));
         }
       }
       table.append(body);
-      section.append(el("div", { class: "table-wrap" }, table));
+      if (r.workflows.size > 0) section.append(el("div", { class: "table-wrap" }, table));
+      else section.append(el("p", { class: "empty" }, "No completed run in this window."));
 
       if (running > 0) {
         const list = el("ul");
@@ -518,6 +692,8 @@
         section.append(el("details", { class: "in-flight", "data-key": `running:${name}` },
           el("summary", { "data-key": `summary:${name}` }, `Running now (${running})`), list));
       }
+      const runnerBox = runnerSection(name, r);
+      if (runnerBox) section.append(runnerBox);
       root.append(section);
     }
     restoreReaderState(root, kept);
@@ -531,16 +707,23 @@
 
   // Poll only while the page is visible; catch up at once when it returns.
   // While the live feed is connected, polling slows to a safety net.
+  // Runner wait has no live feed, so it keeps its own pace either way.
   let timers = [];
   function poll() {
     timers.forEach(clearInterval);
-    timers = live
-      ? [setInterval(refreshWindow, LIVE_POLL_MS), setInterval(refreshNow, LIVE_POLL_MS)]
-      : [setInterval(refreshWindow, METRICS_EVERY_MS), setInterval(refreshNow, NOW_EVERY_MS)];
+    timers = [
+      ...(live
+        ? [setInterval(refreshWindow, LIVE_POLL_MS), setInterval(refreshNow, LIVE_POLL_MS)]
+        : [setInterval(refreshWindow, METRICS_EVERY_MS), setInterval(refreshNow, NOW_EVERY_MS)]),
+      setInterval(refreshRunners, METRICS_EVERY_MS),
+      setInterval(refreshRunnersNow, NOW_EVERY_MS),
+    ];
   }
   function start() {
     refreshWindow();
     refreshNow();
+    refreshRunners();
+    refreshRunnersNow();
     poll();
     connect();
   }
@@ -667,7 +850,9 @@
         days = Number(input.value);
         metrics = null;
         history = null;
+        runners = null;
         refreshWindow();
+        refreshRunners();
       });
     }
     document.addEventListener("visibilitychange", () => (document.hidden ? stop() : start()));

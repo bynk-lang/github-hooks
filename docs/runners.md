@@ -5,8 +5,8 @@ The fourth slice of the public dashboard
 wait for a runner, on which runners, and which jobs are slowest. GitHub queues
 for runners per job, not per run: a run's `run_started_at` equals its
 `created_at` while its jobs wait, so the CI health figures can't see it. This
-page covers what is recorded, how long it's kept, and the routes. The section
-on the CI health page follows in a later step.
+page covers what is recorded, how long it's kept, the routes, and the section
+on the CI health page.
 
 ## Before it records anything
 
@@ -149,3 +149,28 @@ What is waiting now, by repository and runner label: `queued` (with
 index `workflow_jobs_waiting`, a handful of rows at any moment. A job queued
 more than 24 hours ago (`JOB_QUEUE_TIMEOUT`) isn't counted: it lost its later
 deliveries.
+
+## On the CI health page
+
+Each repository's card on `/` has a **Waiting for runners** block under its
+workflows, for the window chosen at the top (7, 30 or 90 days):
+
+- **Waits by runner label:** jobs, median and 95th percentile wait, and the
+  longest. A range from the median to the 95th percentile is drawn on a scale
+  shared by the repository's runners; the figures beside it carry the values.
+- **Waiting now:** in the same row, jobs queued for that label (with the
+  oldest one's age) and jobs held for an approval. A label with only waiting
+  jobs is listed after the rest.
+- **Longest waits:** the window's 10, folded away by default, each linking to
+  its job on GitHub.
+- **When:** a note says when the figures were last computed, and how far back
+  job data goes if it doesn't yet cover the window.
+
+Each workflow's trend panel lists its jobs among the repository's **slowest
+jobs**, matched by workflow name.
+
+Jobs have no live feed, so the block polls, live or not: what's waiting now
+every 30 seconds, and the window's figures every minute (they change hourly,
+and the edge caches each for 30 seconds). Each source has its own entry in the
+page's freshness line, so a failing one shows as stale while the rest carry
+on.
