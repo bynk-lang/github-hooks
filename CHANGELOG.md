@@ -43,6 +43,17 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 3, step 2 (#36): the daily release sync. A `releaseSync`
+  cron service (04:47 UTC) lists each public repository's releases (up to 90)
+  and records them, so release history is there from the first run; marks
+  deleted any a complete listing no longer has; and matches each final
+  release not yet tried since the repository's pull requests began to be
+  recorded (at most 10 a run). A release whose previous release predates that
+  still has its pull requests marked, but its `shipped` count stays null rather
+  than short. A release with no previous final release, or whose comparison
+  GitHub no longer has, is recorded as tried (`previous_tag` `''`, or the
+  previous tag), so it never holds a repair slot.
+  The pull request sync and this share the repository lookup.
 - Phase 4, slice 3, step 1 (#36): release facts. `release` deliveries become
   `releases` rows (migration `0009`), one per repository and tag, kept when
   deleted. When a final release is published (its `released`
