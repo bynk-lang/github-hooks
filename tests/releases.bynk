@@ -364,3 +364,43 @@ case "a draft, or a private repository's release, is never pushed" {
 	) by GitHub
 	expect LiveFeed.publish never called
 }
+
+case "a final release's created, published and released deliveries are pushed once, on released" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared)]
+	stub Edge.purge(_) returns true
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-created"),
+		Bytes.fromUtf8(released.replace("\"action\": \"released\"", "\"action\": \"created\""))
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-published"),
+		Bytes.fromUtf8(released.replace("\"action\": \"released\"", "\"action\": \"published\""))
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-released"),
+		Bytes.fromUtf8(released)
+	) by GitHub
+	expect LiveFeed.publish called once with e.kind == "release" && e.status == "released" && e.refetch_ms == 3000
+}
+
+case "a pre-release is pushed when it is published, and any release when it is deleted" {
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-pre-published"),
+		Bytes.fromUtf8(released
+			.replace("\"action\": \"released\"", "\"action\": \"prereleased\"")
+			.replace("\"prerelease\": false", "\"prerelease\": true"))
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-gone"),
+		Bytes.fromUtf8(released.replace("\"action\": \"released\"", "\"action\": \"deleted\""))
+	) by GitHub
+	expect LiveFeed.publish called with e.status == "prereleased"
+	expect LiveFeed.publish called with e.status == "deleted"
+	expect LiveFeed.publish called 2 times
+}

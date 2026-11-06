@@ -698,10 +698,14 @@ fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logge
 	Effect.pure(())
 }
 
-// Records a release, then says whether open pages should hear of it: on the
-// delivery's first arrival only, not for a draft (which isn't shown), and only
-// for a repository the public pages may show. It is told after any matching,
-// so a refetch sees what the release shipped.
+// Records a release, then says whether open pages should hear of it: when
+// what they show has settled, on the delivery's first arrival only, not for a
+// draft (which isn't shown), and only for a repository the public pages may
+// show. A final release is told on `released`, after its matching, so a
+// refetch sees what it shipped; GitHub's `created` and `published` for it
+// arrive alongside, before the matching has finished, and aren't told. A
+// pre-release, which ships nothing, is told on `prereleased`, and any release
+// on `deleted`.
 fn releaseChanged(
 	d: Delivery,
 	body: Bytes,
@@ -711,7 +715,8 @@ fn releaseChanged(
 	let _ <- recordRelease(d, body)
 	let true = fresh else { Effect.pure(nothing) }
 	let Ok(r) = releaseOf(body) else { Effect.pure(nothing) }
-	let true = !r.draft else { Effect.pure(nothing) }
+	let settled = r.action == "released" || r.action == "prereleased" || r.action == "deleted"
+	let true = settled && !r.draft else { Effect.pure(nothing) }
 	let shown <- shownLive(r.repo)
 	let true = shown else { Effect.pure(nothing) }
 	Effect.pure(Some(releaseEventOf(r)))

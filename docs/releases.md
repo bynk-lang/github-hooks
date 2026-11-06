@@ -220,12 +220,16 @@ is pushed as `kind: "release"`, with the repository, the delivery's action as
  "workflow": "", "run_id": 0, "attempt": 0, "status": "released", "conclusion": "v0.510.2"}
 ```
 
-It's sent only in these cases:
-- the delivery's first arrival, not a redelivery;
-- a release that isn't a draft;
-- a repository the public pages may show.
+It's sent when what the pages show has settled:
+- for a final release, on `released`, after its matching, so a refetch sees
+  what it shipped. GitHub's `created` and `published` for it arrive in the
+  same second, before the matching has finished, and aren't sent, which also
+  saves their purges;
+- for a pre-release, which ships nothing, on `prereleased`;
+- for any release, on `deleted`.
 
-It's sent after any matching, so a refetch sees what the release shipped. The
+And only on the delivery's first arrival, not a redelivery, never for a
+draft, and only for a repository the public pages may show. The
 releases page acts on `release` events and on a `pull` event whose pull
 request merged, since that changes what's waiting to ship. The CI and PR pages
 ignore `release` events. The refetch timing (`refetch_ms`, the purge and its
