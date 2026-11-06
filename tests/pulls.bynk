@@ -305,3 +305,41 @@ case "in the same second, a delivery never takes a PR out of merged, but still m
 	let ready <- Deliveries.first("SELECT state, draft, ready_at FROM pull_requests", [])
 	expect ready == Ok(Some("{\"state\":\"open\",\"draft\":0,\"ready_at\":\"2026-11-05T07:54:42.000Z\"}"))
 }
+
+case "the merge commit is kept only once the pull request has merged" {
+	// GitHub names a test merge commit for an open pull request too; that one
+	// is never on the base branch, so no release could ship it.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-open"),
+		openPull("opened", false, "2026-11-05T07:54:42Z")
+	) by GitHub
+	let open <- Deliveries.first("SELECT merge_commit_sha FROM pull_requests", [])
+	expect open == Ok(Some("{\"merge_commit_sha\":null}"))
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-merged"),
+		Bytes.fromUtf8(mergedPull)
+	) by GitHub
+	let merged <- Deliveries.first("SELECT merge_commit_sha FROM pull_requests", [])
+	expect merged == Ok(Some("{\"merge_commit_sha\":\"5c1ea97f111ced1e27160467b9268efeedf216a7\"}"))
+	// A later delivery that names none keeps it.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "pr-edited"),
+		Bytes.fromUtf8(mergedPull
+			.replace("\"action\": \"closed\"", "\"action\": \"edited\"")
+			.replace(
+				"\"updated_at\": \"2026-11-05T08:10:14Z\"",
+				"\"updated_at\": \"2026-11-05T08:20:00Z\""
+			)
+			.replace(
+				"\"merge_commit_sha\": \"5c1ea97f111ced1e27160467b9268efeedf216a7\"",
+				"\"merge_commit_sha\": null"
+			))
+	) by GitHub
+	let edited <- Deliveries.first("SELECT updated_at FROM pull_requests", [])
+	expect edited == Ok(Some("{\"updated_at\":\"2026-11-05T08:20:00.000Z\"}"))
+	let kept <- Deliveries.first("SELECT merge_commit_sha FROM pull_requests", [])
+	expect kept == Ok(Some("{\"merge_commit_sha\":\"5c1ea97f111ced1e27160467b9268efeedf216a7\"}"))
+}

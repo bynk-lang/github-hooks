@@ -20,7 +20,7 @@ It is two things at once:
 | 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
 | 2 | Read API over recorded activity, daily digest, retention | read API and digest live ([docs](docs/read-api.md)); retention hourly, 90 days ([#6](https://github.com/bynk-lang/github-hooks/issues/6)) |
 | 3 | Act on events through the App's installation token | welcoming first-time contributors, live on `bynk-lang/bynk` ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
-| 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/`, updated live over WebSocket, with recent runs and daily trends; PR flow facts recorded and synced daily, a public PR flow API, and the PR flow page at `/prs`, live ([#26](https://github.com/bynk-lang/github-hooks/issues/26), [docs](docs/pr-flow.md)) |
+| 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/`, updated live over WebSocket, with recent runs and daily trends; PR flow facts recorded and synced daily, a public PR flow API, and the PR flow page at `/prs`, live ([#26](https://github.com/bynk-lang/github-hooks/issues/26), [docs](docs/pr-flow.md)); release facts recorded and matched to the pull requests they shipped ([#36](https://github.com/bynk-lang/github-hooks/issues/36), [docs](docs/releases.md)) |
 
 ## How it works
 
@@ -163,6 +163,7 @@ src/github/app.bynk      commons github.app: the App's JWT and GitHub API shapes
 src/github/welcome.bynk  commons github.welcome: who is welcomed, and with what
 src/github/runs.bynk     commons github.runs: a workflow_run delivery as a workflow_runs row
 src/github/pulls.bynk    commons github.pulls: pull_request and review deliveries as pull_requests and review rows
+src/github/releases.bynk commons github.releases: release deliveries, and which pull requests a release shipped
 src/github/metrics.bynk  commons github.metrics: the CI metrics API's query and answer types
 src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, KV, AppAuth, Bot, Facts, routes)
 embeds/welcome.md        the welcome comment's text
@@ -180,6 +181,7 @@ docs/github-app.md       registering and installing the GitHub App
 docs/read-api.md         the read API: tokens, routes, what the digest counts
 docs/ci-metrics.md       the public CI metrics: routes, definitions, settings
 docs/pr-flow.md          the PR flow: facts, the daily open-PR sync, routes
+docs/releases.md         releases: facts, and matching a release to the pull requests it shipped
 ```
 
 ## The Bynk canary

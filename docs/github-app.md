@@ -79,6 +79,10 @@ Then tick the events you want under **Subscribe to events**. Every App receives
 `installation` and `installation_repositories` without subscribing, and GitHub
 sends a `ping` when the webhook is created.
 
+The dashboard reads `workflow_run` (CI health), `pull_request` and
+`pull_request_review` (PR flow), `release` (releases) and `repository` (a
+repository made private is hidden at once), so tick at least those.
+
 Phase 3 will need some of these raised to **Read and write** (Issues and Pull
 requests, for comments and labels). Changing an App's permissions asks an
 organisation owner to approve the change on the installation; nothing else has

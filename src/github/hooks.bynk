@@ -7,6 +7,7 @@ uses github.welcome
 uses github.runs
 uses github.metrics
 uses github.pulls
+uses github.releases
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
@@ -184,6 +185,19 @@ capability GitHubApi {
 	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]]
 	--- One pull request, whatever its state.
 	fn pull(installation: Int, repo: String, number: Int) -> Effect[Result[PullPayload, ApiFailure]]
+	--- One page of a repository's releases, newest first, `RELEASE_PAGE` to a page.
+	fn releases(
+		installation: Int,
+		repo: String,
+		page: Int
+	) -> Effect[Result[List[ReleasePayload], ApiFailure]]
+	--- The commits from `base` to `head`, oldest first (at most `MAX_COMPARE_PAGES` pages).
+	fn compare(
+		installation: Int,
+		repo: String,
+		base: String,
+		head: String
+	) -> Effect[Result[Comparison, ApiFailure]]
 }
 
 provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
@@ -213,6 +227,39 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 				message: "\(repo)#\(number) did not decode: \(e.kind) at \(e.path)",
 			})),
 		}
+	}
+
+	fn releases(
+		installation: Int,
+		repo: String,
+		page: Int
+	) -> Effect[Result[List[ReleasePayload], ApiFailure]] {
+		let url = "https://api.github.com/repos/\(repo)/releases?per_page=\(RELEASE_PAGE)&page=\(page)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused \(repo)'s releases: \(refusal(res.status, res.body))",
+			}))
+		}
+		match Json.decode[List[ReleasePayload]](res.body) {
+			Ok(listed) => Effect.pure(Ok(listed)),
+			Err(e) => Effect.pure(Err(ApiFailure {
+				status: None,
+				message: "\(repo)'s releases did not decode: \(e.kind) at \(e.path)",
+			})),
+		}
+	}
+
+	fn compare(
+		installation: Int,
+		repo: String,
+		base: String,
+		head: String
+	) -> Effect[Result[Comparison, ApiFailure]] {
+		compareFrom(installation, repo, base, head, 1, [])
 	}
 
 	fn comment(
@@ -262,6 +309,53 @@ fn openPullsFrom(
 	}
 }
 
+// One page of a comparison's commits after another, until every commit GitHub
+// counted has been read, or `MAX_COMPARE_PAGES` have been.
+fn compareFrom(
+	installation: Int,
+	repo: String,
+	base: String,
+	head: String,
+	page: Int,
+	sofar: List[ComparedCommit]
+) -> Effect[Result[Comparison, ApiFailure]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/compare/\(base)...\(head)?per_page=\(COMPARE_PAGE)&page=\(page)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err(ApiFailure {
+			status: Some(res.status),
+			message: "GitHub refused to compare \(repo) \(base)...\(head): \(refusal(res.status, res.body))",
+		}))
+	}
+	let Ok(c) = Json.decode[Comparison](res.body) else match {
+		Err(e) => Effect.pure(Err(ApiFailure {
+			status: None,
+			message: "\(repo) \(base)...\(head) did not decode: \(e.kind) at \(e.path)",
+		})),
+	}
+	let all = sofar.concat(c.commits)
+	if c.commits.length() < COMPARE_PAGE
+		|| all.length() >= c.total_commits
+		|| page >= MAX_COMPARE_PAGES {
+		Effect.pure(Ok(Comparison { total_commits: c.total_commits, commits: all }))
+	} else {
+		compareFrom(installation, repo, base, head, page + 1, all)
+	}
+}
+
+// The release before a new one is looked for 30 releases a page, up to 90 (a
+// run of pre-releases can push it off the first page). A comparison is read
+// 100 commits a page, up to 500: `bynk` ships about 30 between releases.
+const RELEASE_PAGE: Int = 30
+
+const MAX_RELEASE_PAGES: Int = 3
+
+const COMPARE_PAGE: Int = 100
+
+const MAX_COMPARE_PAGES: Int = 5
+
 // One call to GitHub as the App's installation, given the token. An
 // installation token carries the permissions the installation had when it was
 // minted, so a 401 or 403 may only mean the cached one predates a change
@@ -306,22 +400,21 @@ answered: whether its repository is public (from any delivery that says); for
 a `workflow_run`, one `workflow_runs` row per run attempt (#20); for a
 `pull_request`, its `pull_requests` row and, for the moments the row can't
 hold, a `pull_request_events` row; for a `pull_request_review`, its
-`pull_request_reviews` row (#26). A redelivery records the same facts again,
-which changes nothing.
+`pull_request_reviews` row (#26); for a `release`, its `releases` row and,
+once a final release is published, which pull requests it shipped (#36). A
+redelivery records the same facts again, which changes nothing.
 ---
 capability Facts {
 	--- `fresh` when this is the delivery's first arrival, not a redelivery.
 	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()]
 }
 
-provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock {
+provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock, GitHubApi {
 	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()] {
 		let _ <- recordVisibility(body)
 		let _ <- if d.event == "pull_request_review" {
 			recordReview(d, body)
-		} else {
-			Effect.pure(())
-		}
+		} else if d.event == "release" { recordRelease(d, body) } else { Effect.pure(()) }
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
@@ -496,8 +589,8 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 			sql: """
 				INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
 				                           opened_at, ready_at, closed_at, merged_at, commits, additions, deletions,
-				                           changed_files, updated_at)
-				VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+				                           changed_files, updated_at, merge_commit_sha)
+				VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
 				ON CONFLICT (repo, number) DO UPDATE SET
 				  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
 				  base = excluded.base, head = excluded.head, draft = excluded.draft, state = excluded.state,
@@ -506,6 +599,7 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 				  additions = coalesce(excluded.additions, pull_requests.additions),
 				  deletions = coalesce(excluded.deletions, pull_requests.deletions),
 				  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
+				  merge_commit_sha = coalesce(excluded.merge_commit_sha, pull_requests.merge_commit_sha),
 				  updated_at = excluded.updated_at
 				WHERE excluded.updated_at > pull_requests.updated_at
 				   OR (excluded.updated_at = pull_requests.updated_at
@@ -530,6 +624,7 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 				integer(p.deletions),
 				integer(p.changedFiles),
 				Text(p.updatedAt),
+				text(p.mergeCommitSha),
 			],
 		},
 		SqlStatement {
@@ -540,6 +635,151 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 			params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
 		},
 	]
+}
+
+// Records a release (#36). A `deleted` delivery marks the row deleted (kept,
+// so lead times don't shift, but not shown); any other creates or refreshes
+// it, and one that publishes a final release matches what it shipped.
+fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, GitHubApi {
+	let Ok(r) = releaseOf(body) else match {
+		Err(why) => Logger.error("could not read release from \(d.id): \(why)"),
+	}
+	let saved <- if r.action == "deleted" {
+		Deliveries.run(
+			"UPDATE releases SET deleted_at = (SELECT received_at FROM deliveries WHERE id = ?3) WHERE repo = ?1 AND tag = ?2",
+			[Text(r.repo), Text(r.tag), Text(d.id)]
+		)
+	} else {
+		Deliveries.run(
+			"""
+			INSERT INTO releases (repo, tag, release_id, name, draft, prerelease, created_at, published_at, author_is_bot)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+			ON CONFLICT (repo, tag) DO UPDATE SET
+			  release_id = excluded.release_id, name = excluded.name, draft = excluded.draft,
+			  prerelease = excluded.prerelease, created_at = excluded.created_at,
+			  published_at = excluded.published_at, author_is_bot = excluded.author_is_bot, deleted_at = NULL
+			""",
+			[
+				Text(r.repo),
+				Text(r.tag),
+				Integer(r.releaseId),
+				text(r.name),
+				Boolean(r.draft),
+				Boolean(r.prerelease),
+				Text(r.createdAt),
+				text(r.publishedAt),
+				Boolean(r.authorIsBot),
+			]
+		)
+	}
+	let Ok(_) = saved else match {
+		Err(e) => Logger.error("could not record release \(r.repo) \(r.tag): \(sqlError(e))"),
+	}
+	// GitHub sends `released` for a final release as it is published (alongside
+	// `published`) and for a pre-release made final, so matching on it alone
+	// matches each final release once.
+	let true = r.action == "released" && isFinal(r) else { Effect.pure(()) }
+	let Some(installation) = d.installation else {
+		Logger.warn(
+			"cannot match \(r.repo) \(r.tag) to pull requests: \(d.id) names no installation"
+		)
+	}
+	let Ok(_) <- shipRelease(installation, r) else match {
+		Err(why) => Logger.error("could not match \(r.repo) \(r.tag) to pull requests: \(why)"),
+	}
+	Effect.pure(())
+}
+
+// Matches a final release to the pull requests it shipped: the commits
+// between the previous final release's tag and its own, each matched to a
+// merged PR by merge commit or, for a PR recorded before its merge commit
+// was, by the number its commit names. A PR keeps the first release that
+// shipped it. A repository's first release has nothing to compare against,
+// so `shipped` stays unknown.
+fn shipRelease(
+	installation: Int,
+	r: ReleaseFact
+) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+	let Ok(found) <- previousRelease(installation, r, 1, []) else match {
+		Err(f) => Effect.pure(Err(f.message)),
+	}
+	let Some(previous) = found.tag else {
+		let _ <- if found.complete {
+			Logger.info("\(r.repo) \(r.tag) is its first release: nothing to compare it with")
+		} else {
+			Logger.warn(
+				"\(r.repo) \(r.tag): no earlier final release among its latest \(found.searched) releases; its pull requests are left unknown"
+			)
+		}
+		Effect.pure(Ok(()))
+	}
+	let Ok(c) <- GitHubApi.compare(installation, r.repo, previous, r.tag) else match {
+		Err(f) => Effect.pure(Err(f.message)),
+	}
+	let _ <- if c.commits.length() < c.total_commits {
+		Logger.warn(
+			"\(r.repo) \(previous)...\(r.tag) has \(c.total_commits) commits; only the first \(c.commits.length()) were matched"
+		)
+	} else {
+		Effect.pure(())
+	}
+	let shipped = shippedBy(c.commits)
+	let Ok(_) <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: """
+					UPDATE pull_requests SET released_in = ?2, released_at = ?3
+					WHERE repo = ?1 AND state = 'merged'
+					  AND (released_in IS NULL OR released_at > ?3)
+					  AND (merge_commit_sha IN (SELECT value FROM json_each(?4))
+					       OR (merge_commit_sha IS NULL AND number IN (SELECT value FROM json_each(?5))))
+				""",
+				params: [
+					Text(r.repo),
+					Text(r.tag),
+					text(r.publishedAt),
+					Text(Json.encode(shipped.shas)),
+					Text(Json.encode(shipped.numbers)),
+				],
+			},
+			SqlStatement {
+				sql: """
+					UPDATE releases
+					SET previous_tag = ?3,
+					    shipped = (SELECT count(*) FROM pull_requests WHERE repo = ?1 AND released_in = ?2)
+					WHERE repo = ?1 AND tag = ?2
+				""",
+				params: [Text(r.repo), Text(r.tag), Text(previous)],
+			},
+		]
+	) else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	Effect.pure(Ok(()))
+}
+
+// The final release before `r`, looked for a page of releases at a time. A
+// short page means every release has been seen, so finding none there means
+// `r` is the repository's first; reaching `MAX_RELEASE_PAGES` without one
+// leaves it unknown.
+fn previousRelease(
+	installation: Int,
+	r: ReleaseFact,
+	page: Int,
+	sofar: List[ReleasePayload]
+) -> Effect[Result[PreviousRelease, ApiFailure]] given GitHubApi {
+	let Ok(listed) <- GitHubApi.releases(installation, r.repo, page) else match {
+		Err(f) => Effect.pure(Err(f)),
+	}
+	let seen = sofar.concat(listed)
+	let found = previousFinal(r, seen)
+	if found.isSome() || listed.length() < RELEASE_PAGE {
+		Effect.pure(Ok(PreviousRelease { tag: found, searched: seen.length(), complete: true }))
+	} else if page >= MAX_RELEASE_PAGES {
+		Effect.pure(Ok(PreviousRelease { tag: None, searched: seen.length(), complete: false }))
+	} else {
+		previousRelease(installation, r, page + 1, seen)
+	}
 }
 
 // Records a review (#26): submitted, edited or dismissed. Review payloads

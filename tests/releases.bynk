@@ -1,0 +1,269 @@
+// Phase 4, slice 3, step 1 (#36): `release` deliveries become `releases`
+// rows, through the webhook, against an in-memory D1 with the migrations
+// applied, and a published final release is matched to the pull requests it
+// shipped. GitHub is stubbed at the wire (`AppAuth`, `GitHubHttp`) with
+// recorded responses: `bynk`'s v0.510.2 as released, its releases list, and
+// the comparison from v0.508.4 (30 commits, 17 of them PRs; trimmed to each
+// commit's SHA and first line).
+suite github.hooks
+
+fixture released = "fixtures/github/release.released.json"
+
+fixture listing = "fixtures/github/releases.list.json"
+
+fixture compared = "fixtures/github/compare.json"
+
+--- A delivery's headers.
+fn headers(event: String, id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: \(event)", "X-GitHub-Delivery: \(id)"])
+}
+
+--- A response from GitHub.
+fn ok(body: String) -> Result[Response, String] {
+	Ok(Response { status: 200, headers: Map.empty(), body: body })
+}
+
+---
+Pull requests around v0.510.2, which shipped the commits of #2776, #2941,
+#2942 and #2943 among others:
+- #2776 merged, with its merge commit: shipped by v0.510.2.
+- #2941 merged before merge commits were recorded: shipped, by the number
+  its commit names.
+- #2942 merged, already shipped by v0.508.4: it keeps the earlier release.
+- #2900 merged, but its commit isn't in the comparison: not shipped.
+- #2943 still open in this table: never matched, whatever its number.
+- #2948 in another repository: untouched.
+---
+fn pulls() -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+			                           opened_at, merged_at, updated_at, merge_commit_sha, released_in, released_at)
+			VALUES
+			  ('bynk-lang/bynk', 2776, 'A', 'a-contributor', 0, 'main', 'a', 0, 'merged', '2026-11-05T09:00:00.000Z',
+			   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '703b659d9385bfa1589b3aeff9837afb441db0a4', NULL, NULL),
+			  ('bynk-lang/bynk', 2941, 'B', 'a-contributor', 0, 'main', 'b', 0, 'merged', '2026-11-05T09:00:00.000Z',
+			   '2026-11-05T10:05:00.000Z', '2026-11-05T10:05:00.000Z', NULL, NULL, NULL),
+			  ('bynk-lang/bynk', 2942, 'D', 'a-contributor', 0, 'main', 'd', 0, 'merged', '2026-11-04T09:00:00.000Z',
+			   '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '103e6bbcdeae684212f7aac5f963b47edb03ce5d',
+			   'v0.508.4', '2026-11-04T21:16:39.000Z'),
+			  ('bynk-lang/bynk', 2900, 'C', 'a-contributor', 0, 'main', 'c', 0, 'merged', '2026-11-05T09:00:00.000Z',
+			   '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z', 'ffffffffffffffffffffffffffffffffffffffff', NULL, NULL),
+			  ('bynk-lang/bynk', 2943, 'E', 'a-contributor', 0, 'main', 'e', 0, 'open', '2026-11-05T09:00:00.000Z',
+			   NULL, '2026-11-05T11:00:00.000Z', NULL, NULL, NULL),
+			  ('bynk-lang/other', 2948, 'F', 'a-contributor', 0, 'main', 'f', 0, 'merged', '2026-11-05T09:00:00.000Z',
+			   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', NULL, NULL, NULL)
+		""",
+		params: [],
+	}
+}
+
+--- Each pull request as `repo#number:released_in`, in order.
+fn releasedIn() -> String {
+	"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)"
+}
+
+--- Each pull request untouched by a release.
+fn untouched() -> String {
+	"{\"rows\":\"bynk-lang/bynk#2776:-:- bynk-lang/bynk#2900:-:- bynk-lang/bynk#2941:-:- bynk-lang/bynk#2942:v0.508.4:2026-11-04T21:16:39.000Z bynk-lang/bynk#2943:-:- bynk-lang/other#2948:-:-\"}"
+}
+
+case "a published release is recorded and matched to the pull requests it shipped" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared)]
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let r <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	expect r is Accepted(_)
+	expect AppAuth.token called with installation == 42
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/releases?per_page=30&page=1"
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/compare/v0.508.4...v0.510.2?per_page=100&page=1"
+	let row <- Deliveries.first(
+		"""
+		SELECT repo, tag, release_id, name, draft, prerelease, created_at, published_at, author_is_bot,
+		       previous_tag, shipped, deleted_at
+		FROM releases
+		""",
+		[]
+	)
+	expect row == Ok(Some("{\"repo\":\"bynk-lang/bynk\",\"tag\":\"v0.510.2\",\"release_id\":435386663,\"name\":\"v0.510.2\",\"draft\":0,\"prerelease\":0,\"created_at\":\"2026-11-05T13:53:38.000Z\",\"published_at\":\"2026-11-05T15:33:58.000Z\",\"author_is_bot\":1,\"previous_tag\":\"v0.508.4\",\"shipped\":2,\"deleted_at\":null}"))
+	let rows <- Deliveries.first(releasedIn(), [])
+	expect rows == Ok(Some("{\"rows\":\"bynk-lang/bynk#2776:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2900:-:- bynk-lang/bynk#2941:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2942:v0.508.4:2026-11-04T21:16:39.000Z bynk-lang/bynk#2943:-:- bynk-lang/other#2948:-:-\"}"))
+	expect Logger.error never called
+}
+
+case "a redelivery of the release matches the same pull requests again, and nothing more" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared), ok(listing), ok(compared)]
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	let shipped <- Deliveries.first("SELECT shipped FROM releases", [])
+	expect shipped == Ok(Some("{\"shipped\":2}"))
+}
+
+case "a pre-release is recorded, but ships nothing and asks GitHub nothing" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing)
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/github",
+		headers("release", "rel-pre"),
+		Bytes.fromUtf8(released.replace("\"prerelease\": false", "\"prerelease\": true"))
+	) by GitHub
+	expect r is Accepted(_)
+	expect GitHubHttp.get never called
+	let row <- Deliveries.first("SELECT prerelease, previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"prerelease\":1,\"previous_tag\":null,\"shipped\":null}"))
+	let rows <- Deliveries.first(releasedIn(), [])
+	expect rows == Ok(Some(untouched()))
+}
+
+case "a draft is recorded unpublished, and ships nothing" {
+	stub GitHubHttp.get(_, _) returns ok(listing)
+	let r <- api.POST(
+		"/github",
+		headers("release", "rel-draft"),
+		Bytes.fromUtf8(released
+			.replace("\"action\": \"released\"", "\"action\": \"created\"")
+			.replace("\"draft\": false", "\"draft\": true")
+			.replace("\"published_at\": \"2026-11-05T15:33:58Z\"", "\"published_at\": null"))
+	) by GitHub
+	expect r is Accepted(_)
+	expect GitHubHttp.get never called
+	let row <- Deliveries.first("SELECT draft, published_at, shipped FROM releases", [])
+	expect row == Ok(Some("{\"draft\":1,\"published_at\":null,\"shipped\":null}"))
+}
+
+case "a deleted release is kept, marked deleted, and restored when published again" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared), ok(listing), ok(compared)]
+	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	let deleted <- api.POST(
+		"/github",
+		headers("release", "rel-deleted"),
+		Bytes.fromUtf8(released.replace("\"action\": \"released\"", "\"action\": \"deleted\""))
+	) by GitHub
+	expect deleted is Accepted(_)
+	let gone <- Deliveries.first(
+		"SELECT r.deleted_at = d.received_at AS on_arrival, r.shipped FROM releases r, deliveries d WHERE d.id = 'rel-deleted'",
+		[]
+	)
+	expect gone == Ok(Some("{\"on_arrival\":1,\"shipped\":0}"))
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-again"),
+		Bytes.fromUtf8(released)
+	) by GitHub
+	let back <- Deliveries.first("SELECT deleted_at FROM releases", [])
+	expect back == Ok(Some("{\"deleted_at\":null}"))
+}
+
+case "a repository's first release has nothing to compare, and ships nothing countable" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok("[]")
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let r <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	expect r is Accepted(_)
+	expect GitHubHttp.get called once
+	expect Logger.info called with msg == "bynk-lang/bynk v0.510.2 is its first release: nothing to compare it with"
+	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
+	let rows <- Deliveries.first(releasedIn(), [])
+	expect rows == Ok(Some(untouched()))
+}
+
+case "a comparison GitHub refuses is logged, and leaves the release's PRs unknown" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })]
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let r <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	expect r is Accepted(_)
+	expect Logger.error called once with msg == "could not match bynk-lang/bynk v0.510.2 to pull requests: GitHub refused to compare bynk-lang/bynk v0.508.4...v0.510.2: 404 Not Found"
+	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
+	let rows <- Deliveries.first(releasedIn(), [])
+	expect rows == Ok(Some(untouched()))
+}
+
+case "a release delivery with no installation is recorded, and its PRs left unknown" {
+	stub GitHubHttp.get(_, _) returns ok(listing)
+	let r <- api.POST(
+		"/github",
+		headers("release", "rel-1"),
+		Bytes.fromUtf8(released.replace(
+			"\"installation\": {\n    \"id\": 42\n  }",
+			"\"installation\": null"
+		))
+	) by GitHub
+	expect r is Accepted(_)
+	expect GitHubHttp.get never called
+	expect Logger.warn called once with msg == "cannot match bynk-lang/bynk v0.510.2 to pull requests: rel-1 names no installation"
+	let row <- Deliveries.first("SELECT tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"tag\":\"v0.510.2\",\"shipped\":null}"))
+}
+
+case "a published delivery records the release; only released matches it, so it's matched once" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing)
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/github",
+		headers("release", "rel-published"),
+		Bytes.fromUtf8(released.replace("\"action\": \"released\"", "\"action\": \"published\""))
+	) by GitHub
+	expect r is Accepted(_)
+	expect GitHubHttp.get never called
+	let row <- Deliveries.first("SELECT tag, published_at, shipped FROM releases", [])
+	expect row == Ok(Some("{\"tag\":\"v0.510.2\",\"published_at\":\"2026-11-05T15:33:58.000Z\",\"shipped\":null}"))
+}
+
+---
+A full page of `n` pre-releases published before v0.510.2, as GitHub lists
+them: the kind of run that pushes the previous final release off a page.
+---
+fn prereleases(n: Int) -> List[ReleasePayload] {
+	let one = [
+		ReleasePayload {
+			id: n,
+			tag_name: "v0.510.2-rc\(n)",
+			name: None,
+			draft: false,
+			prerelease: true,
+			created_at: "2026-11-05T12:00:00Z",
+			published_at: Some("2026-11-05T12:00:00Z"),
+			author: None,
+		},
+	]
+	if n <= 1 { one } else { one.concat(prereleases(n - 1)) }
+}
+
+case "the previous release on a later page is found" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(Json.encode(prereleases(30))), ok(listing), ok(compared)]
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/releases?per_page=30&page=2"
+	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":2}"))
+}
+
+case "no final release within the pages read is a warning, not a first release" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(Json.encode(prereleases(30)))
+	let seeded <- Deliveries.batch([pulls()])
+	expect seeded is Ok(_)
+	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	expect GitHubHttp.get called 3 times
+	expect Logger.warn called once with msg == "bynk-lang/bynk v0.510.2: no earlier final release among its latest 90 releases; its pull requests are left unknown"
+	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
+	let rows <- Deliveries.first(releasedIn(), [])
+	expect rows == Ok(Some(untouched()))
+}

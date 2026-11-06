@@ -43,6 +43,15 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 3, step 1 (#36): release facts. `release` deliveries become
+  `releases` rows (migration `0009`), one per repository and tag, kept when
+  deleted. When a final release is published (its `released`
+  delivery), the Worker finds the previous final release (up to 90 back),
+  compares its tag with this one's, and marks each merged pull request whose merge commit is among those
+  commits (or whose number a commit's first line names) with the release that
+  first shipped it (`released_in`, `released_at`). `pull_requests` gains
+  `merge_commit_sha`, recorded once a PR has merged. The App must be
+  subscribed to **Release** events. See [docs/releases.md](docs/releases.md).
 - The public metrics routes are now really cached at Cloudflare's edge.
   `@cache` alone only sends `Cache-Control`; Cloudflare doesn't store a
   response a Worker generates, so every request ran the Worker and read D1

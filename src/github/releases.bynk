@@ -1,0 +1,179 @@
+commons github.releases
+
+uses github.events
+uses github.runs
+uses github.pulls
+
+---
+The parts of a `release` delivery the releases dashboard needs (#36).
+---
+type ReleaseDelivery = {
+	action: String,
+	release: ReleasePayload,
+	repository: RepoRef,
+}
+
+---
+A release as GitHub sends it, in a delivery or from the REST API.
+`published_at` is null while it is a draft; `author` is null for a deleted
+account.
+---
+type ReleasePayload = {
+	id: Int,
+	tag_name: String,
+	name: Option[String],
+	draft: Bool,
+	prerelease: Bool,
+	created_at: String,
+	published_at: Option[String],
+	author: Option[UserRef],
+}
+
+---
+One release, as `releases` stores it. A final release is published and
+neither a draft nor a pre-release: only those ship pull requests.
+---
+type ReleaseFact = {
+	repo: String,
+	action: String,
+	releaseId: Int,
+	tag: String,
+	name: Option[String],
+	draft: Bool,
+	prerelease: Bool,
+	createdAt: String,
+	publishedAt: Option[String],
+	authorIsBot: Bool,
+}
+
+---
+The release a `release` delivery describes, or why it couldn't be read.
+---
+fn releaseOf(body: Bytes) -> Result[ReleaseFact, String] {
+	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
+	let Ok(d) = Json.decode[ReleaseDelivery](text) else match {
+		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	releaseFact(d.repository.full_name, d.action, d.release)
+}
+
+---
+A release as `releases` stores it, from GitHub's release object: a
+delivery's, or one from the REST API (`action` is then `sync`).
+---
+fn releaseFact(repo: String, action: String, r: ReleasePayload) -> Result[ReleaseFact, String] {
+	let Some(created) = isoTime(r.created_at) else {
+		Err("created_at is not a time: \(r.created_at)")
+	}
+	Ok(ReleaseFact {
+		repo: repo,
+		action: action,
+		releaseId: r.id,
+		tag: r.tag_name,
+		name: r.name,
+		draft: r.draft,
+		prerelease: r.prerelease,
+		createdAt: created,
+		publishedAt: r.published_at.andThen((t) => isoTime(t)),
+		authorIsBot: r.author.map((a) => a.type == "Bot").getOrElse(false),
+	})
+}
+
+--- Whether a release ships pull requests: published, and neither a draft nor a pre-release.
+fn isFinal(r: ReleaseFact) -> Bool {
+	!r.draft && !r.prerelease && r.publishedAt.isSome()
+}
+
+---
+The final release before `r` among a repository's releases as GitHub lists
+them: the other final release published latest before it. The commits between
+its tag and `r`'s are what `r` shipped. `None` for a repository's first.
+---
+fn previousFinal(r: ReleaseFact, listed: List[ReleasePayload]) -> Option[String] {
+	let Some(at) = r.publishedAt else { None }
+	let none: Option[ReleaseAt] = None
+	let latest = listed
+		.filter((o) => o.tag_name != r.tag && !o.draft && !o.prerelease)
+		.map((o) => ReleaseAt {
+			tag: o.tag_name,
+			at: o.published_at.andThen((t) => isoTime(t)).getOrElse(""),
+		})
+		.filter((o) => o.at != "" && o.at < at)
+		.fold(none, (best, o) => match best {
+			None => Some(o),
+			Some(b) => if o.at > b.at { Some(o) } else { best },
+		})
+	latest.map((o) => o.tag)
+}
+
+---
+The release before a new one, as far as the pages read show: `complete` when
+every release was seen, so `tag` being `None` means there is none.
+---
+type PreviousRelease = {
+	tag: Option[String],
+	searched: Int,
+	complete: Bool,
+}
+
+type ReleaseAt = {
+	tag: String,
+	at: String,
+}
+
+---
+The commits between two tags, as GitHub's compare endpoint gives them, oldest
+first. `total_commits` counts them all; one page holds at most 100.
+---
+type Comparison = {
+	total_commits: Int,
+	commits: List[ComparedCommit],
+}
+
+type ComparedCommit = {
+	sha: String,
+	commit: CommitMessage,
+}
+
+type CommitMessage = {
+	message: String,
+}
+
+---
+What a release shipped, to match against `pull_requests`: each commit's SHA
+(a PR's `merge_commit_sha`), and each pull request number a commit names (for
+PRs recorded before their merge commit was).
+---
+type Shipped = {
+	shas: List[String],
+	numbers: List[Int],
+}
+
+fn shippedBy(commits: List[ComparedCommit]) -> Shipped {
+	Shipped {
+		shas: commits.map((c) => c.sha),
+		numbers: commits
+			.map((c) => pullNumberOf(c.commit.message))
+			.filter((n) => n.isSome())
+			.map((n) => n.getOrElse(0)),
+	}
+}
+
+---
+The pull request a commit on the default branch landed, from its first line:
+a squash merge ends `(#123)` (a revert of one, `(#124)` after the quoted
+title), and a merge commit starts `Merge pull request #123 from`. `None` for
+anything else, such as a version stamp.
+---
+fn pullNumberOf(message: String) -> Option[Int] {
+	let first = message.split("\n").get(0).getOrElse("").trim()
+	if first.startsWith("Merge pull request #") {
+		first.split(" ").get(3).andThen((n) => Int.parse(n.slice(1, n.length())))
+	} else if first.endsWith(")") {
+		let parts = first.split("(#")
+		let true = parts.length() > 1 else { None }
+		parts.get(parts.length() - 1).andThen((n) => Int.parse(n.slice(0, n.length() - 1)))
+	} else {
+		None
+	}
+}

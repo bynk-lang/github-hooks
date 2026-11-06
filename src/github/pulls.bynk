@@ -48,6 +48,7 @@ type PullPayload = {
 	updated_at: String,
 	closed_at: Option[String],
 	merged_at: Option[String],
+	merge_commit_sha: Option[String],
 	commits: Option[Int],
 	additions: Option[Int],
 	deletions: Option[Int],
@@ -76,6 +77,7 @@ type PullFact = {
 	readyAt: Option[String],
 	closedAt: Option[String],
 	mergedAt: Option[String],
+	mergeCommitSha: Option[String],
 	commits: Option[Int],
 	additions: Option[Int],
 	deletions: Option[Int],
@@ -115,6 +117,8 @@ fn pullFact(
 	}
 	let merged = pr.merged_at.andThen((t) => isoTime(t))
 	let draft = pr.draft.getOrElse(false)
+	// GitHub also names a test merge for an open PR; only a merged one's commit
+	// is on the base branch, for a release to ship (#36).
 	Ok(PullFact {
 		repo: repo,
 		number: pr.number,
@@ -132,6 +136,7 @@ fn pullFact(
 		} else if action == "ready_for_review" { Some(updated) } else { None },
 		closedAt: pr.closed_at.andThen((t) => isoTime(t)),
 		mergedAt: merged,
+		mergeCommitSha: if merged.isSome() { pr.merge_commit_sha } else { None },
 		commits: pr.commits,
 		additions: pr.additions,
 		deletions: pr.deletions,

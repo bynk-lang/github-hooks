@@ -1,0 +1,73 @@
+{
+  "action": "released",
+  "release": {
+    "url": "https://api.github.com/repos/bynk-lang/bynk/releases/435386663",
+    "assets_url": "https://api.github.com/repos/bynk-lang/bynk/releases/435386663/assets",
+    "upload_url": "https://uploads.github.com/repos/bynk-lang/bynk/releases/435386663/assets{?name,label}",
+    "html_url": "https://github.com/bynk-lang/bynk/releases/tag/v0.510.2",
+    "id": 435386663,
+    "author": {
+      "login": "github-actions[bot]",
+      "id": 41898282,
+      "node_id": "MDM6Qm90NDE4OTgyODI=",
+      "avatar_url": "https://avatars.githubusercontent.com/in/15368?v=4",
+      "html_url": "https://github.com/apps/github-actions",
+      "type": "Bot",
+      "site_admin": false
+    },
+    "node_id": "RE_kwDOSfAttM4Z83kn",
+    "tag_name": "v0.510.2",
+    "target_commitish": "main",
+    "name": "v0.510.2",
+    "draft": false,
+    "immutable": true,
+    "prerelease": false,
+    "created_at": "2026-11-05T13:53:38Z",
+    "updated_at": "2026-11-05T15:33:58Z",
+    "published_at": "2026-11-05T15:33:58Z",
+    "assets": [],
+    "tarball_url": "https://api.github.com/repos/bynk-lang/bynk/tarball/v0.510.2",
+    "zipball_url": "https://api.github.com/repos/bynk-lang/bynk/zipball/v0.510.2",
+    "body": "(release notes cut)",
+    "mentions_count": 1
+  },
+  "repository": {
+    "id": 1240477108,
+    "node_id": "R_kgDOSfAttA",
+    "name": "bynk",
+    "full_name": "bynk-lang/bynk",
+    "private": false,
+    "owner": {
+      "login": "bynk-lang",
+      "id": 295025398,
+      "node_id": "O_kgDOEZW69g",
+      "type": "Organization",
+      "site_admin": false,
+      "html_url": "https://github.com/bynk-lang"
+    },
+    "html_url": "https://github.com/bynk-lang/bynk",
+    "description": "Bynk is a statically typed programming language for building services.",
+    "fork": false,
+    "url": "https://api.github.com/repos/bynk-lang/bynk",
+    "created_at": "2026-05-16T07:13:41Z",
+    "updated_at": "2026-11-06T06:51:01Z",
+    "pushed_at": "2026-11-06T07:00:23Z",
+    "default_branch": "main",
+    "visibility": "public"
+  },
+  "organization": {
+    "login": "bynk-lang"
+  },
+  "sender": {
+    "login": "github-actions[bot]",
+    "id": 41898282,
+    "node_id": "MDM6Qm90NDE4OTgyODI=",
+    "avatar_url": "https://avatars.githubusercontent.com/in/15368?v=4",
+    "html_url": "https://github.com/apps/github-actions",
+    "type": "Bot",
+    "site_admin": false
+  },
+  "installation": {
+    "id": 42
+  }
+}
