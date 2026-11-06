@@ -12,8 +12,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# The Bynk version (and its pinned checksum) lives in
-# .github/actions/setup-bynk/action.yml, so both jobs use the same toolchain.
+# Both jobs use the Bynk release in BYNK_VERSION. The org canary
+# (bynk-canary.yml) runs the same checks against each new Bynk release, and
+# proposes moving BYNK_VERSION once one passes.
 
 jobs:
   test:
@@ -22,32 +23,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-bynk
-      - run: bynk fmt --check .
-      - run: bynk check
-      - run: bynk test
+        with:
+          persist-credentials: false
+      - uses: bynk-lang/bynk-ci@5bb74c76051d513386506c41b9c2bbde5bef91c8 # v1
+        with:
+          version-file: BYNK_VERSION   # the canary proposes moving it
+          source: .
 
+  # No `name:` here, so the check reports as
+  # "smoke / signed deliveries against the local Worker", whichever workflow
+  # calls it: a stable name for a required check.
   smoke:
-    name: signed deliveries against the local Worker
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-bynk
-      - name: Serve the Worker
-        run: |
-          bynk dev -- --var APP_WEBHOOK_SECRET:ci-secret --var API_TOKEN_SECRET:ci-api > dev.log 2>&1 &
-          for _ in $(seq 1 90); do
-            curl -sf -o /dev/null http://localhost:8787/ && exit 0
-            sleep 2
-          done
-          cat dev.log
-          exit 1
-      - run: scripts/smoke.sh http://localhost:8787
-        env:
-          APP_WEBHOOK_SECRET: ci-secret
-          API_TOKEN_SECRET: ci-api
-          SMOKE_LIVE: "1"
-      - name: Worker log
-        if: always()
-        run: cat dev.log
+    uses: ./.github/workflows/smoke.yml

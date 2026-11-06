@@ -2,9 +2,9 @@
 // in-memory D1 with the migrations applied. GitHub is stubbed at the wire
 // (`AppAuth` for the token, `GitHubHttp` for each response), so the real
 // `GitHubApi` decodes GitHub's JSON. The helpers build that JSON as strings
-// rather than `PullPayload` values: on Bynk v0.508.4 a suite helper naming a
-// commons type fails `tsc` once the suite has a stub (bynk-lang/bynk#2947,
-// fixed in v0.510.2).
+// rather than `PullPayload` values: before Bynk v0.510.2 a suite helper naming
+// a commons type fails `tsc` once the suite has a stub (bynk-lang/bynk#2947).
+// Once BYNK_VERSION is v0.510.2 or later, they can build typed values again.
 suite github.hooks
 
 env {

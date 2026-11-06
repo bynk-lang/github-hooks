@@ -1,0 +1,14 @@
+# Keeps the workflows' actions current. Every action is pinned by commit SHA
+# (with its tag in a comment), including the org's own (bynk-ci, setup-bynk and
+# the canary's reusable workflow), so updates arrive as pull requests rather
+# than moving under a tag. The Bynk version itself is BYNK_VERSION, which the
+# org canary moves.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
