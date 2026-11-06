@@ -43,6 +43,17 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 3, step 4 (#36): the releases page at `/releases`, linked to
+  and from `/` and `/prs`. For each repository with a release:
+  - tiles for releases, the time since the last, merge to release, what's
+    waiting to ship, and the release workflow;
+  - a chart of pull requests by people shipped per release;
+  - the latest releases, with earlier ones folded away.
+
+  The live feed carries releases as `kind: "release"`, on a delivery's first
+  arrival, for public repositories, not drafts, and after matching. The page
+  refetches on those, and on pull requests merging. The CI page now acts on
+  `run` events only.
 - Phase 4, slice 3, step 3 (#36): the public releases routes.
   `GET /metrics/releases?days=7|30|90&repo=` gives, for each repository with a
   final release:

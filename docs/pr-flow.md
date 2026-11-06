@@ -196,4 +196,5 @@ and its state as `conclusion`:
 It is sent for a delivery's first arrival only (a redelivery tells nothing
 new), and only for a repository the public pages may show. Each page acts on
 its own kind: the CI page ignores `pull` events, and this page ignores `run`
-events.
+and `release` events. The releases page also acts on a `pull` event whose
+pull request merged, since that changes what is waiting to ship.

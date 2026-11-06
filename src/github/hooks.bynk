@@ -44,6 +44,11 @@ embed prsTemplate = "embeds/prs.html"
 
 asset prsJs = "assets/prs.js"
 
+--- The releases page (#36, step 4): its template and script, with the same stylesheet.
+embed releasesTemplate = "embeds/releases.html"
+
+asset releasesJs = "assets/releases.js"
+
 ---
 The public metrics routes' per-address limit: 60 uncached requests a minute
 is ample for a page polling every 30 seconds, and bounds what anyone can make
@@ -414,14 +419,14 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 		let _ <- recordVisibility(body)
 		let _ <- if d.event == "pull_request_review" {
 			recordReview(d, body)
-		} else if d.event == "release" {
-			recordRelease(d, body)
 		} else if d.event == "push" { recordTag(d, body) } else { Effect.pure(()) }
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
 		} else if d.event == "pull_request" {
 			recordPull(d, body, fresh)
+		} else if d.event == "release" {
+			releaseChanged(d, body, fresh)
 		} else {
 			Effect.pure(nothing)
 		}
@@ -691,6 +696,25 @@ fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logge
 		Err(why) => Logger.error("could not match \(r.repo) \(r.tag) to pull requests: \(why)"),
 	}
 	Effect.pure(())
+}
+
+// Records a release, then says whether open pages should hear of it: on the
+// delivery's first arrival only, not for a draft (which isn't shown), and only
+// for a repository the public pages may show. It is told after any matching,
+// so a refetch sees what the release shipped.
+fn releaseChanged(
+	d: Delivery,
+	body: Bytes,
+	fresh: Bool
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets, GitHubApi {
+	let nothing: Option[LiveEvent] = None
+	let _ <- recordRelease(d, body)
+	let true = fresh else { Effect.pure(nothing) }
+	let Ok(r) = releaseOf(body) else { Effect.pure(nothing) }
+	let true = !r.draft else { Effect.pure(nothing) }
+	let shown <- shownLive(r.repo)
+	let true = shown else { Effect.pure(nothing) }
+	Effect.pure(Some(releaseEventOf(r)))
 }
 
 // Matches a final release a delivery published: finds the final release
@@ -1276,6 +1300,14 @@ service api from http {
 	// this deploy's assets.
 	on GET("/prs") () -> Effect[HttpResult[String]] by v: Visitor {
 		let page = prsTemplate.replace("{css}", dashboardCss.url).replace("{js}", prsJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The releases page. Not `@cache`d, for the same reason as `/`.
+	on GET("/releases") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = releasesTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", releasesJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 

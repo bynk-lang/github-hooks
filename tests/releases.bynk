@@ -330,3 +330,37 @@ case "only the release's own repository says when its recording began" {
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":null}"))
 }
+
+case "a public release is pushed to open pages, as a release, once its pull requests are matched" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared)]
+	stub Edge.purge(_) returns true
+	let _ <- api.POST("/github", headers("release", "rel-live"), Bytes.fromUtf8(released)) by GitHub
+	expect LiveFeed.publish called once with e == LiveEvent { refetch_ms: 3000, kind: "release", repo: "bynk-lang/bynk", number: 0, path: "", workflow: "", run_id: 0, attempt: 0, status: "released", conclusion: "v0.510.2" }
+}
+
+case "a release's redelivery pushes nothing more" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared), ok(listing), ok(compared)]
+	let _ <- api.POST("/github", headers("release", "rel-live"), Bytes.fromUtf8(released)) by GitHub
+	let _ <- api.POST("/github", headers("release", "rel-live"), Bytes.fromUtf8(released)) by GitHub
+	expect LiveFeed.publish called once
+}
+
+case "a draft, or a private repository's release, is never pushed" {
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-draft-live"),
+		Bytes.fromUtf8(released
+			.replace("\"action\": \"released\"", "\"action\": \"created\"")
+			.replace("\"draft\": false", "\"draft\": true"))
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("release", "rel-private-live"),
+		Bytes.fromUtf8(released
+			.replace("\"action\": \"released\"", "\"action\": \"prereleased\"")
+			.replace("\"private\": false", "\"private\": true"))
+	) by GitHub
+	expect LiveFeed.publish never called
+}

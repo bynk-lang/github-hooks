@@ -182,9 +182,10 @@ an event whenever a public run's facts change:
  "status": "completed", "conclusion": "success"}
 ```
 
-`conclusion` is `""` until the run completes. Pull requests share the feed as
-`kind: "pull"` events ([pr-flow.md](pr-flow.md#live-feed)), which this page
-ignores.
+`conclusion` is `""` until the run completes. Pull requests and releases share
+the feed as `kind: "pull"` and `kind: "release"` events
+([pr-flow.md](pr-flow.md#live-feed), [releases.md](releases.md#live-feed)),
+which this page ignores.
 
 **Purging, and when to refetch.** Before an event is sent, the Worker purges
 `/metrics/` from the edge cache, so a refetch shortly after sees the change.

@@ -629,7 +629,7 @@
       } catch {
         // unreadable: assume the worst and refetch it all, after the longest wait
       }
-      if (e && e.kind === "pull") return; // pull requests are the PR flow page's
+      if (e && e.kind && e.kind !== "run") return; // pull requests and releases are the other pages'
       if (!e || e.status === "completed") completedSince = true;
       onLiveEvent(e ? e.refetch_ms : undefined, () => {
         refreshNow();
