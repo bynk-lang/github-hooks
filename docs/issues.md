@@ -300,8 +300,28 @@ action as `status`, and the issue's state as `conclusion`:
  "workflow": "", "run_id": 0, "attempt": 0, "status": "closed", "conclusion": "closed"}
 ```
 
+**When it's sent:** only for an action that changes what the issues page
+shows.
+- **Issues:** opened, edited (the title), closed, reopened, labelled,
+  unlabelled, deleted or transferred.
+- **Comments:** a new comment, which makes an issue no longer quiet.
+- **Not sent:** assignments, milestones, pins, locks and comment edits. These
+  change nothing the page shows.
+
 It's sent on the delivery's first arrival only, and only for a repository the
-public pages may show. The issues page acts on `issue` events and the others
-ignore them. The refetch timing (`refetch_ms`, the purge and its follow-up)
-is the PR page's ([pr-flow.md](pr-flow.md#live-feed)).
+public pages may show. The issues page acts on `issue` events, and the others
+ignore them.
+
+**Purging:**
+- **Prefix:** unlike the other kinds, an issue event purges only
+  `/metrics/issues`. So a burst of comments doesn't empty the CI, PR and
+  release routes' cache.
+- **Throttle:** it has its own slot (`edge_purge_slots`, migration `0015`), so
+  it never spends the slot runs, pull requests and releases share.
+- **Rate:** that slot allows one purge a minute (`ISSUE_PURGE_GAP`). With the
+  shared slot's 4, that keeps the Worker within Cloudflare's 5 a minute. An
+  issue event inside the minute is told to wait for the cache to expire.
+
+Otherwise the refetch timing (`refetch_ms`, the purge and its follow-up) is
+the PR page's ([pr-flow.md](pr-flow.md#live-feed)).
 

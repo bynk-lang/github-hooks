@@ -233,6 +233,23 @@ fn repoOfIssue(i: IssuePayload) -> Option[String] {
 }
 
 ---
+Whether an `issues` or `issue_comment` delivery's action changes what the
+issues page shows, so open pages are told: an issue opened, edited (its
+title), closed, reopened, relabelled, deleted or transferred, or a new comment
+(which makes it no longer quiet). Assignments, milestones, pins, locks and
+comment edits change nothing it shows.
+---
+fn showsOnPage(event: String, action: String) -> Bool {
+	if event == "issue_comment" {
+		action == "created"
+	} else {
+		["opened", "edited", "closed", "reopened", "labeled", "unlabeled", "deleted", "transferred"].any(
+			(a) => a == action
+		)
+	}
+}
+
+---
 The live-feed event for an issue that changed: `status` is the delivery's
 action and `conclusion` the issue's state; the run fields are empty.
 ---

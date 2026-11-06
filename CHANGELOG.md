@@ -52,7 +52,11 @@ All notable changes to github-hooks. The format follows
   - **Outsiders:** figures on issues from outside the org appear only once
     there are any.
   - **Live:** the page updates over the live feed, which now sends a
-    `kind: "issue"` event for each public issue delivery.
+    `kind: "issue"` event for each public issue delivery that changes what
+    the page shows.
+  - **Purging:** an issue event purges only `/metrics/issues`, on its own
+    one-a-minute slot (migration `0015`). So issue traffic never empties the
+    other routes' cache or delays their updates.
 - Phase 4, slice 5, step 3 (#48): the issue-response routes.
   - **`GET /metrics/issues`:** over 7, 30 or 90 days, each public
     repository's issues opened, and closed as completed, not planned or

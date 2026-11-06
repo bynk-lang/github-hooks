@@ -194,7 +194,9 @@ Cloudflare allows a Worker 5 purges a minute, so a purge first claims a row in
 D1 (`edge_purges`, migration `0008`) that allows one per 15 seconds across
 every isolate. `refetch_ms` tells the page how long to wait: 3 seconds when the
 purge went through, or 31 seconds (until any copy cached before the change has
-expired) when it was throttled or Cloudflare refused it.
+expired) when it was throttled or Cloudflare refused it. Issue events are the
+exception: they purge only `/metrics/issues`, on their own slot
+([issues.md](issues.md#live-feed)).
 
 The page treats an event as a nudge: after `refetch_ms` it refetches
 `/metrics/ci/now`, and `/metrics/ci` and `/metrics/ci/history` too if any run
