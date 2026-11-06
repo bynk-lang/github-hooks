@@ -373,7 +373,9 @@
 
   // This workflow's jobs among the repository's slowest (#42): the figures
   // keep each repository's 10 slowest jobs by median, with at least 3
-  // successful runs in the window, matched to the workflow by its name.
+  // successful runs in the window, matched to the workflow by its name (jobs
+  // don't carry the workflow's path), so two workflows of the same name in a
+  // repository share them.
   function slowestJobs(repoName, workflowName) {
     if (!runners || !runners.computed_at) return null;
     const jobs = runners.slowest.filter((j) => j.repo === repoName && j.workflow === workflowName);
@@ -409,7 +411,9 @@
     const judged = (d) => d.success + d.failed;
     const panel = el("div", { class: "trend" });
     if (daily.length === 0) {
-      panel.append(el("p", { class: "empty" }, "No completed runs in this window."), slowestJobs(repoName, name));
+      panel.append(el("p", { class: "empty" }, "No completed runs in this window."));
+      const slow = slowestJobs(repoName, name);
+      if (slow) panel.append(slow);
       return panel;
     }
     const maxWall = Math.max(0, ...daily.map((d) => d.wall_p50_seconds || 0));
@@ -501,7 +505,7 @@
     };
     for (const w of r.waits) runner(w.runner).wait = w;
     for (const n of r.waiting) runner(n.runner).now = n;
-    const box = el("div", { class: "runners", "aria-labelledby": `runners-${repoName}` },
+    const box = el("section", { class: "runners", "aria-labelledby": `runners-${repoName}` },
       el("h3", { id: `runners-${repoName}` }, "Waiting for runners"));
 
     const notes = [];
