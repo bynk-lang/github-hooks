@@ -1,0 +1,154 @@
+commons github.maintainers
+
+---
+The maintainers view (#53): who is signed in, and the sign-in settings the
+pages and the Worker share. Maintainers sign in through Cloudflare Access as
+an OIDC provider (GitHub its only login method), and the `Maintainer` actor
+verifies the ID token Access issues.
+---
+type MaintainerId = String where NonEmpty
+
+---
+Where the maintainer token's trust comes from, as the `MAINTAINER_OIDC`
+setting holds it (Bynk's `trustFrom`): the Access application's issuer, its
+JWKS, and its client id as the audience.
+---
+type OidcTrust = {
+	issuer: String,
+	jwks: String,
+	audience: Option[String],
+}
+
+---
+`GET /maintainers/config`: what the page needs to start a sign-in, all
+public. `authorization_endpoint` is where it sends the browser,
+`client_id` names the Access application, and `logout_url` signs out of
+Access too.
+---
+type SignInConfig = {
+	authorization_endpoint: String,
+	client_id: String,
+	logout_url: String,
+}
+
+---
+`POST /maintainers/token`'s body: the code Access sent back, the PKCE verifier
+the page kept, and the redirect URI the sign-in used.
+---
+type TokenRequest = {
+	code: String,
+	code_verifier: String,
+	redirect_uri: String,
+}
+
+--- `POST /maintainers/token`'s answer: the ID token, and how long it lasts.
+type SignedIn = {
+	id_token: String,
+	expires_in: Option[Int],
+}
+
+--- Access's token endpoint's answer, success or error.
+type AccessTokenReply = {
+	id_token: Option[String],
+	expires_in: Option[Int],
+	error: Option[String],
+	error_description: Option[String],
+}
+
+---
+`GET /maintainers/me`: who is signed in. `login` is their GitHub login, from
+the token's `login` claim; `claims` names which of `reportedClaims` were
+present, so a missing login can be diagnosed.
+---
+type Me = {
+	sub: String,
+	login: String,
+	email: Option[String],
+	name: Option[String],
+	claims: List[String],
+}
+
+---
+The bynk-lang Access application's trust, declared on the actor and used
+when `MAINTAINER_OIDC` is unset. Public identifiers, not secrets.
+---
+const ACCESS_ISSUER: String = "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a"
+
+const ACCESS_CLIENT_ID: String = "fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a"
+
+--- The organisation whose members are maintainers.
+const MAINTAINER_ORG: String = "bynk-lang"
+
+---
+The claim a maintainer's GitHub login must arrive in: the custom claim the
+Access application maps from the GitHub login method's login attribute
+(docs/maintainers.md). Only this one authorises. Generic claims such as
+`preferred_username` or `nickname` depend on Access's configuration and could
+carry something the user controls, which would let one member act as another.
+---
+const LOGIN_CLAIM: String = "login"
+
+---
+The claims `/maintainers/me` names when it refuses a token without a login,
+so the first sign-in shows what Access sent. Only `LOGIN_CLAIM` is trusted.
+---
+fn reportedClaims() -> List[String] {
+	["login", "github_login", "preferred_username", "nickname", "email", "name"]
+}
+
+---
+Whether `uri` is this service's sign-in callback, on the origin the request
+came to (`host`, from its `Host` header): `https`, or `http` for a local
+Worker only.
+---
+fn isOwnCallback(uri: String, host: String) -> Bool {
+	let local = host.startsWith("localhost:") || host == "localhost" || host.startsWith("127.0.0.1")
+	uri == "https://\(host)/maintainers/callback"
+		|| (local && uri == "http://\(host)/maintainers/callback")
+}
+
+---
+The trust in force: `MAINTAINER_OIDC` when it is set and reads as `OidcTrust`,
+else the declared Access application.
+---
+fn trustOf(setting: Option[String]) -> OidcTrust {
+	let declared = OidcTrust {
+		issuer: ACCESS_ISSUER,
+		jwks: "\(ACCESS_ISSUER)/jwks",
+		audience: Some(ACCESS_CLIENT_ID),
+	}
+	let Some(text) = setting else { declared }
+	match Json.decode[OidcTrust](text) {
+		Ok(t) => t,
+		Err(_) => declared,
+	}
+}
+
+---
+The page's sign-in settings, from the trust: Access names each endpoint under
+the issuer, and signs out at its team domain's `/cdn-cgi/access/logout`.
+---
+fn signInConfigOf(t: OidcTrust) -> SignInConfig {
+	let team = t.issuer.split("/cdn-cgi/").first().getOrElse(t.issuer)
+	SignInConfig {
+		authorization_endpoint: "\(t.issuer)/authorization",
+		client_id: t.audience.getOrElse(ACCESS_CLIENT_ID),
+		logout_url: "\(team)/cdn-cgi/access/logout",
+	}
+}
+
+--- The form Access's token endpoint takes for a PKCE code, with no secret.
+fn tokenForm(clientId: String, r: TokenRequest) -> String {
+	let pairs = [
+		["grant_type", "authorization_code"],
+		["client_id", clientId],
+		["code", r.code],
+		["code_verifier", r.code_verifier],
+		["redirect_uri", r.redirect_uri],
+	]
+	pairs
+		.map(
+			(p) => "\(p.first().getOrElse("").percentEncode())=\(p.get(1).getOrElse("").percentEncode())"
+		)
+		.fold("", (all, part) => if all == "" { part } else { "\(all)&\(part)" })
+}

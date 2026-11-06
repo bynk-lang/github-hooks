@@ -120,4 +120,10 @@ if [ "${SMOKE_LIVE:-}" = 1 ]; then
   APP_WEBHOOK_SECRET=$APP_WEBHOOK_SECRET node "$(dirname "$0")/live.mjs" "$BASE" || failed=1
 fi
 
+# The maintainer sign-in's token check, against a fake issuer: the Worker must
+# have been started trusting it (see scripts/oidc.mjs).
+if [ "${SMOKE_OIDC:-}" = 1 ]; then
+  WORKER_URL=$BASE node "$(dirname "$0")/oidc.mjs" || failed=1
+fi
+
 exit $failed
