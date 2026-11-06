@@ -3,7 +3,9 @@
 // (`AppAuth` for the token, `GitHubHttp` for each response), so the real
 // `GitHubApi` decodes GitHub's JSON. The helpers build `PullPayload` values and
 // each case encodes them: `Json.encode` in a suite helper fails `tsc` on Bynk
-// v0.510.2 (bynk-lang/bynk#2990), though it works in a case.
+// v0.510.2 (bynk-lang/bynk#2990), though it works in a case. `Json.encode`
+// writes `Option` tagged, not as GitHub does (bynk-lang/bynk#2991), so one
+// case below sends GitHub's own JSON to pin the wire format.
 suite github.hooks
 
 env {
@@ -148,6 +150,61 @@ case "a pull request held open that GitHub no longer lists is read and saved as 
 	// Merged now; its ready time (from a delivery) and size are kept.
 	expect row == Ok(Some("{\"state\":\"merged\",\"ready_at\":\"2026-11-01T10:00:00.000Z\",\"merged_at\":\"2026-11-04T12:00:00.000Z\",\"additions\":40}"))
 	expect Logger.info called once with msg == "pull request sync: bynk-lang/bynk has 1 open, 1 repaired"
+}
+
+---
+The other cases encode `PullPayload` values with `Json.encode`, which writes
+Bynk's tagged `Option` form; the decoder accepts that too. This one sends what
+GitHub sends: plain `true`/`false`, `null` timestamps, a `null` head repository
+(a deleted fork), and no `commits` or sizes on the list endpoint; then a single
+pull request with plain timestamps and its sizes.
+---
+case "GitHub's own JSON decodes: plain values and nulls, from the list and a single read" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok("""
+		[
+		  {"number": 10, "title": "Draft work", "user": {"login": "a-contributor", "type": "User"},
+		   "base": {"ref": "main", "repo": {"full_name": "bynk-lang/bynk"}},
+		   "head": {"ref": "branch-10", "repo": null},
+		   "draft": true, "state": "open",
+		   "created_at": "2026-11-01T09:00:00Z", "updated_at": "2026-11-05T08:00:00Z",
+		   "closed_at": null, "merged_at": null},
+		  {"number": 11, "title": "Ready work", "user": {"login": "dependabot[bot]", "type": "Bot"},
+		   "base": {"ref": "main", "repo": {"full_name": "bynk-lang/bynk"}},
+		   "head": {"ref": "branch-11", "repo": {"full_name": "bynk-lang/bynk"}},
+		   "draft": false, "state": "open",
+		   "created_at": "2026-11-01T09:00:00Z", "updated_at": "2026-11-05T08:30:00Z",
+		   "closed_at": null, "merged_at": null}
+		]
+	"""), ok("""
+		{"number": 5, "title": "Pull request 5", "user": {"login": "a-contributor", "type": "User"},
+		 "base": {"ref": "main", "repo": {"full_name": "bynk-lang/bynk"}},
+		 "head": {"ref": "branch-5", "repo": {"full_name": "a-fork/bynk"}},
+		 "draft": false, "state": "closed",
+		 "created_at": "2026-11-01T09:00:00Z", "updated_at": "2026-11-04T12:00:05Z",
+		 "closed_at": "2026-11-04T12:00:00Z", "merged_at": "2026-11-04T12:00:00Z",
+		 "commits": 3, "additions": 12, "deletions": 4, "changed_files": 2}
+	""")]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let held <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+		                           opened_at, updated_at)
+		VALUES ('bynk-lang/bynk', 5, 'Pull request 5', 'a-contributor', 0, 'main', 'branch-5', 0, 'open',
+		        '2026-11-01T09:00:00.000Z', '2026-11-03T09:00:00.000Z')
+		""",
+		[]
+	)
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let rows <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || draft || ':' || author_is_bot || ':' || coalesce(merged_at, '-') || ':' || coalesce(additions, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY number)",
+		[]
+	)
+	expect rows == Ok(Some("{\"rows\":\"5:merged:0:0:2026-11-04T12:00:00.000Z:12 10:open:1:0:-:- 11:open:0:1:-:-\"}"))
+	expect Logger.info called once with msg == "pull request sync: bynk-lang/bynk has 2 open, 1 repaired"
 }
 
 case "a listed pull request older than its row changes nothing" {
