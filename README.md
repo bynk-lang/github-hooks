@@ -77,8 +77,8 @@ Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Develop
 
-You need [Bynk](https://github.com/bynk-lang/bynk#install) (`bynk doctor`
-checks your setup) and Node 22.13 or later.
+You need [Bynk](https://github.com/bynk-lang/bynk#install) at the version in
+`BYNK_VERSION` (`bynk doctor` checks your setup) and Node 22.13 or later.
 
 ```sh
 bynk check            # type-check
@@ -174,12 +174,29 @@ migrations/              D1 schema, applied in tests, by bynk dev and by bynk de
 tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
 scripts/live.mjs         the live feed end to end (WebSocket), run by smoke.sh with SMOKE_LIVE=1
-.github/actions/         CI's Bynk install, pinned by version and SHA-256
+BYNK_VERSION             the Bynk release CI and local work use; the canary proposes moving it
+.github/workflows/       CI (check, format, test; smoke), and the Bynk canary
 docs/github-app.md       registering and installing the GitHub App
 docs/read-api.md         the read API: tokens, routes, what the digest counts
 docs/ci-metrics.md       the public CI metrics: routes, definitions, settings
 docs/pr-flow.md          the PR flow: facts, the daily open-PR sync, routes
 ```
+
+## The Bynk canary
+
+This repository is enrolled in the bynk-lang
+[canary](https://github.com/bynk-lang/.github/blob/main/canary/README.md). On
+each Bynk release (and weekly), `.github/workflows/bynk-canary.yml` runs the
+format check, type check, tests and a `bynk deploy` dry run, and the smoke and
+live-feed checks (`.github/workflows/smoke.yml`), against that release:
+
+- while a release fails them, a `canary` issue stays open here, and closes once
+  a later one passes;
+- when a newer release passes, a **Move to Bynk x.y.z** pull request moves
+  `BYNK_VERSION`, with this repository's own CI run at the new version.
+
+It needs this repository in `canary/repos.json` in bynk-lang/.github, and the
+org's canary and bump GitHub Apps installed here.
 
 ## Licence
 

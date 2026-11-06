@@ -1,0 +1,57 @@
+# Signed deliveries, the public routes and the live feed, against the Worker
+# served by `bynk dev` (scripts/smoke.sh with SMOKE_LIVE=1). CI calls this at
+# BYNK_VERSION; bynk-canary.yml calls it at each new Bynk release.
+name: Smoke
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Bynk version to test, exact or "latest" (empty for BYNK_VERSION)
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bynk version to test, exact or "latest" (empty for BYNK_VERSION)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: signed deliveries against the local Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version: 22
+      - uses: bynk-lang/setup-bynk@v1
+        with:
+          # Pushes and pull requests use BYNK_VERSION; the canary passes newer
+          # releases in.
+          version: ${{ inputs.version }}
+          version-file: ${{ !inputs.version && 'BYNK_VERSION' || '' }}
+      - name: Serve the Worker
+        run: |
+          bynk dev -- --var APP_WEBHOOK_SECRET:ci-secret --var API_TOKEN_SECRET:ci-api > dev.log 2>&1 &
+          for _ in $(seq 1 90); do
+            curl -sf -o /dev/null http://localhost:8787/ && exit 0
+            sleep 2
+          done
+          cat dev.log
+          exit 1
+      - run: scripts/smoke.sh http://localhost:8787
+        env:
+          APP_WEBHOOK_SECRET: ci-secret
+          API_TOKEN_SECRET: ci-api
+          SMOKE_LIVE: "1"
+      - name: Worker log
+        if: always()
+        run: cat dev.log

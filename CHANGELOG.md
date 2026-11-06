@@ -8,6 +8,14 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- Enrolled in the bynk-lang Bynk canary. The Bynk version lives in
+  `BYNK_VERSION`, which CI reads through the org's `bynk-ci` and `setup-bynk`
+  actions (replacing the local install action and its hand-pinned SHA-256;
+  the archive is now checked against the release's `SHA256SUMS`). The smoke
+  job is a callable workflow, `smoke.yml`. `bynk-canary.yml` runs the checks,
+  the smoke and live-feed checks, and a deploy dry run against each new Bynk
+  release, keeps a `canary` issue open while they fail, and proposes moving
+  `BYNK_VERSION` once one passes.
 - Built and tested with Bynk v0.508.4 (was v0.492.1). `Bot.react` now takes
   the `Delivery` itself instead of reading it again from its parts, now that a
   capability may take a commons type (bynk-lang/bynk#2886). The read API's
