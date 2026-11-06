@@ -59,7 +59,7 @@ asset issuesJs = "assets/issues.js"
 
 ---
 Signing maintainers in (#53): the script every page loads for the sign-in
-link, and the page Access returns to.
+link, and the page GitHub returns to.
 ---
 asset signinJs = "assets/signin.js"
 
@@ -84,44 +84,95 @@ shared with every caller.
 capability Edge = EdgeCache
 
 ---
-Exchanging a maintainer's sign-in code for an ID token at Cloudflare Access
-(#53). Access's token endpoint doesn't answer a browser's CORS preflight, so
-the page can't make the exchange itself: the Worker does, for a public client
-with PKCE (no secret). `tokenUrl` and `clientId` come from the trust in force.
+Signing a maintainer in with GitHub (#53), through the GitHub App's user
+authorisation. `exchange` trades the code the page received for a user access
+token, with the App's client secret, so only the Worker can make it; `user`
+asks GitHub whose token it is. The user token is used for that one question
+and never kept.
 ---
-capability AccessOidc {
+capability GitHubSignIn {
 	fn exchange(
-		tokenUrl: String,
 		clientId: String,
+		clientSecret: String,
 		r: TokenRequest
-	) -> Effect[Result[AccessTokenReply, String]]
+	) -> Effect[Result[GitHubTokenReply, String]]
+	fn user(token: String) -> Effect[Result[GitHubUser, String]]
+	fn revoke(clientId: String, clientSecret: String, token: String) -> Effect[Result[(), String]]
 }
 
-provides AccessOidc = AccessTokenEndpoint given Fetch {
+provides GitHubSignIn = GitHubOAuth given Fetch {
 	fn exchange(
-		tokenUrl: String,
 		clientId: String,
+		clientSecret: String,
 		r: TokenRequest
-	) -> Effect[Result[AccessTokenReply, String]] {
+	) -> Effect[Result[GitHubTokenReply, String]] {
 		let sent <- Fetch.send(Request {
 			method: Post,
-			url: tokenUrl,
+			url: GITHUB_TOKEN_URL,
 			contentType: Some("application/x-www-form-urlencoded"),
 			authorization: None,
 			headers: Map
 				.empty()
 				.insert("accept", "application/json")
 				.insert("user-agent", "bynk-lang-github-hooks"),
-			body: Some(tokenForm(clientId, r)),
+			body: Some(tokenForm(clientId, clientSecret, r)),
 		})
 		let Ok(res) = sent else match {
-			Err(_) => Effect.pure(Err("Cloudflare Access could not be reached")),
+			Err(_) => Effect.pure(Err("GitHub could not be reached to finish a sign-in")),
 		}
-		match Json.decode[AccessTokenReply](res.body) {
+		match Json.decode[GitHubTokenReply](res.body) {
 			Ok(reply) => Effect.pure(Ok(reply)),
-			Err(_) => Effect.pure(Err("Cloudflare Access answered \(res.status) with a body that isn't a token reply")),
+			Err(_) => Effect.pure(Err("GitHub answered \(res.status) with a body that isn't a token reply")),
 		}
 	}
+
+	fn user(token: String) -> Effect[Result[GitHubUser, String]] {
+		let sent <- Fetch.send(Request {
+			method: Get,
+			url: "https://api.github.com/user",
+			contentType: None,
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: None,
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("GitHub could not be reached to say who signed in")),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err("GitHub answered \(res.status) when asked who signed in"))
+		}
+		match Json.decode[GitHubUser](res.body) {
+			Ok(u) => Effect.pure(Ok(u)),
+			Err(_) => Effect.pure(Err("GitHub's description of the signed-in user did not decode")),
+		}
+	}
+
+	// GitHub's `DELETE /applications/{client_id}/token`, authenticated as the
+	// App with its client ID and secret.
+	fn revoke(clientId: String, clientSecret: String, token: String) -> Effect[Result[(), String]] {
+		let basic = Bytes.fromUtf8("\(clientId):\(clientSecret)").toBase64()
+		let sent <- Fetch.send(Request {
+			method: Delete,
+			url: "https://api.github.com/applications/\(clientId)/token",
+			contentType: Some("application/json"),
+			authorization: Some("Basic \(basic)"),
+			headers: apiHeaders(),
+			body: Some(Json.encode(RevokedToken { access_token: token })),
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+		if res.status == 204 {
+			Effect.pure(Ok(()))
+		} else {
+			Effect.pure(Err("GitHub answered \(res.status)"))
+		}
+	}
+}
+
+--- The body of GitHub's token revocation.
+type RevokedToken = {
+	access_token: String,
 }
 
 ---
@@ -933,10 +984,20 @@ fn orgMember(
 	org: String,
 	login: String
 ) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
-	let who = login.toLower()
-	let now <- Clock.now()
 	let known <- recentMember(org, login)
 	let None = known else { Effect.pure(Ok(known == Some(true))) }
+	askMember(installation, org, login)
+}
+
+// Whether `login` belongs to `org`, asked of GitHub now, and kept for
+// `orgMember` and `recentMember`.
+fn askMember(
+	installation: Int,
+	org: String,
+	login: String
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let who = login.toLower()
+	let now <- Clock.now()
 	let Ok(member) <- GitHubApi.isMember(installation, org, login) else match {
 		Err(f) => Effect.pure(Err(f.message)),
 	}
@@ -1789,21 +1850,15 @@ Who may read recorded activity: a caller presenting a JWT signed (HS256) with
 actor Reader { auth = Bearer(secret = "API_TOKEN_SECRET"), identity = ReaderId }
 
 ---
-A bynk-lang maintainer, signed in through Cloudflare Access as an OIDC
-provider (#53). The token is verified against the Access application's JWKS;
-`MAINTAINER_OIDC`, when set, replaces the declared trust (`trustFrom`), so a
-fake issuer can stand in for end-to-end checks. Whether they still belong to
-the organisation is checked by the routes, as a token outlives a membership.
+A bynk-lang maintainer, signed in with GitHub (#53). The Worker issues the
+token itself once GitHub has said who signed in and that they belong to the
+organisation: an HS256 JWT signed with `MAINTAINER_TOKEN_SECRET`, whose `sub`
+is their GitHub login. The compiler generates the check, including `exp` and
+`nbf`. Whether they still belong to the organisation is checked again by the
+routes, as a token outlives a membership. `bynk token Maintainer --sub
+<login>` mints one for testing.
 ---
-actor Maintainer {
-	auth = Oidc(
-		issuer = "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a",
-		audience = "fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a",
-		jwks = "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a/jwks",
-		trustFrom = "MAINTAINER_OIDC"
-	),
-	identity = MaintainerId
-}
+actor Maintainer { auth = Bearer(secret = "MAINTAINER_TOKEN_SECRET"), identity = MaintainerId }
 
 ---
 A reader's name, from their token's `sub`.
@@ -1864,14 +1919,17 @@ service api from http {
 	}
 
 	// The page's sign-in settings (#53), all public: where to send the
-	// browser, which Access application, and how to sign out. From the trust
-	// in force, so the page and the actor never disagree.
+	// browser, and the GitHub App's client ID. Unavailable until the App's
+	// client ID is set.
 	on GET("/maintainers/config") () -> Effect[HttpResult[SignInConfig]] by v: Visitor given Secrets {
-		let setting <- Secrets.get("MAINTAINER_OIDC")
-		Ok(signInConfigOf(trustOf(setting)))
+		let set <- Secrets.get("APP_CLIENT_ID")
+		let Some(clientId) = present(set) else {
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		Ok(SignInConfig { authorization_endpoint: GITHUB_AUTHORIZE, client_id: clientId })
 	}
 
-	// The page Access sends a maintainer back to after signing in. The shared
+	// The page GitHub sends a maintainer back to after signing in. The shared
 	// sign-in script finishes the sign-in there and returns to the page they
 	// came from. Not `@cache`d, as it names this deploy's assets.
 	on GET("/maintainers/callback") () -> Effect[HttpResult[String]] by v: Visitor {
@@ -1881,13 +1939,14 @@ service api from http {
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 
-	// Exchanges a sign-in code for an ID token at Access, for the page (#53):
-	// Access's token endpoint refuses a browser's cross-origin call. A public
-	// client with PKCE, so no secret is involved, and the code is only good
-	// with the verifier the page kept. Limited per address like the metrics
-	// routes; the redirect URI must be the callback on the origin this
-	// request came to.
-	on POST("/maintainers/token") (body: TokenRequest, headers: RequestHeaders) -> Effect[HttpResult[SignedIn]] by v: Visitor given Secrets, Logger, MetricsLimit, AccessOidc {
+	// Finishes a sign-in (#53): exchanges the code at GitHub with the App's
+	// client secret, asks GitHub who signed in (then revokes GitHub's token),
+	// checks with GitHub now that they belong to the organisation, and answers
+	// this service's token for them. The code is
+	// only good with the PKCE verifier the page kept, and the redirect URI
+	// must be the callback on the origin this request came to. Limited per
+	// address like the metrics routes.
+	on POST("/maintainers/token") (body: TokenRequest, headers: RequestHeaders) -> Effect[HttpResult[SignedIn]] by v: Visitor given Secrets, Logger, MetricsLimit, GitHubSignIn, Deliveries, GitHubApi, Clock, Crypto {
 		let allowed <- withinMetricsLimit(headers)
 		let true = allowed else {
 			TooManyRequests("too many sign-in attempts; try again in a minute")
@@ -1895,53 +1954,76 @@ service api from http {
 		let true = isOwnCallback(body.redirect_uri, headers.get("Host").getOrElse("")) else {
 			BadRequest("the redirect URI must be this service's /maintainers/callback")
 		}
-		let setting <- Secrets.get("MAINTAINER_OIDC")
-		let trust = trustOf(setting)
-		let Ok(reply) <- AccessOidc.exchange(
-			"\(trust.issuer)/token",
-			signInConfigOf(trust).client_id,
-			body
-		) else match {
+		let idSet <- Secrets.get("APP_CLIENT_ID")
+		let secretSet <- Secrets.get("APP_CLIENT_SECRET")
+		let signingSet <- Secrets.get("MAINTAINER_TOKEN_SECRET")
+		let Some(clientId) = present(idSet) else {
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		let Some(clientSecret) = present(secretSet) else {
+			let _ <- Logger.error("APP_CLIENT_SECRET is not set, so no maintainer can sign in")
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		let Some(signing) = present(signingSet) else {
+			let _ <- Logger.error(
+				"MAINTAINER_TOKEN_SECRET is not set, so no maintainer can sign in"
+			)
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		let Ok(reply) <- GitHubSignIn.exchange(clientId, clientSecret, body) else match {
 			Err(why) => {
 				let _ <- Logger.error("could not exchange a maintainer's sign-in code: \(why)")
-				BadGateway("Cloudflare Access could not be reached")
+				BadGateway("GitHub could not be reached")
 			},
 		}
-		let Some(token) = reply.id_token else {
+		let Some(userToken) = reply.access_token else {
 			let _ <- Logger.warn(
-				"Cloudflare Access refused a sign-in code: \(reply.error.getOrElse("no reason")) \(reply.error_description.getOrElse(""))"
+				"GitHub refused a sign-in code: \(reply.error.getOrElse("no reason")) \(reply.error_description.getOrElse(""))"
 			)
-			BadRequest(
-				"Cloudflare Access refused the sign-in: \(reply.error.getOrElse("no reason given"))"
-			)
+			BadRequest("GitHub refused the sign-in: \(reply.error.getOrElse("no reason given"))")
 		}
-		Ok(SignedIn { id_token: token, expires_in: reply.expires_in })
-	}
-
-	// Who is signed in (#53): their GitHub login, from the token's `login`
-	// claim only, if GitHub says they belong to the organisation now (an
-	// answer kept a day; only a miss looks for an installation to ask with).
-	// A token without the claim, or someone outside the organisation, is
-	// refused with the reason, naming the claims the token did carry.
-	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock {
-		let present = reportedClaims().filter((c) => m.claims.has(c))
-		let Some(login) = m.claims.get(LOGIN_CLAIM) else {
+		let asked <- GitHubSignIn.user(userToken)
+		// The user token has done its one job: revoke it, so nothing usable is
+		// left behind. A failed revocation is logged, not fatal: the token
+		// still expires, and the Worker never kept it.
+		let revoked <- GitHubSignIn.revoke(clientId, clientSecret, userToken)
+		let _ <- match revoked {
+			Ok(_) => Effect.pure(()),
+			Err(why) => Logger.warn("could not revoke a maintainer's GitHub user token: \(why)"),
+		}
+		let Ok(user) = asked else match {
+			Err(why) => {
+				let _ <- Logger.error("could not ask GitHub who signed in: \(why)")
+				BadGateway("GitHub could not say who signed in")
+			},
+		}
+		// Asked fresh: a kept answer could be a day old, and a token outlives it.
+		let Ok(member) <- maintainerMember(user.login, true) else match {
+			Err(why) => {
+				let _ <- Logger.error(
+					"could not tell whether \(user.login) belongs to \(MAINTAINER_ORG): \(why)"
+				)
+				ServiceUnavailable("GitHub could not say whether you belong to \(MAINTAINER_ORG)")
+			},
+		}
+		let true = member else {
 			RawError(
 				Forbidden,
-				refusal403(
-					"no_login",
-					"the token carries no GitHub login (the `\(LOGIN_CLAIM)` claim); present: \(joined(present, ", "))"
-				),
+				refusal403("not_a_member", "\(user.login) doesn't belong to \(MAINTAINER_ORG)"),
 				"application/json"
 			)
 		}
-		// A recent answer settles it without looking for an installation.
-		let known <- recentMember(MAINTAINER_ORG, login)
-		let checked: Result[Bool, String] <- match known {
-			Some(answer) => Effect.pure(Ok(answer)),
-			None => askOrg(login),
-		}
-		let Ok(member) = checked else match {
+		let now <- Clock.now()
+		let token <- sessionToken(signing, user.login, now)
+		Ok(SignedIn { token: token, expires_in: SESSION_SECONDS, login: user.login })
+	}
+
+	// Who is signed in (#53): their GitHub login, the token's subject, if
+	// they still belong to the organisation (an answer kept a day; only a
+	// miss looks for an installation to ask with).
+	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock {
+		let login = "\(m.identity)"
+		let Ok(member) <- maintainerMember(login, false) else match {
 			Err(why) => {
 				let _ <- Logger.error(
 					"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
@@ -1956,13 +2038,7 @@ service api from http {
 				"application/json"
 			)
 		}
-		Ok(Me {
-			sub: "\(m.identity)",
-			login: login,
-			email: m.claims.get("email"),
-			name: m.claims.get("name"),
-			claims: present,
-		})
+		Ok(Me { login: login })
 	}
 
 	on GET("/about") () -> Effect[HttpResult[String]] by v: Visitor {
@@ -4253,13 +4329,34 @@ fn recentMember(org: String, login: String) -> Effect[Option[Bool]] given Delive
 	}
 }
 
-// Asks GitHub whether `login` belongs to the maintainers' organisation,
-// through an installation that has delivered for it.
-fn askOrg(login: String) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+// Whether `login` belongs to the maintainers' organisation, through an
+// installation that has delivered for it. `fresh` asks GitHub now, as signing
+// in does, so a token is never issued on a kept answer; otherwise an answer
+// kept in the last `MEMBER_RECHECK` settles it without an installation. The
+// answer is kept either way.
+fn maintainerMember(
+	login: String,
+	fresh: Bool
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let known: Option[Bool] <- if fresh {
+		Effect.pure(None)
+	} else {
+		recentMember(MAINTAINER_ORG, login)
+	}
+	let None = known else { Effect.pure(Ok(known == Some(true))) }
 	let Some(installation) <- orgInstallation(MAINTAINER_ORG) else {
 		Effect.pure(Err("no installation of the App has delivered for \(MAINTAINER_ORG) yet"))
 	}
-	orgMember(installation, MAINTAINER_ORG, login)
+	askMember(installation, MAINTAINER_ORG, login)
+}
+
+// A maintainer's token (#53): an HS256 JWT for `login`, issued at `now`,
+// signed with `secret` (`MAINTAINER_TOKEN_SECRET`), as the `Maintainer`
+// actor verifies it.
+fn sessionToken(secret: String, login: String, now: Instant) -> Effect[String] given Crypto {
+	let input = sessionSigningInput(login, now)
+	let mac <- Crypto.hmac(Sha256, Bytes.fromUtf8(secret), Bytes.fromUtf8(input))
+	Effect.pure("\(input).\(mac.toBase64Url())")
 }
 
 // The installation that last delivered for one of `org`'s repositories: the

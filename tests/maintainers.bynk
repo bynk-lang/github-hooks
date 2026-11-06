@@ -1,9 +1,21 @@
-// Phase 4, slice 6, step 1 (#53): signing maintainers in. The `Maintainer`
-// actor's token is Bynk's to verify (an `Oidc` actor against the Access
-// application's JWKS); these cases give the verified principal and its claims
-// directly (`by Maintainer(sub, TokenClaims.of(...))`), and check what the
-// routes do with them. GitHub is stubbed at the wire, Access at its capability.
+// Phase 4, slice 6, step 1 (#53): signing maintainers in with GitHub. The
+// sign-in code is exchanged at GitHub through the GitHub App's user
+// authorisation (stubbed here at its capability), and the Worker issues its own
+// token, which the `Maintainer` actor (Bynk's `Bearer`) verifies. These cases
+// give the verified maintainer directly (`by Maintainer(login)`) and check what
+// the routes do; GitHub's API is stubbed at the wire.
 suite github.hooks
+
+env {
+	APP_CLIENT_ID = "Iv23liTestClient"
+	APP_CLIENT_SECRET = "test-client-secret"
+	MAINTAINER_TOKEN_SECRET = "test-signing-secret"
+}
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+// GitHub's user token is revoked once it has said who signed in.
+stub GitHubSignIn.revoke(_, _, _) returns Ok(())
 
 --- A viewer's request headers: one address, well within the limit, at the deployed host.
 fn viewer() -> RequestHeaders {
@@ -54,108 +66,63 @@ fn exchange(redirect: String) -> TokenRequest {
 	}
 }
 
-case "the sign-in settings come from the declared Access application" {
+fn deployed() -> TokenRequest {
+	exchange("https://github-hooks.bynk-lang.workers.dev/maintainers/callback")
+}
+
+fn granted() -> Result[GitHubTokenReply, String] {
+	Ok(GitHubTokenReply { access_token: Some("ghu_user"), error: None, error_description: None })
+}
+
+---
+The token the Worker issues for accuser at the stubbed clock, signed with the
+suite's `MAINTAINER_TOKEN_SECRET`: computed independently with Node's
+`crypto.createHmac("sha256", …)`, so it pins the Worker's signing to standard
+HS256, as Bynk's `Bearer` verifies it.
+---
+fn accuserToken() -> String {
+	"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2N1c2VyIiwiaWF0IjoxNzkzODgwMDAwLCJleHAiOjE3OTM5MDg4MDB9.58EvP933ALbPj3WRgb9W9zqzABcubuRcXnySl5RN2wI"
+}
+
+case "the sign-in settings name GitHub and the App's client ID" {
 	let r <- api.GET("/maintainers/config") by Visitor
 	expect r == Ok(SignInConfig {
-		authorization_endpoint: "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a/authorization",
-		client_id: "fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a",
-		logout_url: "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/logout",
+		authorization_endpoint: "https://github.com/login/oauth/authorize",
+		client_id: "Iv23liTestClient",
 	})
 }
 
-case "MAINTAINER_OIDC replaces the declared trust, and one that doesn't read falls back to it" {
-	let fake = trustOf(
-		Some("{\"issuer\": \"http://localhost:9999/oidc/test-client\", \"jwks\": \"http://localhost:9999/oidc/test-client/jwks\", \"audience\": \"test-client\"}")
-	)
-	expect signInConfigOf(
-		fake
-	) == SignInConfig {
-		authorization_endpoint: "http://localhost:9999/oidc/test-client/authorization",
-		client_id: "test-client",
-		logout_url: "http://localhost:9999/oidc/test-client/cdn-cgi/access/logout",
-	}
-	expect trustOf(Some("not json")).issuer == "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a"
-	expect trustOf(None).jwks.endsWith("/jwks")
+case "a maintainer's token is a standard HS256 JWT for their login, lasting a working day" {
+	let t <- sessionToken("test-signing-secret", "accuser", Instant.fromEpochMillis(1793880000000))
+	expect t == accuserToken()
 }
 
-case "a signed-in member is told who they are, by their GitHub login, after GitHub confirms they belong" {
+case "a member who signs in with GitHub gets a token for their login" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
 	stub AppAuth.token(_) returns Ok("ghs_test")
 	stub GitHubHttp.get(_, _) returns member()
 	let seeded <- Deliveries.batch(installed())
 	expect seeded is Ok(_)
-	let r <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["login: accuser", "email: accuser@example.com"]))
-	expect r == Ok(Me {
-		sub: "access-user-1",
-		login: "accuser",
-		email: Some("accuser@example.com"),
-		name: None,
-		claims: ["login", "email"],
-	})
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r == Ok(SignedIn { token: accuserToken(), expires_in: 28800, login: "accuser" })
+	expect GitHubSignIn.exchange called once with clientId == "Iv23liTestClient"
+	expect GitHubSignIn.exchange called once with clientSecret == "test-client-secret"
+	expect GitHubSignIn.user called once with token == "ghu_user"
+	expect GitHubSignIn.revoke called once with token == "ghu_user"
+	expect GitHubSignIn.revoke called once with clientSecret == "test-client-secret"
 	expect AppAuth.token called once with installation == 42
 	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
 }
 
-case "only the login claim authorises: a login under another claim name is refused, and named" {
-	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns member()
-	let seeded <- Deliveries.batch(installed())
-	expect seeded is Ok(_)
-	let r <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["preferred_username: accuser", "nickname: accuser"]))
-	expect r is RawError(403, _, _)
-	let RawError(_, body, _) = r else {
-		expect false
-	}
-	let text = body.decodeUtf8().getOrElse("")
-	expect text.contains("no_login")
-	expect text.contains("present: preferred_username, nickname")
-	expect GitHubHttp.get never called
-}
-
-case "a membership GitHub confirmed today is used without finding an installation" {
-	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns member()
-	let kept <- Deliveries.run(
-		"INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
-		[]
-	)
-	expect kept is Ok(_)
-	let r <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["login: Accuser"]))
-	let Ok(me) = r else {
-		expect false
-	}
-	expect me.login == "Accuser"
-	expect AppAuth.token never called
-	expect GitHubHttp.get never called
-}
-
-case "a token with no GitHub login is refused, naming the claims it did carry" {
-	let seeded <- Deliveries.batch(installed())
-	expect seeded is Ok(_)
-	let r <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["email: accuser@example.com", "name: A User"]))
-	expect r is RawError(403, _, _)
-	let RawError(_, body, _) = r else {
-		expect false
-	}
-	expect body.decodeUtf8().getOrElse("").contains("present: email, name")
-	expect GitHubHttp.get never called
-}
-
-case "someone GitHub says isn't in the organisation is refused" {
+case "someone outside the organisation who signs in with GitHub gets no token" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "a-stranger" })
 	stub AppAuth.token(_) returns Ok("ghs_test")
 	stub GitHubHttp.get(_, _) returns notMember()
 	let seeded <- Deliveries.batch(installed())
 	expect seeded is Ok(_)
-	let r <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-2", TokenClaims.of(["login: a-stranger"]))
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
 	expect r is RawError(403, _, _)
 	let RawError(_, body, _) = r else {
 		expect false
@@ -163,48 +130,60 @@ case "someone GitHub says isn't in the organisation is refused" {
 	expect body.decodeUtf8().getOrElse("").contains("not_a_member")
 }
 
-case "if GitHub can't say, or no installation is known, the answer is unavailable, not a refusal" {
+case "a code GitHub refuses is a bad request with its reason; GitHub unreachable is a bad gateway" {
+	stub GitHubSignIn.exchange(_, _, _) returns each [Ok(GitHubTokenReply { access_token: None, error: Some("bad_verification_code"), error_description: Some("The code passed is incorrect or expired.") }), Err("GitHub could not be reached to finish a sign-in"), granted()]
+	stub GitHubSignIn.user(_) returns Err("GitHub answered 401 when asked who signed in")
+	let refused <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect refused is BadRequest("GitHub refused the sign-in: bad_verification_code")
+	let down <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect down is BadGateway(_)
+	let nobody <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect nobody is BadGateway(_)
+	// Even when GitHub can't say who it is, the user token is revoked.
+	expect GitHubSignIn.revoke called once with token == "ghu_user"
+}
+
+case "signing in asks GitHub afresh: a kept answer from yesterday doesn't issue a token to a leaver" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "a-leaver" })
 	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })
-	let none <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["login: accuser"]))
-	expect none is ServiceUnavailable(_)
+	stub GitHubHttp.get(_, _) returns notMember()
 	let seeded <- Deliveries.batch(installed())
 	expect seeded is Ok(_)
-	let failing <- api.GET(
-		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["login: accuser"]))
-	expect failing is ServiceUnavailable(_)
-	expect Logger.error called 2 times
+	// GitHub said yes yesterday afternoon, within the day an answer is kept.
+	let kept <- Deliveries.run(
+		"INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'a-leaver', 1, '2026-11-05T15:00:00.000Z')",
+		[]
+	)
+	expect kept is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is RawError(403, _, _)
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/a-leaver"
+	// The fresh answer is kept, so the next request is refused without asking.
+	let after <- api.GET("/maintainers/me") by Maintainer("a-leaver")
+	expect after is RawError(403, _, _)
+	expect GitHubHttp.get called once
 }
 
-case "a sign-in code is exchanged at Access's token endpoint for the page" {
-	stub AccessOidc.exchange(_, _, _) returns Ok(AccessTokenReply { id_token: Some("eyJ.token.sig"), expires_in: Some(3600), error: None, error_description: None })
-	let r <- api.POST(
-		"/maintainers/token",
-		exchange("https://github-hooks.bynk-lang.workers.dev/maintainers/callback"),
-		viewer()
-	) by Visitor
-	expect r == Ok(SignedIn { id_token: "eyJ.token.sig", expires_in: Some(3600) })
-	expect AccessOidc.exchange called once with tokenUrl == "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a/token"
-	expect AccessOidc.exchange called once with clientId == "fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a"
+case "a user token GitHub won't revoke is logged, and the sign-in still finishes" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	stub GitHubSignIn.revoke(_, _, _) returns Err("GitHub answered 422")
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is Ok(_)
+	expect Logger.warn called once
 }
 
-case "a code Access refuses is a bad request with its reason; Access unreachable is a bad gateway" {
-	stub AccessOidc.exchange(_, _, _) returns each [Ok(AccessTokenReply { id_token: None, expires_in: None, error: Some("invalid_grant"), error_description: Some("code expired") }), Err("Cloudflare Access could not be reached")]
-	let refused <- api.POST(
-		"/maintainers/token",
-		exchange("https://github-hooks.bynk-lang.workers.dev/maintainers/callback"),
-		viewer()
-	) by Visitor
-	expect refused is BadRequest("Cloudflare Access refused the sign-in: invalid_grant")
-	let down <- api.POST(
-		"/maintainers/token",
-		exchange("https://github-hooks.bynk-lang.workers.dev/maintainers/callback"),
-		viewer()
-	) by Visitor
-	expect down is BadGateway(_)
+case "if GitHub can't say whether they belong, the sign-in is unavailable, not refused" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is ServiceUnavailable(_)
+	expect Logger.error called once
 }
 
 case "only this service's callback may receive a code, and exchanges are limited per address" {
@@ -228,13 +207,81 @@ case "only this service's callback may receive a code, and exchanges are limited
 		viewer()
 	) by Visitor
 	expect downgraded is BadRequest(_)
-	let limited <- api.POST(
-		"/maintainers/token",
-		exchange("https://github-hooks.bynk-lang.workers.dev/maintainers/callback"),
-		viewer()
-	) by Visitor
+	let limited <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
 	expect limited is TooManyRequests(_)
-	expect AccessOidc.exchange never called
+	expect GitHubSignIn.exchange never called
+}
+
+case "a local Worker's plain-http callback is accepted, on its own host only" {
+	stub GitHubSignIn.exchange(_, _, _) returns Ok(GitHubTokenReply { access_token: None, error: Some("bad_verification_code"), error_description: None })
+	let local <- api.POST(
+		"/maintainers/token",
+		exchange("http://localhost:8787/maintainers/callback"),
+		at("localhost:8787")
+	) by Visitor
+	expect local is BadRequest("GitHub refused the sign-in: bad_verification_code")
+	let otherPort <- api.POST(
+		"/maintainers/token",
+		exchange("http://localhost:9999/maintainers/callback"),
+		at("localhost:8787")
+	) by Visitor
+	expect otherPort is BadRequest("the redirect URI must be this service's /maintainers/callback")
+	expect isOwnCallback(
+		"https://github-hooks.bynk-lang.workers.dev/maintainers/callback",
+		"github-hooks.bynk-lang.workers.dev"
+	)
+	expect !isOwnCallback("http://github-hooks.bynk-lang.workers.dev/maintainers/callback", "github-hooks.bynk-lang.workers.dev")
+	expect !isOwnCallback("https://github-hooks.bynk-lang.workers.dev/maintainers/callback", "")
+	expect GitHubSignIn.exchange called once
+}
+
+case "a signed-in member is told who they are, after GitHub confirms they still belong" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/me") by Maintainer("accuser")
+	expect r == Ok(Me { login: "accuser" })
+	expect AppAuth.token called once with installation == 42
+}
+
+case "a membership GitHub confirmed today is used without finding an installation" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let kept <- Deliveries.run(
+		"INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T12:00:00.000Z')",
+		[]
+	)
+	expect kept is Ok(_)
+	let r <- api.GET("/maintainers/me") by Maintainer("Accuser")
+	expect r == Ok(Me { login: "Accuser" })
+	expect AppAuth.token never called
+	expect GitHubHttp.get never called
+}
+
+case "someone who has left the organisation is refused, even with a token" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns notMember()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/me") by Maintainer("a-leaver")
+	expect r is RawError(403, _, _)
+	let RawError(_, body, _) = r else {
+		expect false
+	}
+	expect body.decodeUtf8().getOrElse("").contains("not_a_member")
+}
+
+case "if GitHub can't say, or no installation is known, the answer is unavailable, not a refusal" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })
+	let none <- api.GET("/maintainers/me") by Maintainer("accuser")
+	expect none is ServiceUnavailable(_)
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let failing <- api.GET("/maintainers/me") by Maintainer("accuser")
+	expect failing is ServiceUnavailable(_)
+	expect Logger.error called 2 times
 }
 
 case "the callback page loads the sign-in script, and every dashboard has the sign-in link" {
@@ -257,27 +304,4 @@ case "the callback page loads the sign-in script, and every dashboard has the si
 	expect pages.all((p) => p.contains("src=\"\(signinJs.url)\"")
 		&& p.contains("id=\"signin\"")
 		&& !p.contains("{signin}"))
-}
-
-case "a local Worker's plain-http callback is accepted, on its own host only" {
-	stub AccessOidc.exchange(_, _, _) returns Ok(AccessTokenReply { id_token: Some("eyJ.token.sig"), expires_in: Some(3600), error: None, error_description: None })
-	let local <- api.POST(
-		"/maintainers/token",
-		exchange("http://localhost:8787/maintainers/callback"),
-		at("localhost:8787")
-	) by Visitor
-	expect local is Ok(_)
-	let otherPort <- api.POST(
-		"/maintainers/token",
-		exchange("http://localhost:9999/maintainers/callback"),
-		at("localhost:8787")
-	) by Visitor
-	expect otherPort is BadRequest(_)
-	expect isOwnCallback(
-		"https://github-hooks.bynk-lang.workers.dev/maintainers/callback",
-		"github-hooks.bynk-lang.workers.dev"
-	)
-	expect !isOwnCallback("http://github-hooks.bynk-lang.workers.dev/maintainers/callback", "github-hooks.bynk-lang.workers.dev")
-	expect !isOwnCallback("https://github-hooks.bynk-lang.workers.dev/maintainers/callback", "")
-	expect AccessOidc.exchange called once
 }

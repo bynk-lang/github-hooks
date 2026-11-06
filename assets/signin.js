@@ -1,16 +1,17 @@
 // Signing maintainers in (#53), shared by every page. A maintainer signs in
-// through Cloudflare Access (GitHub its only login method) with the
-// authorisation-code flow and PKCE. Access's token endpoint refuses a
-// browser's cross-origin call, so the page hands the code and its verifier to
-// the Worker (`POST /maintainers/token`), which makes the exchange. The ID
-// token is kept in `sessionStorage`, so it lasts as long as the tab, and sent
-// as `Authorization: Bearer` to the maintainer routes. Other scripts read the
-// signed-in maintainer from `window.bynkMaintainer`.
+// with GitHub, through the GitHub App's user authorisation, with the
+// authorisation-code flow and PKCE. The page hands the code and its verifier
+// to the Worker (`POST /maintainers/token`), which exchanges them with the
+// App's client secret, checks the person belongs to the organisation, and
+// answers its own token for them. That token is kept in `sessionStorage`, so
+// it lasts as long as the tab, and sent as `Authorization: Bearer` to the
+// maintainer routes. Other scripts read the signed-in maintainer from
+// `window.bynkMaintainer`.
 (() => {
   "use strict";
 
   const KEY = "bynk.maintainer";        // { token, expires, login }
-  const PENDING = "bynk.signin";         // { verifier, state, back } while Access is asked
+  const PENDING = "bynk.signin";         // { verifier, state, back } while GitHub is asked
   const CALLBACK = "/maintainers/callback";
 
   const store = {
@@ -49,9 +50,8 @@
     const url = new URL(config.authorization_endpoint);
     url.search = new URLSearchParams({
       client_id: config.client_id,
-      response_type: "code",
-      scope: "openid email profile",
       redirect_uri: location.origin + CALLBACK,
+      allow_signup: "false",
       state,
       code_challenge: challenge,
       code_challenge_method: "S256",
@@ -59,25 +59,22 @@
     location.assign(url.toString());
   }
 
-  async function signOut() {
+  // Signing out forgets this service's token. The GitHub sign-in itself is
+  // GitHub's: the next sign-in may not ask again.
+  function signOut() {
     store.drop(KEY);
-    try {
-      const config = await getJson("/maintainers/config");
-      location.assign(config.logout_url);
-    } catch {
-      location.reload();
-    }
+    location.reload();
   }
 
-  // On the callback page: check the state, exchange the code through the
-  // Worker, ask who signed in, and go back where the sign-in started.
+  // On the callback page: check the state, finish the sign-in through the
+  // Worker, and go back where the sign-in started.
   async function finish() {
     const status = document.getElementById("signin-status");
     const say = (text) => { if (status) status.textContent = text; };
     const params = new URLSearchParams(location.search);
     const pending = store.get(PENDING);
     store.drop(PENDING);
-    if (params.get("error")) { say(`Cloudflare Access refused the sign-in: ${params.get("error_description") || params.get("error")}.`); return; }
+    if (params.get("error")) { say(`GitHub didn't sign you in: ${params.get("error_description") || params.get("error")}.`); return; }
     if (!pending || !params.get("code") || params.get("state") !== pending.state) {
       say("This sign-in didn't start here, or has expired. Start it again from a dashboard.");
       return;
@@ -88,10 +85,9 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code: params.get("code"), code_verifier: pending.verifier, redirect_uri: location.origin + CALLBACK }),
       });
-      const me = await getJson("/maintainers/me", { headers: { authorization: `Bearer ${signed.id_token}` } });
       const lasts = (signed.expires_in || 3600) * 1000;
-      store.set(KEY, { token: signed.id_token, expires: Date.now() + lasts - 60_000, login: me.login });
-      say(`Signed in as ${me.login}. Taking you back…`);
+      store.set(KEY, { token: signed.token, expires: Date.now() + lasts - 60_000, login: signed.login });
+      say(`Signed in as ${signed.login}. Taking you back…`);
       location.replace(pending.back || "/");
     } catch (e) {
       say(`The sign-in didn't complete: ${e.message}.`);

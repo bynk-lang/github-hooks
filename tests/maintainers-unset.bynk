@@ -1,0 +1,26 @@
+// Maintainer sign-in (#53) before it is configured: without the GitHub App's
+// client ID and secret, and the secret that signs maintainer tokens, nobody
+// can sign in, and the routes say so rather than failing at GitHub.
+suite github.hooks
+
+case "without the App's client ID, there are no sign-in settings" {
+	let r <- api.GET("/maintainers/config") by Visitor
+	expect r is ServiceUnavailable("maintainer sign-in isn't configured")
+}
+
+case "without the App's client secret or the signing secret, no code is exchanged" {
+	let r <- api.POST(
+		"/maintainers/token",
+		TokenRequest {
+			code: "the-code",
+			code_verifier: "the-verifier",
+			redirect_uri: "https://github-hooks.bynk-lang.workers.dev/maintainers/callback",
+		},
+		RequestHeaders.of([
+			"CF-Connecting-IP: 203.0.113.7",
+			"Host: github-hooks.bynk-lang.workers.dev",
+		])
+	) by Visitor
+	expect r is ServiceUnavailable("maintainer sign-in isn't configured")
+	expect GitHubSignIn.exchange never called
+}
