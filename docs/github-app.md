@@ -81,8 +81,16 @@ sends a `ping` when the webhook is created.
 
 The dashboard reads `workflow_run` (CI health), `workflow_job` (runner wait),
 `pull_request` and `pull_request_review` (PR flow), `release` and `push` (the
-tags releases are cut from) and `repository` (a repository made private is
-hidden at once), so tick at least those.
+tags releases are cut from), `issues` and `issue_comment` (issue response) and
+`repository` (a repository made private is hidden at once), so tick at least
+those.
+
+Issue response also needs the **Organization** permission **Members:
+Read-only**. GitHub reports an organisation member whose membership is
+private as a `CONTRIBUTOR`, so to tell whether a commenter is a maintainer
+the service asks GitHub whether they belong to the organisation
+([docs](issues.md)). Without it, only public members, owners and
+collaborators count.
 
 Phase 3 will need some of these raised to **Read and write** (Issues and Pull
 requests, for comments and labels). Changing an App's permissions asks an

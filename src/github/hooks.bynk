@@ -9,6 +9,7 @@ uses github.metrics
 uses github.pulls
 uses github.releases
 uses github.jobs
+uses github.issues
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
@@ -204,11 +205,33 @@ capability GitHubApi {
 		base: String,
 		head: String
 	) -> Effect[Result[Comparison, ApiFailure]]
+	---
+	Whether `login` belongs to `org` (the App's Members read permission): GitHub
+	answers 204 for a member, private or public, and 404 for anyone else.
+	---
+	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]]
 }
 
 provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]] {
 		openPullsFrom(installation, repo, 1, [])
+	}
+
+	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]] {
+		let url = "https://api.github.com/orgs/\(org)/members/\(login)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		if res.status == 204 {
+			Effect.pure(Ok(true))
+		} else if res.status == 404 {
+			Effect.pure(Ok(false))
+		} else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused whether \(login) belongs to \(org): \(refusal(res.status, res.body))",
+			}))
+		}
 	}
 
 	fn pull(
@@ -407,8 +430,11 @@ a `workflow_run`, one `workflow_runs` row per run attempt (#20); for a
 `pull_request`, its `pull_requests` row and, for the moments the row can't
 hold, a `pull_request_events` row; for a `pull_request_review`, its
 `pull_request_reviews` row (#26); for a `release`, its `releases` row and,
-once a final release is published, which pull requests it shipped (#36). A
-redelivery records the same facts again, which changes nothing.
+once a final release is published, which pull requests it shipped (#36); for
+a `workflow_job`, its `workflow_jobs` row (#42); for an `issues` or
+`issue_comment`, its `issues` row and labels, and a maintainer's first
+response (#48). A redelivery records the same facts again, which changes
+nothing.
 ---
 capability Facts {
 	--- `fresh` when this is the delivery's first arrival, not a redelivery.
@@ -422,7 +448,13 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 			recordReview(d, body)
 		} else if d.event == "push" {
 			recordTag(d, body)
-		} else if d.event == "workflow_job" { recordJob(d, body) } else { Effect.pure(()) }
+		} else if d.event == "workflow_job" {
+			recordJob(d, body)
+		} else if d.event == "issues" || d.event == "issue_comment" {
+			recordIssue(d, body)
+		} else {
+			Effect.pure(())
+		}
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
@@ -645,6 +677,224 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 			params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
 		},
 	]
+}
+
+// Records an issue from an `issues` or `issue_comment` delivery (#48). Both
+// carry the whole issue, so either refreshes its row and labels (see
+// `issueStatements` for the ordering rules). A comment by someone other than
+// the author, and not a bot, may also set the issue's first response, if
+// they're a maintainer: by GitHub's author association, or else by asking
+// GitHub whether they belong to the organisation (see `confirmed`). Comments
+// on pull requests are ignored. Open pages aren't told yet: the issues page
+// and its live events come in a later step.
+fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, GitHubApi, Clock {
+	let Ok(read) = issueOf(body) else match {
+		Err(why) => Logger.error("could not read issue from \(d.id): \(why)"),
+	}
+	let Some(news) = read else { Effect.pure(()) }
+	let i = news.issue
+	let nobody: Option[IssueResponse] = None
+	let response <- match news.response {
+		Some(r) => confirmed(d, i.repo, r),
+		None => Effect.pure(nobody),
+	}
+	let responded: List[SqlStatement] = match response {
+		Some(r) => [
+			SqlStatement {
+				sql: """
+					UPDATE issues SET first_response_at = ?3, first_responder = ?4
+					WHERE repo = ?1 AND number = ?2 AND (first_response_at IS NULL OR first_response_at > ?3)
+				""",
+				params: [Text(i.repo), Integer(i.number), Text(r.at), Text(r.by)],
+			},
+		],
+		None => [],
+	}
+	let Ok(_) <- Deliveries.batch(issueStatements(i).concat(responded)) else match {
+		Err(e) => Logger.error("could not record \(i.repo) issue #\(i.number): \(sqlError(e))"),
+	}
+	Effect.pure(())
+}
+
+// The response a comment is, if its author is a maintainer. GitHub's author
+// association settles it when it says `OWNER`, `MEMBER` or `COLLABORATOR`;
+// otherwise the organisation is asked (GitHub reports a member whose
+// membership is private as a `CONTRIBUTOR`), through the installation that
+// sent the delivery. If GitHub can't say, the comment isn't counted, and the
+// log says why.
+fn confirmed(
+	d: Delivery,
+	repo: String,
+	r: IssueResponse
+) -> Effect[Option[IssueResponse]] given Deliveries, Logger, GitHubApi, Clock {
+	let nobody: Option[IssueResponse] = None
+	let false = r.maintainer else { Effect.pure(Some(r)) }
+	let Some(installation) = d.installation else { Effect.pure(nobody) }
+	let org = repo.split("/").first().getOrElse(repo)
+	let Ok(member) <- orgMember(installation, org, r.by) else match {
+		Err(why) => {
+			let _ <- Logger.warn(
+				"could not tell whether \(r.by) belongs to \(org), so their comment on \(repo) isn't counted as a response: \(why)"
+			)
+			Effect.pure(nobody)
+		},
+	}
+	Effect.pure(if member { Some(r) } else { nobody })
+}
+
+// Whether `login` belongs to `org`, from an answer GitHub gave in the last
+// `MEMBER_RECHECK`, or else from GitHub (and then kept).
+fn orgMember(
+	installation: Int,
+	org: String,
+	login: String
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let who = login.toLower()
+	let now <- Clock.now()
+	let cached <- Deliveries.first(
+		"SELECT member FROM org_members WHERE org = ?1 AND login = ?2 AND checked_at >= ?3",
+		[Text(org), Text(who), Text((now - MEMBER_RECHECK).toIso())]
+	)
+	let known: Option[Bool] = match cached {
+		Ok(Some(row)) => match Json.decode[CachedMember](row) {
+			Ok(m) => Some(m.member == 1),
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let None = known else { Effect.pure(Ok(known == Some(true))) }
+	let Ok(member) <- GitHubApi.isMember(installation, org, login) else match {
+		Err(f) => Effect.pure(Err(f.message)),
+	}
+	// Keeping the answer is a saving, not a fact: if it can't be kept, the
+	// next comment asks again.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO org_members (org, login, member, checked_at) VALUES (?1, ?2, ?3, ?4)
+		ON CONFLICT (org, login) DO UPDATE SET member = excluded.member, checked_at = excluded.checked_at
+		""",
+		[Text(org), Text(who), Boolean(member), Text(now.toIso())]
+	)
+	Effect.pure(Ok(member))
+}
+
+// How long GitHub's answer on organisation membership is reused.
+const MEMBER_RECHECK: Duration = 1.days
+
+--- A cached membership answer.
+type CachedMember = {
+	member: Int,
+}
+
+// The statements that save an issue, so a run can save many in one batch.
+// The row moves forward only (by `updated_at`; a tie applies, so the later
+// arrival wins); a deleted or transferred issue becomes a tombstone that
+// nothing later changes, and keeps no labels.
+//
+// Labels need more care than the row, because labelling makes ties: adding
+// several labels at once sends one `labeled` delivery per label, usually in
+// the same second, each carrying the set at that moment, in no guaranteed
+// order. So the whole set is replaced only by a delivery strictly newer than
+// the row (checked before the row moves), and `labeled` and `unlabeled` then
+// add or remove the one label they name. Same-second deliveries therefore
+// combine rather than overwrite one another.
+fn issueStatements(i: IssueFact) -> List[SqlStatement] {
+	let gone = i.state == "deleted" || i.state == "transferred"
+	let row = SqlStatement {
+		sql: """
+			INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+			                    state_reason, opened_at, closed_at, updated_at, comments)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+			ON CONFLICT (repo, number) DO UPDATE SET
+			  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
+			  author_association = excluded.author_association, state = excluded.state,
+			  state_reason = excluded.state_reason, opened_at = excluded.opened_at,
+			  closed_at = excluded.closed_at, updated_at = excluded.updated_at, comments = excluded.comments
+			WHERE issues.state NOT IN ('deleted', 'transferred')
+			  AND (excluded.updated_at >= issues.updated_at OR excluded.state IN ('deleted', 'transferred'))
+		""",
+		params: [
+			Text(i.repo),
+			Integer(i.number),
+			Text(i.title),
+			Text(i.author),
+			Boolean(i.authorIsBot),
+			Text(i.authorAssociation),
+			Text(i.state),
+			text(i.stateReason),
+			Text(i.openedAt),
+			text(i.closedAt),
+			Text(i.updatedAt),
+			Integer(i.comments),
+		],
+	}
+	if gone {
+		[
+			row,
+			SqlStatement {
+				sql: "DELETE FROM issue_labels WHERE repo = ?1 AND number = ?2",
+				params: [Text(i.repo), Integer(i.number)],
+			},
+		]
+	} else {
+		labelSet(i).concat([row]).concat(labelChange(i))
+	}
+}
+
+// Replaces an issue's labels with the delivery's set, if the delivery is
+// strictly newer than the row (or there is no row yet) and the issue isn't a
+// tombstone. Runs before the row moves, so it compares with the row as it was.
+fn labelSet(i: IssueFact) -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				DELETE FROM issue_labels
+				WHERE repo = ?1 AND number = ?2
+				  AND NOT EXISTS (
+				    SELECT 1 FROM issues WHERE repo = ?1 AND number = ?2
+				      AND (updated_at >= ?3 OR state IN ('deleted', 'transferred')))
+			""",
+			params: [Text(i.repo), Integer(i.number), Text(i.updatedAt)],
+		},
+	].concat(i.labels.map((label) => SqlStatement {
+		sql: """
+			INSERT OR IGNORE INTO issue_labels (repo, number, label)
+			SELECT ?1, ?2, ?3
+			WHERE NOT EXISTS (
+			  SELECT 1 FROM issues WHERE repo = ?1 AND number = ?2
+			    AND (updated_at >= ?4 OR state IN ('deleted', 'transferred')))
+		""",
+		params: [Text(i.repo), Integer(i.number), Text(label), Text(i.updatedAt)],
+	}))
+}
+
+// The one label a `labeled` or `unlabeled` delivery names, added or removed
+// whatever the delivery's age (each such delivery is one change), unless the
+// issue is a tombstone.
+fn labelChange(i: IssueFact) -> List[SqlStatement] {
+	let Some(label) = i.label else { [] }
+	if i.action == "unlabeled" {
+		[
+			SqlStatement {
+				sql: "DELETE FROM issue_labels WHERE repo = ?1 AND number = ?2 AND label = ?3",
+				params: [Text(i.repo), Integer(i.number), Text(label)],
+			},
+		]
+	} else if i.action == "labeled" {
+		[
+			SqlStatement {
+				sql: """
+					INSERT OR IGNORE INTO issue_labels (repo, number, label)
+					SELECT ?1, ?2, ?3
+					WHERE EXISTS (
+					  SELECT 1 FROM issues WHERE repo = ?1 AND number = ?2 AND state NOT IN ('deleted', 'transferred'))
+				""",
+				params: [Text(i.repo), Integer(i.number), Text(label)],
+			},
+		]
+	} else {
+		[]
+	}
 }
 
 // Records a job from a `workflow_job` delivery (#42). The row only moves
