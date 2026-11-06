@@ -7,6 +7,10 @@ fixture completedRun = "fixtures/github/workflow_run.completed.json"
 
 fixture mergedPull = "fixtures/github/pull_request.closed.json"
 
+fixture closedIssue = "fixtures/github/issues.closed.json"
+
+fixture commented = "fixtures/github/issue_comment.created.json"
+
 --- A `workflow_run` delivery's headers.
 fn runHeaders(id: String) -> RequestHeaders {
 	RequestHeaders.of(["X-GitHub-Event: workflow_run", "X-GitHub-Delivery: \(id)"])
@@ -104,4 +108,39 @@ case "a purge Cloudflare refuses tells pages to wait for the cache to expire" {
 	let _ <- api.POST("/github", pullHeaders("pr-refused"), Bytes.fromUtf8(mergedPull)) by GitHub
 	expect LiveFeed.publish called once with e.refetch_ms == 31000
 	expect Logger.warn called once with msg.startsWith("Cloudflare refused the edge purge")
+}
+
+case "a public issue's delivery is pushed, as an issue" {
+	let seeded <- Deliveries.run(
+		"INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/bynk', 1, 'main')",
+		[]
+	)
+	expect seeded is Ok(_)
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: issue-live"]),
+		Bytes.fromUtf8(closedIssue)
+	) by GitHub
+	expect LiveFeed.publish called once with e == LiveEvent { refetch_ms: 3000, kind: "issue", repo: "bynk-lang/bynk", number: 2982, path: "", workflow: "", run_id: 0, attempt: 0, status: "closed", conclusion: "closed" }
+	// A redelivery tells nothing new.
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: issues", "X-GitHub-Delivery: issue-live"]),
+		Bytes.fromUtf8(closedIssue)
+	) by GitHub
+	expect LiveFeed.publish called once
+}
+
+case "a comment on a pull request pushes nothing" {
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: issue_comment", "X-GitHub-Delivery: pr-comment"]),
+		Bytes.fromUtf8(
+			commented.replace(
+				"\"number\": 2982,",
+				"\"number\": 2982,\n    \"pull_request\": {\"url\": \"https://api.github.com/repos/bynk-lang/bynk/pulls/2982\"},"
+			)
+		)
+	) by GitHub
+	expect LiveFeed.publish never called
 }

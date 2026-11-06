@@ -43,6 +43,16 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 5, step 4 (#48): the issues page at `/issues`, a fourth
+  dashboard tab linked from the others.
+  - **Each repository:** headline tiles (opened, closed by reason, time to
+    close, open now, stale), and opened and closed per day. It also shows
+    time to close by label, the backlog by age, and the stale issues with
+    their labels.
+  - **Outsiders:** figures on issues from outside the org appear only once
+    there are any.
+  - **Live:** the page updates over the live feed, which now sends a
+    `kind: "issue"` event for each public issue delivery.
 - Phase 4, slice 5, step 3 (#48): the issue-response routes.
   - **`GET /metrics/issues`:** over 7, 30 or 90 days, each public
     repository's issues opened, and closed as completed, not planned or

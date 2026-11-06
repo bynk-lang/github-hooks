@@ -2,6 +2,7 @@ commons github.issues
 
 uses github.events
 uses github.runs
+uses github.metrics
 
 ---
 The parts of an `issues` or `issue_comment` delivery the issue-response
@@ -229,4 +230,23 @@ transfer, GitHub answers for the old number with the issue where it now is.
 fn repoOfIssue(i: IssuePayload) -> Option[String] {
 	let prefix = "https://api.github.com/repos/"
 	i.repository_url.filter((u) => u.startsWith(prefix)).map((u) => u.replace(prefix, ""))
+}
+
+---
+The live-feed event for an issue that changed: `status` is the delivery's
+action and `conclusion` the issue's state; the run fields are empty.
+---
+fn issueEventOf(i: IssueFact) -> LiveEvent {
+	LiveEvent {
+		refetch_ms: 0,
+		kind: "issue",
+		repo: i.repo,
+		number: i.number,
+		path: "",
+		workflow: "",
+		run_id: 0,
+		attempt: 0,
+		status: i.action,
+		conclusion: i.state,
+	}
 }

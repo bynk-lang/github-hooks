@@ -182,9 +182,10 @@ an event whenever a public run's facts change:
  "status": "completed", "conclusion": "success"}
 ```
 
-`conclusion` is `""` until the run completes. Pull requests and releases share
-the feed as `kind: "pull"` and `kind: "release"` events
-([pr-flow.md](pr-flow.md#live-feed), [releases.md](releases.md#live-feed)),
+`conclusion` is `""` until the run completes. Pull requests, releases and
+issues share the feed as `kind: "pull"`, `kind: "release"` and
+`kind: "issue"` events ([pr-flow.md](pr-flow.md#live-feed),
+[releases.md](releases.md#live-feed), [issues.md](issues.md#live-feed)),
 which this page ignores.
 
 **Purging, and when to refetch.** Before an event is sent, the Worker purges

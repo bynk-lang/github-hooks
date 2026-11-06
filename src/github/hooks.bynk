@@ -51,6 +51,11 @@ embed releasesTemplate = "embeds/releases.html"
 
 asset releasesJs = "assets/releases.js"
 
+--- The issues page (#48, step 4): its template and script, with the same stylesheet.
+embed issuesTemplate = "embeds/issues.html"
+
+asset issuesJs = "assets/issues.js"
+
 ---
 The public metrics routes' per-address limit: 60 uncached requests a minute
 is ample for a page polling every 30 seconds, and bounds what anyone can make
@@ -529,13 +534,7 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 			recordReview(d, body)
 		} else if d.event == "push" {
 			recordTag(d, body)
-		} else if d.event == "workflow_job" {
-			recordJob(d, body)
-		} else if d.event == "issues" || d.event == "issue_comment" {
-			recordIssue(d, body)
-		} else {
-			Effect.pure(())
-		}
+		} else if d.event == "workflow_job" { recordJob(d, body) } else { Effect.pure(()) }
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
@@ -543,6 +542,8 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 			recordPull(d, body, fresh)
 		} else if d.event == "release" {
 			releaseChanged(d, body, fresh)
+		} else if d.event == "issues" || d.event == "issue_comment" {
+			recordIssue(d, body, fresh)
 		} else {
 			Effect.pure(nothing)
 		}
@@ -766,15 +767,26 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 // the author, and not a bot, may also set the issue's first response, if
 // they're a maintainer: by GitHub's author association, or else by asking
 // GitHub whether they belong to the organisation (see `confirmed`). Comments
-// on pull requests are ignored. Open pages aren't told yet: the issues page
-// and its live events come in a later step.
-fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, GitHubApi, Clock {
+// on pull requests are ignored. Open pages are told of a public issue's
+// change on its first arrival, as for a pull request.
+fn recordIssue(
+	d: Delivery,
+	body: Bytes,
+	fresh: Bool
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets, GitHubApi, Clock {
+	let nothing: Option[LiveEvent] = None
 	let Ok(read) = issueOf(body) else match {
-		Err(why) => Logger.error("could not read issue from \(d.id): \(why)"),
+		Err(why) => {
+			let _ <- Logger.error("could not read issue from \(d.id): \(why)")
+			Effect.pure(nothing)
+		},
 	}
-	let Some(news) = read else { Effect.pure(()) }
+	let Some(news) = read else { Effect.pure(nothing) }
 	let Ok(i) <- confirmAuthor(d.installation, news.issue) else match {
-		Err(why) => Logger.error(why),
+		Err(why) => {
+			let _ <- Logger.error(why)
+			Effect.pure(nothing)
+		},
 	}
 	let nobody: Option[IssueResponse] = None
 	let response <- match news.response {
@@ -794,9 +806,17 @@ fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger,
 		None => [],
 	}
 	let Ok(_) <- Deliveries.batch(issueStatements(i).concat(responded)) else match {
-		Err(e) => Logger.error("could not record \(i.repo) issue #\(i.number): \(sqlError(e))"),
+		Err(e) => {
+			let _ <- Logger.error("could not record \(i.repo) issue #\(i.number): \(sqlError(e))")
+			Effect.pure(nothing)
+		},
 	}
-	Effect.pure(())
+	// Tell open pages of a delivery's first arrival only (a redelivery tells
+	// nothing new), and only for a repository the public pages may show.
+	let true = fresh else { Effect.pure(nothing) }
+	let shown <- shownLive(i.repo)
+	let true = shown else { Effect.pure(nothing) }
+	Effect.pure(Some(issueEventOf(i)))
 }
 
 // The response a comment is, if its author is a maintainer. GitHub's author
@@ -1738,6 +1758,12 @@ service api from http {
 		let page = releasesTemplate
 			.replace("{css}", dashboardCss.url)
 			.replace("{js}", releasesJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The issues page. Not `@cache`d, for the same reason as `/`.
+	on GET("/issues") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = issuesTemplate.replace("{css}", dashboardCss.url).replace("{js}", issuesJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 

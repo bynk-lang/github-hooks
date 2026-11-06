@@ -80,6 +80,7 @@ get 400 "a PR flow window other than 7, 30 or 90 days is refused" "/metrics/prs?
 get 200 "releases are public" "/metrics/releases?days=30"
 get 200 "recent releases are public" /metrics/releases/recent
 get 200 "the releases page is public" /releases
+get 200 "the issues page is public" /issues
 get 200 "runner waits are public" "/metrics/runners?days=30"
 get 200 "jobs waiting now are public" /metrics/runners/now
 get 400 "a runners window other than 7, 30 or 90 days is refused" "/metrics/runners?days=14"

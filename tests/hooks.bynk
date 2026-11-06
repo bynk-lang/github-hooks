@@ -16,6 +16,35 @@ case "the root is the CI health page, loading its own stylesheet and script" {
 	expect !page.contains("{js}")
 }
 
+case "/issues is the issues page, with the shared stylesheet, its own script, and links between the pages" {
+	let r <- api.GET("/issues") by Visitor
+	let Raw(body, contentType) = r else {
+		expect false
+	}
+	expect contentType == "text/html; charset=utf-8"
+	let Some(page) = body.decodeUtf8() else {
+		expect false
+	}
+	expect page.contains("<title>bynk-lang issues</title>")
+	expect page.contains("href=\"\(dashboardCss.url)\"")
+	expect page.contains("src=\"\(issuesJs.url)\"")
+	expect page.contains("<a href=\"/issues\" aria-current=\"page\">Issues</a>")
+	expect page.contains("<a href=\"/prs\">PR flow</a>")
+	expect !page.contains("{css}")
+	expect !page.contains("{js}")
+}
+
+case "every dashboard links to the issues page" {
+	let ci <- api.GET("/") by Visitor
+	let prs <- api.GET("/prs") by Visitor
+	let releases <- api.GET("/releases") by Visitor
+	let pages = [ci, prs, releases].map((r) => match r {
+		Raw(body, _) => body.decodeUtf8().getOrElse(""),
+		_ => "",
+	})
+	expect pages.all((p) => p.contains("<a href=\"/issues\">Issues</a>"))
+}
+
 case "/prs is the PR flow page, with the shared stylesheet, its own script, and links between the pages" {
 	let r <- api.GET("/prs") by Visitor
 	let Raw(body, contentType) = r else {

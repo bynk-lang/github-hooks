@@ -149,9 +149,9 @@ type LiveHello = {
 ---
 Something that changed, pushed to every open page so it refreshes at once.
 `kind` is `run` (a workflow run: `path` to `conclusion` describe it, and
-`conclusion` is `""` until it completes) or `pull` (a pull request: `number`,
+`conclusion` is `""` until it completes), `pull` (a pull request: `number`,
 `status` is the delivery's action and `conclusion` the PR's state; the run
-fields are empty). Frames are Bynk's JSON, where an `Option` would be tagged,
+fields are empty), `release`, or `issue` (an issue, as a pull request is). Frames are Bynk's JSON, where an `Option` would be tagged,
 so plain values keep the pages simple.
 
 `refetch_ms` is how long a page should wait before refetching to be sure of
