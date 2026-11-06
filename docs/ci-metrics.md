@@ -12,8 +12,11 @@ Phase 4 (#20) of github-hooks: the health of the organisation's CI, built
 from the `workflow_run` deliveries the service already receives. These routes
 are **public**: no token. They show only repositories whose latest delivery
 says they're public, less any named in `DASHBOARD_EXCLUDE`. Each answer is
-cached for 30 seconds (`Cache-Control: public, max-age=30`), and each address
-may make 60 uncached requests a minute; past that the answer is `429`.
+cached at Cloudflare's edge for 30 seconds per URL (`Cache-Control: public,
+max-age=30`, served through Workers Cache by `bynk.cloudflare.EdgeCache`), so
+repeated views are answered without running the Worker or reading D1. A live
+change purges the cache (see [Live feed](#live-feed)). Each address may make
+60 uncached requests a minute; past that the answer is `429`.
 
 There is no backfill: data starts when `workflow_runs` was deployed.
 `data_since` says when, so a 30-day window with 3 days of data reads as that.
@@ -174,21 +177,36 @@ The page opens a WebSocket to `/live?board=ci&client=<random id>` and is sent
 an event whenever a public run's facts change:
 
 ```json
-{"kind": "run", "repo": "bynk-lang/bynk", "number": 0, "path": ".github/workflows/ci.yml",
- "workflow": "CI", "run_id": 41981894779, "attempt": 1, "status": "completed", "conclusion": "success"}
+{"refetch_ms": 3000, "kind": "run", "repo": "bynk-lang/bynk", "number": 0,
+ "path": ".github/workflows/ci.yml", "workflow": "CI", "run_id": 41981894779, "attempt": 1,
+ "status": "completed", "conclusion": "success"}
 ```
 
 `conclusion` is `""` until the run completes. Pull requests share the feed as
 `kind: "pull"` events ([pr-flow.md](pr-flow.md#live-feed)), which this page
-ignores. The page treats an event as a
-nudge: 31 seconds after it, the page refetches `/metrics/ci/now`, and
-`/metrics/ci` and `/metrics/ci/history` too if any run completed meanwhile
-(nothing else moves them), so what it shows always follows the routes' definitions.
-The wait is the routes' cache: they are cached 30 seconds per URL at the edge,
-shared by every viewer, so a copy made just before the event (by any viewer)
-may be served until 30 seconds after it. Events during the wait don't postpone
-the refetch, so a steady stream of runs still refreshes the page; one more
-refetch follows 31 seconds after the latest of them. While
+ignores.
+
+**Purging, and when to refetch.** Before an event is sent, the Worker purges
+`/metrics/` from the edge cache, so a refetch shortly after sees the change.
+Cloudflare allows a Worker 5 purges a minute, so a purge first claims a row in
+D1 (`edge_purges`, migration `0008`) that allows one per 15 seconds across
+every isolate. `refetch_ms` tells the page how long to wait: 3 seconds when the
+purge went through, or 31 seconds (until any copy cached before the change has
+expired) when it was throttled or Cloudflare refused it.
+
+The page treats an event as a nudge: after `refetch_ms` it refetches
+`/metrics/ci/now`, and `/metrics/ci` and `/metrics/ci/history` too if any run
+completed meanwhile (nothing else moves them), so what it shows always follows
+the routes' definitions. A purge clears every earlier change's stale copies
+too; events during a wait never postpone the refetch, so a steady stream of
+runs still refreshes the page; and refetches are at least 10 seconds apart.
+Every open page hears of a purge at once, so each adds up to 4 seconds at
+random, letting the first request at each edge location refill the cache for
+the rest. A purged event is also followed by one more refetch 31 seconds
+later: a request that read D1 just before the change can refill the cache just
+after the purge, and that copy has expired by then.
+The page always asks the edge (`cache: "no-cache"`), never its browser's own
+copy, which a purge wouldn't reach. While
 the feed is connected it polls only every 2 minutes, as a safety net; if the
 feed drops it reconnects with backoff (5 seconds, doubling to a minute) and
 polls every 30 seconds meanwhile.

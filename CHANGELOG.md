@@ -28,6 +28,17 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- The public metrics routes are now really cached at Cloudflare's edge.
+  `@cache` alone only sends `Cache-Control`; Cloudflare doesn't store a
+  response a Worker generates, so every request ran the Worker and read D1
+  (the docs said otherwise). The Worker now declares
+  `capability Edge = EdgeCache` (Workers Cache, experimental), so the routes'
+  answers are kept at the edge for 30 seconds and every other response is sent
+  `no-store`. Each live change purges `/metrics/`, at most once per 15 seconds
+  (claimed in D1, migration `0008`; Cloudflare allows 5 purges a minute), and
+  `LiveEvent` gains `refetch_ms`: 3 seconds when the purge went through, 31
+  when it didn't. Both pages follow it, always ask the edge rather than their
+  browser's copy, and refetch at most every 10 seconds.
 - Phase 4, slice 2, step 4 (#26): the PR flow page at `/prs`, linked to and
   from the CI health page. For each public repository: tiles for merged, ready
   to merge, opened to merge, time in the merge queue and size; why pull

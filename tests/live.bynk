@@ -13,8 +13,9 @@ fn runHeaders(id: String) -> RequestHeaders {
 }
 
 case "a public run that changed is pushed, once" {
+	stub Edge.purge(_) returns true
 	let _ <- api.POST("/github", runHeaders("live-1"), Bytes.fromUtf8(completedRun)) by GitHub
-	expect LiveFeed.publish called once with e == LiveEvent { kind: "run", repo: "bynk-lang/github-hooks", number: 0, path: ".github/workflows/ci.yml", workflow: "CI", run_id: 41978704067, attempt: 1, status: "completed", conclusion: "success" }
+	expect LiveFeed.publish called once with e == LiveEvent { refetch_ms: 3000, kind: "run", repo: "bynk-lang/github-hooks", number: 0, path: ".github/workflows/ci.yml", workflow: "CI", run_id: 41978704067, attempt: 1, status: "completed", conclusion: "success" }
 }
 
 case "a redelivery, which changes nothing, pushes nothing more" {
@@ -62,8 +63,9 @@ fn pullHeaders(id: String) -> RequestHeaders {
 }
 
 case "a public pull request's delivery is pushed, as a pull" {
+	stub Edge.purge(_) returns true
 	let _ <- api.POST("/github", pullHeaders("pr-live-1"), Bytes.fromUtf8(mergedPull)) by GitHub
-	expect LiveFeed.publish called once with e == LiveEvent { kind: "pull", repo: "bynk-lang/github-hooks", number: 25, path: "", workflow: "", run_id: 0, attempt: 0, status: "closed", conclusion: "merged" }
+	expect LiveFeed.publish called once with e == LiveEvent { refetch_ms: 3000, kind: "pull", repo: "bynk-lang/github-hooks", number: 25, path: "", workflow: "", run_id: 0, attempt: 0, status: "closed", conclusion: "merged" }
 }
 
 case "a pull request's redelivery pushes nothing more" {
@@ -79,4 +81,27 @@ case "a private repository's pull request is never pushed" {
 		Bytes.fromUtf8(mergedPull.replace("\"private\": false", "\"private\": true"))
 	) by GitHub
 	expect LiveFeed.publish never called
+}
+
+case "a change purges the metrics routes' edge cache, so pages can refetch at once" {
+	stub Edge.purge(_) returns true
+	let _ <- api.POST("/github", pullHeaders("pr-edge-1"), Bytes.fromUtf8(mergedPull)) by GitHub
+	expect Edge.purge called once with prefixes == ["/metrics/"]
+	expect LiveFeed.publish called once with e.refetch_ms == 3000
+}
+
+case "a second change within 15 seconds isn't purged, so pages wait for the cache to expire" {
+	stub Edge.purge(_) returns true
+	let _ <- api.POST("/github", runHeaders("edge-run"), Bytes.fromUtf8(completedRun)) by GitHub
+	let _ <- api.POST("/github", pullHeaders("edge-pr"), Bytes.fromUtf8(mergedPull)) by GitHub
+	expect Edge.purge called once
+	expect LiveFeed.publish called with e.kind == "run" && e.refetch_ms == 3000
+	expect LiveFeed.publish called with e.kind == "pull" && e.refetch_ms == 31000
+}
+
+case "a purge Cloudflare refuses tells pages to wait for the cache to expire" {
+	stub Edge.purge(_) returns false
+	let _ <- api.POST("/github", pullHeaders("pr-refused"), Bytes.fromUtf8(mergedPull)) by GitHub
+	expect LiveFeed.publish called once with e.refetch_ms == 31000
+	expect Logger.warn called once with msg.startsWith("Cloudflare refused the edge purge")
 }

@@ -7,8 +7,7 @@
   const NOW_EVERY_MS = 30_000;      // what is running, and the default-branch state
   const METRICS_EVERY_MS = 60_000;  // the window's figures move more slowly
   const LIVE_POLL_MS = 120_000;     // while the live feed is up, polling is only a safety net
-  const LIVE_SETTLE_MS = 3_000;     // the shortest wait between two live refetches
-  const CACHE_MS = 30_000;          // the routes' `max-age`, at the edge and in the browser
+  const CACHE_MS = 30_000;          // the routes' `max-age` at the edge
   let days = 7;
   let metrics = null;
   let now = null;
@@ -54,7 +53,9 @@
     }) + " UTC";
 
   async function getJson(path) {
-    const res = await fetch(path, { headers: { accept: "application/json" } });
+    // Always ask the edge, never the browser's own copy: a live change purges
+    // the edge, which the browser's cache wouldn't know about.
+    const res = await fetch(path, { cache: "no-cache", headers: { accept: "application/json" } });
     if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
     return res.json();
   }
@@ -561,29 +562,51 @@
   const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
     : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 
-  // A live event's refetch. Responses are cached 30 seconds at the edge,
-  // keyed by URL and shared by every viewer, so any copy made before the event
-  // (by this page or another) may be served until 30 seconds after it: the
-  // refetch goes 31 seconds after the event. Events during the wait don't
-  // postpone it, so a steady stream still refreshes; one more refetch follows
-  // 31 seconds after the latest of them.
+  // A live event's refetch. The server says how long to wait (`refetch_ms`):
+  // a few seconds when it purged the metrics routes' edge cache for the
+  // change, or until any copy cached before it has expired when it couldn't
+  // purge (an event without one, from an older server, gets the same). A
+  // purge clears every earlier change's stale copies too. Events during a
+  // wait never postpone the refetch, so a steady stream still refreshes, and
+  // refetches are at least `LIVE_GAP_MS` apart.
+  //
+  // After a purge, every open page is told the same moment, so each waits a
+  // little more at random (`LIVE_JITTER_MS`): the first request at each edge
+  // location refills the cache for the rest, rather than all of them missing
+  // together. And a purged event is followed by one more refetch once the
+  // cache's 30 seconds have passed: a request that read D1 just before the
+  // change can refill the cache just after the purge, and that copy is gone
+  // by then.
   const LIVE_DELAY_MS = CACHE_MS + 1_000;
+  const PURGED_MAX_MS = 5_000;
+  const LIVE_GAP_MS = 10_000;
+  const LIVE_JITTER_MS = 4_000;
   let liveTimer = null;
-  let lastEventAt = 0;
-  let timerFor = 0;
-  function onLiveEvent(refetch) {
-    lastEventAt = Date.now();
-    if (liveTimer) return;
-    timerFor = lastEventAt;
-    liveTimer = setTimeout(() => fireLive(refetch), LIVE_DELAY_MS);
+  let timerDue = 0;
+  let latestDue = 0;
+  let lastRefetch = 0;
+  function onLiveEvent(refetchMs, refetch) {
+    const now = Date.now();
+    const wait = Number.isFinite(refetchMs) && refetchMs > 0 ? refetchMs : LIVE_DELAY_MS;
+    const purged = wait <= PURGED_MAX_MS;
+    const due = now + wait + (purged ? Math.random() * LIVE_JITTER_MS : 0);
+    // A purge covers every earlier change; its follow-up covers the purge.
+    latestDue = purged ? now + LIVE_DELAY_MS : Math.max(latestDue, due);
+    scheduleLive(due, refetch);
+  }
+  function scheduleLive(due, refetch) {
+    const at = Math.max(due, lastRefetch + LIVE_GAP_MS);
+    if (liveTimer && timerDue <= at) return;
+    clearTimeout(liveTimer);
+    timerDue = at;
+    liveTimer = setTimeout(() => fireLive(refetch), Math.max(0, at - Date.now()));
   }
   function fireLive(refetch) {
     liveTimer = null;
+    lastRefetch = Date.now();
     refetch();
-    if (lastEventAt > timerFor) {
-      timerFor = lastEventAt;
-      liveTimer = setTimeout(() => fireLive(refetch), Math.max(LIVE_SETTLE_MS, lastEventAt + LIVE_DELAY_MS - Date.now()));
-    }
+    if (latestDue > lastRefetch) scheduleLive(latestDue, refetch);
+    else latestDue = 0;
   }
 
   function connect() {
@@ -600,14 +623,15 @@
     // Only a completed run moves the window's figures and history; any
     // change moves what is running.
     ws.onmessage = (m) => {
+      let e = null;
       try {
-        const e = JSON.parse(m.data);
-        if (e.kind === "pull") return; // pull requests are the PR flow page's
-        if (e.status === "completed") completedSince = true;
+        e = JSON.parse(m.data);
       } catch {
-        completedSince = true; // unreadable: assume the worst and refetch it all
+        // unreadable: assume the worst and refetch it all, after the longest wait
       }
-      onLiveEvent(() => {
+      if (e && e.kind === "pull") return; // pull requests are the PR flow page's
+      if (!e || e.status === "completed") completedSince = true;
+      onLiveEvent(e ? e.refetch_ms : undefined, () => {
         refreshNow();
         if (completedSince) refreshWindow();
         completedSince = false;
