@@ -1,0 +1,142 @@
+// Phase 4, slice 4, step 1 (#42): `workflow_job` deliveries become
+// `workflow_jobs` rows, through the webhook, against an in-memory D1 with the
+// migrations applied. The fixture is a real `bynk` CI job, "Test suite
+// (ubuntu-latest)", which ran on a self-hosted runner (its steps and runner
+// name left out), wrapped as the webhook delivers it; each case varies it.
+suite github.hooks
+
+fixture completedJob = "fixtures/github/workflow_job.completed.json"
+
+--- A delivery's headers.
+fn headers(id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: workflow_job", "X-GitHub-Delivery: \(id)"])
+}
+
+---
+The job at another moment: its action and status, its conclusion and
+`completed_at` as JSON (`null` or quoted), and its runner group.
+---
+fn jobAt(action: String, conclusion: String, completed: String, group: String) -> Bytes {
+	Bytes.fromUtf8(completedJob
+		.replace("\"action\": \"completed\"", "\"action\": \"\(action)\"")
+		.replace("\"status\": \"completed\"", "\"status\": \"\(action)\"")
+		.replace("\"conclusion\": \"success\"", "\"conclusion\": \(conclusion)")
+		.replace("\"completed_at\": \"2026-11-06T09:19:43Z\"", "\"completed_at\": \(completed)")
+		.replace("\"runner_group_name\": \"default\"", "\"runner_group_name\": \(group)"))
+}
+
+--- The one job's row, every column but its id.
+fn row() -> String {
+	"SELECT repo, run_id, attempt, workflow, name, runner, runner_group, status, conclusion, created_at, started_at, completed_at FROM workflow_jobs"
+}
+
+case "a completed job is recorded with the runner it asked for and its times" {
+	let r <- api.POST("/github", headers("job-1"), Bytes.fromUtf8(completedJob)) by GitHub
+	expect r is Accepted(_)
+	let job <- Deliveries.first(row(), [])
+	expect job == Ok(Some("{\"repo\":\"bynk-lang/bynk\",\"run_id\":42190975969,\"attempt\":1,\"workflow\":\"CI\",\"name\":\"Test suite (ubuntu-latest)\",\"runner\":\"self-hosted\",\"runner_group\":\"default\",\"status\":\"completed\",\"conclusion\":\"success\",\"created_at\":\"2026-11-06T09:16:48.000Z\",\"started_at\":\"2026-11-06T09:16:50.000Z\",\"completed_at\":\"2026-11-06T09:19:43.000Z\"}"))
+	expect Logger.error never called
+}
+
+case "a job's life: queued, in progress, completed, whatever order the deliveries arrive in" {
+	// Queued: GitHub sends `started_at` as `created_at` until a runner takes
+	// the job, so it isn't kept; no runner group yet.
+	let _ <- api.POST(
+		"/github",
+		headers("job-queued"),
+		jobAt("queued", "null", "null", "null")
+	) by GitHub
+	let queued <- Deliveries.first(
+		"SELECT status, runner_group, started_at, completed_at FROM workflow_jobs",
+		[]
+	)
+	expect queued == Ok(Some("{\"status\":\"queued\",\"runner_group\":null,\"started_at\":null,\"completed_at\":null}"))
+	let _ <- api.POST("/github", headers("job-done"), Bytes.fromUtf8(completedJob)) by GitHub
+	// A late in_progress after completed changes nothing.
+	let _ <- api.POST(
+		"/github",
+		headers("job-late"),
+		jobAt("in_progress", "null", "null", "\"default\"")
+	) by GitHub
+	// Nor does a late queued.
+	let _ <- api.POST(
+		"/github",
+		headers("job-later"),
+		jobAt("queued", "null", "null", "null")
+	) by GitHub
+	let done <- Deliveries.first(
+		"SELECT status, conclusion, runner_group, started_at, completed_at FROM workflow_jobs",
+		[]
+	)
+	expect done == Ok(Some("{\"status\":\"completed\",\"conclusion\":\"success\",\"runner_group\":\"default\",\"started_at\":\"2026-11-06T09:16:50.000Z\",\"completed_at\":\"2026-11-06T09:19:43.000Z\"}"))
+}
+
+case "in progress, a job has started but not finished; a queued delivery after it doesn't unstart it" {
+	let _ <- api.POST(
+		"/github",
+		headers("job-running"),
+		jobAt("in_progress", "null", "null", "\"default\"")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("job-queued-late"),
+		jobAt("queued", "null", "null", "null")
+	) by GitHub
+	let running <- Deliveries.first(
+		"SELECT status, runner_group, started_at, completed_at FROM workflow_jobs",
+		[]
+	)
+	expect running == Ok(Some("{\"status\":\"in_progress\",\"runner_group\":\"default\",\"started_at\":\"2026-11-06T09:16:50.000Z\",\"completed_at\":null}"))
+}
+
+case "a job that asked for no label is on an unknown runner; an empty runner group is none" {
+	let _ <- api.POST(
+		"/github",
+		headers("job-bare"),
+		Bytes.fromUtf8(completedJob
+			.replace(
+				"\"labels\": [\n      \"self-hosted\",\n      \"Linux\",\n      \"X64\"\n    ]",
+				"\"labels\": []"
+			)
+			.replace("\"runner_group_name\": \"default\"", "\"runner_group_name\": \"\""))
+	) by GitHub
+	let job <- Deliveries.first("SELECT runner, runner_group FROM workflow_jobs", [])
+	expect job == Ok(Some("{\"runner\":\"unknown\",\"runner_group\":null}"))
+}
+
+case "a redelivered job changes nothing" {
+	let _ <- api.POST("/github", headers("job-1"), Bytes.fromUtf8(completedJob)) by GitHub
+	let again <- api.POST("/github", headers("job-1"), Bytes.fromUtf8(completedJob)) by GitHub
+	expect again == Ok("duplicate")
+	let count <- Deliveries.first("SELECT count(*) AS n FROM workflow_jobs", [])
+	expect count == Ok(Some("{\"n\":1}"))
+}
+
+case "a job payload that doesn't decode is logged, and the delivery is still recorded" {
+	let r <- api.POST(
+		"/github",
+		headers("job-bad"),
+		Bytes.fromUtf8(
+			"{\"action\": \"queued\", \"workflow_job\": {\"id\": \"not a number\"}, \"repository\": {\"full_name\": \"bynk-lang/bynk\"}}"
+		)
+	) by GitHub
+	expect r is Accepted(_)
+	expect Logger.error called once
+	let count <- Deliveries.first("SELECT count(*) AS n FROM workflow_jobs", [])
+	expect count == Ok(Some("{\"n\":0}"))
+}
+
+case "a later delivery that names no runner group keeps the one already known" {
+	let _ <- api.POST(
+		"/github",
+		headers("job-running"),
+		jobAt("in_progress", "null", "null", "\"default\"")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("job-done-nameless"),
+		jobAt("completed", "\"cancelled\"", "\"2026-11-06T09:18:00Z\"", "null")
+	) by GitHub
+	let job <- Deliveries.first("SELECT status, conclusion, runner_group FROM workflow_jobs", [])
+	expect job == Ok(Some("{\"status\":\"completed\",\"conclusion\":\"cancelled\",\"runner_group\":\"default\"}"))
+}

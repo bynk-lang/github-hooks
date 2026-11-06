@@ -1,0 +1,67 @@
+{
+  "action": "completed",
+  "workflow_job": {
+    "id": 127812039258,
+    "run_id": 42190975969,
+    "workflow_name": "CI",
+    "head_branch": "main",
+    "run_url": "https://api.github.com/repos/bynk-lang/bynk/actions/runs/42190975969",
+    "run_attempt": 1,
+    "node_id": "CR_kwDOSfAttM8AAAAdwjDyWg",
+    "head_sha": "44ca25c6405e8feabca095381c620fcf0914caf9",
+    "url": "https://api.github.com/repos/bynk-lang/bynk/actions/jobs/127812039258",
+    "html_url": "https://github.com/bynk-lang/bynk/actions/runs/42190975969/job/127812039258",
+    "status": "completed",
+    "conclusion": "success",
+    "created_at": "2026-11-06T09:16:48Z",
+    "started_at": "2026-11-06T09:16:50Z",
+    "completed_at": "2026-11-06T09:19:43Z",
+    "name": "Test suite (ubuntu-latest)",
+    "check_run_url": "https://api.github.com/repos/bynk-lang/bynk/check-runs/127812039258",
+    "labels": [
+      "self-hosted",
+      "Linux",
+      "X64"
+    ],
+    "runner_id": 778,
+    "runner_name": "self-hosted-runner-1",
+    "runner_group_id": 1,
+    "runner_group_name": "default",
+    "steps": []
+  },
+  "repository": {
+    "id": 1240477108,
+    "node_id": "R_kgDOSfAttA",
+    "name": "bynk",
+    "full_name": "bynk-lang/bynk",
+    "private": false,
+    "owner": {
+      "login": "bynk-lang",
+      "id": 295025398,
+      "node_id": "O_kgDOEZW69g",
+      "type": "Organization",
+      "site_admin": false,
+      "html_url": "https://github.com/bynk-lang"
+    },
+    "html_url": "https://github.com/bynk-lang/bynk",
+    "description": "Bynk is a statically typed programming language for building services.",
+    "fork": false,
+    "url": "https://api.github.com/repos/bynk-lang/bynk",
+    "created_at": "2026-05-16T07:13:41Z",
+    "updated_at": "2026-11-06T06:51:01Z",
+    "pushed_at": "2026-11-06T07:00:23Z",
+    "default_branch": "main",
+    "visibility": "public"
+  },
+  "organization": {
+    "login": "bynk-lang"
+  },
+  "sender": {
+    "login": "a-person",
+    "id": 1,
+    "type": "User"
+  },
+  "installation": {
+    "id": 42
+  }
+}

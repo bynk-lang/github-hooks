@@ -80,7 +80,8 @@ fn digest(day: Day, tallies: List[Tally]) -> DayDigest {
 How long recorded activity is kept. A delivery is kept 90 days, enough for any
 quarter's digests. A `workflow_run` that is only `requested` or `in_progress`
 is kept 7 days: two thirds of all deliveries are workflow runs, and the
-`completed` delivery carries the run's outcome.
+`completed` delivery carries the run's outcome. So is every `workflow_job`
+delivery (#42): about 15,000 a day, whose facts are kept in `workflow_jobs`.
 ---
 const KEEP: Duration = 90.days
 
@@ -94,16 +95,19 @@ const RETENTION_BATCH: Int = 5000
 
 ---
 The `received_at` text each rule deletes before, from the run's time. Compared
-as text with `received_at`, as the digest's range is.
+as text with `received_at`, as the digest's range is. `jobDays` is the UTC day
+(`YYYY-MM-DD`) job rows are rolled up and pruned before: whole days, 90 back.
 ---
 type Cutoffs = {
 	deliveries: String,
 	runProgress: String,
+	jobDays: String,
 }
 
 fn cutoffs(now: Instant) -> Cutoffs {
 	Cutoffs {
 		deliveries: (now - KEEP).toIso(),
 		runProgress: (now - KEEP_RUN_PROGRESS).toIso(),
+		jobDays: (now - KEEP).toIso().slice(0, 10),
 	}
 }

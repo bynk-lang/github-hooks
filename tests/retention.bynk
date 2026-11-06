@@ -27,7 +27,7 @@ case "old deliveries and stale workflow-run progress go; the rest stays" {
 	expect r is Ok(_)
 	let kept <- Deliveries.all("SELECT id FROM deliveries ORDER BY id", [])
 	expect kept == Ok("[{\"id\":\"edge-push\"},{\"id\":\"issue-opened\"},{\"id\":\"recent-running\"},{\"id\":\"run-done\"}]")
-	expect Logger.info called once with msg == "retention removed 2 workflow-run progress, 2 deliveries and 0 actions"
+	expect Logger.info called once with msg == "retention removed 2 workflow-run progress and job deliveries, 2 deliveries and 0 actions"
 }
 
 case "old actions go, and who was welcomed is kept for good" {
@@ -49,7 +49,7 @@ case "old actions go, and who was welcomed is kept for good" {
 	expect actions == Ok("[{\"delivery\":\"d-new\"}]")
 	let welcomed <- Deliveries.all("SELECT login FROM welcomed", [])
 	expect welcomed == Ok("[{\"login\":\"newcomer\"}]")
-	expect Logger.info called once with msg == "retention removed 0 workflow-run progress, 0 deliveries and 1 actions"
+	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 1 actions"
 }
 
 case "a run with nothing to remove logs nothing" {
@@ -85,7 +85,7 @@ case "a backlog is removed a batch at a time, oldest first" {
 	expect first is Ok(_)
 	let left <- Deliveries.all("SELECT id FROM deliveries ORDER BY id", [])
 	expect left == Ok("[{\"id\":\"push-4999\"},{\"id\":\"push-5000\"}]")
-	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress, 5000 deliveries and 0 actions; more remain for the next run"
+	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress and job deliveries, 5000 deliveries and 0 actions; more remain for the next run"
 	let second <- retention.schedule("23 * * * *", nowMs() + 3600000)
 	expect second is Ok(_)
 	let none <- Deliveries.all("SELECT id FROM deliveries", [])
@@ -105,12 +105,114 @@ case "a full batch of workflow-run progress alone says more remain" {
 	)
 	let r <- retention.schedule("23 * * * *", nowMs())
 	expect r is Ok(_)
-	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress, 0 deliveries and 0 actions; more remain for the next run"
+	expect Logger.info called once with msg == "retention removed 5000 workflow-run progress and job deliveries, 0 deliveries and 0 actions; more remain for the next run"
 }
 
 case "a failed delete is logged and is the run's error" {
 	stub Deliveries.run(_, _) returns Err(Failed("database is locked"))
 	let r <- retention.schedule("23 * * * *", nowMs())
-	expect r is Err("retention could not delete workflow-run progress: database is locked")
-	expect Logger.error called once with msg == "retention could not delete workflow-run progress: database is locked"
+	expect r is Err("retention could not delete workflow-run progress and job deliveries: database is locked")
+	expect Logger.error called once with msg == "retention could not delete workflow-run progress and job deliveries: database is locked"
+}
+
+case "job deliveries go after 7 days, whatever their action" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO deliveries (id, event, action, repo, size, received_at) VALUES
+		  ('job-done-old',   'workflow_job', 'completed', 'bynk-lang/bynk', 1, '2026-10-28T23:59:59.999Z'),
+		  ('job-queued-old', 'workflow_job', 'queued',    'bynk-lang/bynk', 1, '2026-10-20T00:00:00.000Z'),
+		  ('job-done-new',   'workflow_job', 'completed', 'bynk-lang/bynk', 1, '2026-10-29T00:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	let kept <- Deliveries.all("SELECT id FROM deliveries ORDER BY id", [])
+	expect kept == Ok("[{\"id\":\"job-done-new\"}]")
+}
+
+---
+Jobs from before the 90-day window (2026-08-07), and one inside it. On
+5 August, `bynk-lang/bynk`'s self-hosted test job ran three times: queued 60 s
+and ran 240 s (success); queued 600 s and failed after 120 s; and queued
+30 s and ran 180 s (success). A fourth was skipped, and counts nowhere. So:
+3 jobs, 1 failed, 3 waited, waits [30, 60, 600] summing 690 (p50 60, p95
+600), 2 succeeded, durations [180, 240] summing 420 (p50 180). One job on
+6 August, and one on 8 August, which is kept.
+---
+fn jobs() -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
+			                           conclusion, created_at, started_at, completed_at) VALUES
+			  (1, 'bynk-lang/bynk', 1, 1, 'CI', 'Test suite', 'self-hosted', 'default', 'completed', 'success',
+			   '2026-08-05T10:00:00.000Z', '2026-08-05T10:01:00.000Z', '2026-08-05T10:05:00.000Z'),
+			  (2, 'bynk-lang/bynk', 2, 1, 'CI', 'Test suite', 'self-hosted', 'default', 'completed', 'failure',
+			   '2026-08-05T11:00:00.000Z', '2026-08-05T11:10:00.000Z', '2026-08-05T11:12:00.000Z'),
+			  (3, 'bynk-lang/bynk', 3, 1, 'CI', 'Test suite', 'self-hosted', 'default', 'completed', 'success',
+			   '2026-08-05T23:59:00.000Z', '2026-08-05T23:59:30.000Z', '2026-08-06T00:02:30.000Z'),
+			  (4, 'bynk-lang/bynk', 4, 1, 'CI', 'Test suite', 'self-hosted', NULL, 'completed', 'skipped',
+			   '2026-08-05T12:00:00.000Z', '2026-08-05T12:00:00.000Z', '2026-08-05T12:00:00.000Z'),
+			  (5, 'bynk-lang/bynk', 5, 1, 'CI', 'Lint', 'ubuntu-latest', 'GitHub Actions', 'completed', 'success',
+			   '2026-08-06T09:00:00.000Z', '2026-08-06T09:00:05.000Z', '2026-08-06T09:01:05.000Z'),
+			  (6, 'bynk-lang/bynk', 6, 1, 'CI', 'Lint', 'ubuntu-latest', 'GitHub Actions', 'completed', 'success',
+			   '2026-08-08T09:00:00.000Z', '2026-08-08T09:00:05.000Z', '2026-08-08T09:01:05.000Z')
+		""",
+		params: [],
+	}
+}
+
+case "the oldest day of jobs past 90 days is rolled up, then pruned, a day a run" {
+	let seeded <- Deliveries.batch([jobs()])
+	expect seeded is Ok(_)
+	let first <- retention.schedule("23 * * * *", nowMs())
+	expect first is Ok(_)
+	expect Logger.info called with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, and rolled up and pruned 4 jobs of 2026-08-05"
+	let day <- Deliveries.all(
+		"SELECT day, workflow, name, runner, jobs, failed, waited, wait_sum_seconds, wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds, duration_p50_seconds FROM workflow_job_days",
+		[]
+	)
+	expect day == Ok("[{\"day\":\"2026-08-05\",\"workflow\":\"CI\",\"name\":\"Test suite\",\"runner\":\"self-hosted\",\"jobs\":3,\"failed\":1,\"waited\":3,\"wait_sum_seconds\":690,\"wait_p50_seconds\":60,\"wait_p95_seconds\":600,\"succeeded\":2,\"duration_sum_seconds\":420,\"duration_p50_seconds\":180}]")
+	let left <- Deliveries.all("SELECT job_id FROM workflow_jobs ORDER BY job_id", [])
+	expect left == Ok("[{\"job_id\":5},{\"job_id\":6}]")
+	// The next run takes 6 August; 8 August is inside the window and stays.
+	let second <- retention.schedule("23 * * * *", nowMs())
+	expect second is Ok(_)
+	let days <- Deliveries.first(
+		"SELECT group_concat(day || ' ' || name || ' ' || jobs, ', ') AS days FROM (SELECT * FROM workflow_job_days ORDER BY day)",
+		[]
+	)
+	expect days == Ok(Some("{\"days\":\"2026-08-05 Test suite 3, 2026-08-06 Lint 1\"}"))
+	let kept <- Deliveries.all("SELECT job_id FROM workflow_jobs", [])
+	expect kept == Ok("[{\"job_id\":6}]")
+	let third <- retention.schedule("23 * * * *", nowMs())
+	expect third is Ok(_)
+	let still <- Deliveries.all("SELECT job_id FROM workflow_jobs", [])
+	expect still == Ok("[{\"job_id\":6}]")
+}
+
+case "a day already rolled up keeps its rollup when a late job for it is pruned" {
+	let seeded <- Deliveries.batch(
+		[
+			jobs(),
+			SqlStatement {
+				sql: """
+					INSERT INTO workflow_job_days (repo, day, workflow, name, runner, jobs, failed, waited, wait_sum_seconds,
+					                               wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds,
+					                               duration_p50_seconds)
+					VALUES ('bynk-lang/bynk', '2026-08-05', 'CI', 'Test suite', 'self-hosted', 9, 0, 9, 90, 10, 10, 9, 900, 100)
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let _ <- retention.schedule("23 * * * *", nowMs())
+	let day <- Deliveries.first("SELECT jobs FROM workflow_job_days WHERE day = '2026-08-05'", [])
+	expect day == Ok(Some("{\"jobs\":9}"))
+	let left <- Deliveries.first(
+		"SELECT count(*) AS n FROM workflow_jobs WHERE created_at < '2026-08-06'",
+		[]
+	)
+	expect left == Ok(Some("{\"n\":0}"))
 }

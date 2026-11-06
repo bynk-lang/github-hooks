@@ -8,6 +8,7 @@ uses github.runs
 uses github.metrics
 uses github.pulls
 uses github.releases
+uses github.jobs
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
@@ -419,7 +420,9 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 		let _ <- recordVisibility(body)
 		let _ <- if d.event == "pull_request_review" {
 			recordReview(d, body)
-		} else if d.event == "push" { recordTag(d, body) } else { Effect.pure(()) }
+		} else if d.event == "push" {
+			recordTag(d, body)
+		} else if d.event == "workflow_job" { recordJob(d, body) } else { Effect.pure(()) }
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
@@ -642,6 +645,51 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 			params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
 		},
 	]
+}
+
+// Records a job from a `workflow_job` delivery (#42). The row only moves
+// forward: a delivery replaces it when its status is further along
+// (queued/waiting < in_progress < completed), or equally far (filling in what
+// it knows, such as the runner group). So a late `in_progress` never undoes
+// `completed`, and a redelivery changes nothing. Open pages aren't told: jobs
+// change constantly, and the section that shows them polls.
+fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(j) = jobOf(body) else match {
+		Err(why) => Logger.error("could not read workflow job from \(d.id): \(why)"),
+	}
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
+		                           conclusion, created_at, started_at, completed_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+		ON CONFLICT (job_id) DO UPDATE SET
+		  runner = excluded.runner,
+		  runner_group = coalesce(excluded.runner_group, workflow_jobs.runner_group),
+		  status = excluded.status, conclusion = excluded.conclusion,
+		  started_at = coalesce(excluded.started_at, workflow_jobs.started_at),
+		  completed_at = coalesce(excluded.completed_at, workflow_jobs.completed_at)
+		WHERE (CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		   >= (CASE workflow_jobs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		""",
+		[
+			Integer(j.jobId),
+			Text(j.repo),
+			Integer(j.runId),
+			Integer(j.attempt),
+			Text(j.workflow),
+			Text(j.name),
+			Text(j.runner),
+			text(j.runnerGroup),
+			Text(j.status),
+			text(j.conclusion),
+			Text(j.createdAt),
+			text(j.startedAt),
+			text(j.completedAt),
+		]
+	) else match {
+		Err(e) => Logger.error("could not record \(j.repo) job \(j.jobId): \(sqlError(e))"),
+	}
+	Effect.pure(())
 }
 
 // Records a tag a push delivery pushed (#36), so the release workflow's runs
@@ -2286,14 +2334,15 @@ service retention from cron {
 			DELETE FROM deliveries WHERE rowid IN (
 			  SELECT rowid FROM deliveries
 			  WHERE received_at < ?1
-			    AND event = 'workflow_run' AND action IN ('requested', 'in_progress')
+			    AND ((event = 'workflow_run' AND action IN ('requested', 'in_progress'))
+			         OR event = 'workflow_job')
 			  ORDER BY received_at
 			  LIMIT ?2
 			)
 			""",
 			[Text(c.runProgress), Integer(RETENTION_BATCH)]
 		) else match {
-			Err(e) => retentionFailed("workflow-run progress", e),
+			Err(e) => retentionFailed("workflow-run progress and job deliveries", e),
 		}
 		let Ok(expired) <- Deliveries.run(
 			"""
@@ -2320,16 +2369,123 @@ service retention from cron {
 		) else match {
 			Err(e) => retentionFailed("actions", e),
 		}
-		let removed = progress.changes + expired.changes + acted.changes
+		let Ok(jobs) <- rollUpJobDay(c.jobDays) else match {
+			Err(why) => {
+				let _ <- Logger.error(why)
+				Err(why)
+			},
+		}
+		let removed = progress.changes + expired.changes + acted.changes + jobs.pruned
 		let true = removed > 0 else { Ok(()) }
 		let more = progress.changes == RETENTION_BATCH
 			|| expired.changes == RETENTION_BATCH
 			|| acted.changes == RETENTION_BATCH
+		let rolled = if jobs.pruned > 0 {
+			", and rolled up and pruned \(jobs.pruned) jobs of \(jobs.day)"
+		} else {
+			""
+		}
 		let _ <- Logger.info(
-			"retention removed \(progress.changes) workflow-run progress, \(expired.changes) deliveries and \(acted.changes) actions\(if more { "; more remain for the next run" } else { "" })"
+			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(rolled)\(if more { "; more remain for the next run" } else { "" })"
 		)
 		Ok(())
 	}
+}
+
+// Rolls up the oldest UTC day of jobs before `before` (a `YYYY-MM-DD` day)
+// into `workflow_job_days`, then prunes that day's rows, in one batch, so a
+// day is never pruned without its rollup (#42). One day a run, about 5,000
+// rows: hourly, so a backlog of days clears within a day or so. A rollup is
+// kept once written, so a job delivered for a day already rolled up adds
+// nothing to it.
+fn rollUpJobDay(before: String) -> Effect[Result[JobDayRolled, String]] given Deliveries {
+	let none = JobDayRolled {
+		day: "",
+		pruned: 0,
+	}
+	let Ok(oldest) <- Deliveries.first(
+		"SELECT substr(min(created_at), 1, 10) AS day FROM workflow_jobs WHERE created_at < ?1",
+		[Text(before)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not find the oldest day of jobs: \(sqlError(e))")),
+	}
+	let Some(row) = oldest else { Effect.pure(Ok(none)) }
+	let Ok(found) = Json.decodeSql[OldestJobDay](row) else match {
+		Err(e) => Effect.pure(Err("the oldest day of jobs did not decode: \(jsonError(e))")),
+	}
+	let Some(day) = found.day else { Effect.pure(Ok(none)) }
+	let Ok(done) <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: """
+						INSERT OR IGNORE INTO workflow_job_days (repo, day, workflow, name, runner, jobs, failed, waited, wait_sum_seconds,
+						                                         wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds, duration_p50_seconds)
+						WITH d AS (
+						  SELECT repo, workflow, name, runner, conclusion,
+						    CASE WHEN started_at IS NOT NULL
+						      THEN CAST(round((julianday(started_at) - julianday(created_at)) * 86400) AS INTEGER) END AS wait,
+						    CASE WHEN conclusion = 'success' AND started_at IS NOT NULL AND completed_at IS NOT NULL
+						      THEN CAST(round((julianday(completed_at) - julianday(started_at)) * 86400) AS INTEGER) END AS dur
+						  FROM workflow_jobs
+						  WHERE created_at >= ?1 AND created_at < date(?1, '+1 day') AND coalesce(conclusion, '') != 'skipped'
+						),
+						waits AS (
+						  SELECT repo, workflow, name, runner, wait AS v,
+						    row_number() OVER (PARTITION BY repo, workflow, name, runner ORDER BY wait) AS rn,
+						    count(*) OVER (PARTITION BY repo, workflow, name, runner) AS n
+						  FROM d WHERE wait IS NOT NULL
+						),
+						durations AS (
+						  SELECT repo, workflow, name, runner, dur AS v,
+						    row_number() OVER (PARTITION BY repo, workflow, name, runner ORDER BY dur) AS rn,
+						    count(*) OVER (PARTITION BY repo, workflow, name, runner) AS n
+						  FROM d WHERE dur IS NOT NULL
+						),
+						wp AS (
+						  SELECT repo, workflow, name, runner,
+						    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
+						    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
+						  FROM waits GROUP BY repo, workflow, name, runner
+						),
+						dp AS (
+						  SELECT repo, workflow, name, runner, max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50
+						  FROM durations GROUP BY repo, workflow, name, runner
+						),
+						g AS (
+						  SELECT repo, workflow, name, runner, count(*) AS jobs,
+						    sum(conclusion IN ('failure', 'timed_out')) AS failed,
+						    count(wait) AS waited, coalesce(sum(wait), 0) AS wait_sum,
+						    count(dur) AS succeeded, coalesce(sum(dur), 0) AS dur_sum
+						  FROM d GROUP BY repo, workflow, name, runner
+						)
+						SELECT g.repo, ?1, g.workflow, g.name, g.runner, g.jobs, g.failed, g.waited, g.wait_sum,
+						  wp.p50, wp.p95, g.succeeded, g.dur_sum, dp.p50
+						FROM g
+						LEFT JOIN wp ON wp.repo = g.repo AND wp.workflow = g.workflow AND wp.name = g.name AND wp.runner = g.runner
+						LEFT JOIN dp ON dp.repo = g.repo AND dp.workflow = g.workflow AND dp.name = g.name AND dp.runner = g.runner
+				""",
+				params: [Text(day)],
+			},
+			SqlStatement {
+				sql: "DELETE FROM workflow_jobs WHERE created_at >= ?1 AND created_at < date(?1, '+1 day')",
+				params: [Text(day)],
+			},
+		]
+	) else match {
+		Err(e) => Effect.pure(Err("could not roll up the jobs of \(day): \(sqlError(e))")),
+	}
+	let pruned = done.get(1).map((r) => r.changes).getOrElse(0)
+	Effect.pure(Ok(JobDayRolled { day: day, pruned: pruned }))
+}
+
+type OldestJobDay = {
+	day: Option[String],
+}
+
+--- What one retention run rolled up: the day, and how many job rows it pruned.
+type JobDayRolled = {
+	day: String,
+	pruned: Int,
 }
 
 ---
