@@ -77,6 +77,9 @@ get 200 "PR flow is public" "/metrics/prs?days=30"
 get 200 "open pull requests are public" /metrics/prs/open
 get 200 "the PR flow page is public" /prs
 get 400 "a PR flow window other than 7, 30 or 90 days is refused" "/metrics/prs?days=14"
+get 200 "releases are public" "/metrics/releases?days=30"
+get 200 "recent releases are public" /metrics/releases/recent
+get 400 "a releases window other than 7, 30 or 90 days is refused" "/metrics/releases?days=14"
 get 400 "a CI window longer than 90 days is refused" "/metrics/ci?days=91"
 get 400 "a CI window other than 7, 30 or 90 days is refused" "/metrics/ci?days=14"
 

@@ -1,0 +1,313 @@
+// Phase 4, slice 3, step 3 (#36): the public releases routes, against an
+// in-memory D1 with the migrations applied and a hand-built set of releases,
+// pull requests and release workflow runs whose figures are worked out below.
+// The clock is fixed at 2026-11-05T12:00:00Z, so the default 7-day window
+// opens at 2026-10-29T12:00:00Z.
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+--- A viewer's request headers: one address, well within the limit.
+fn viewer() -> RequestHeaders {
+	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7"])
+}
+
+---
+`bynk-lang/bynk`'s final releases: v1.0.0 on 20 Oct (before the window),
+v1.1.0 on 30 Oct, v1.2.0 on 2 Nov and v1.3.0 on 4 Nov, each at 12:00. So 3
+in the week, at intervals of 10, 3 and 2 days [172800, 259200, 864000]:
+median 259200. v1.2.0-rc1 (1 Nov) is a pre-release; v1.4.0 is a draft; v0.9.0
+(3 Nov) was deleted, so it is neither an interval nor the latest.
+
+Pull requests by people shipped in the week: #1 merged 30 Oct 06:00, shipped
+by v1.1.0 (21600 s); #2 merged 2 Nov 00:00, by v1.2.0 (43200 s); #3 merged
+4 Nov 11:00, by v1.3.0 (3600 s). So [3600, 21600, 43200]: p50 21600, p95
+43200. A bot's #4 shipped too, and doesn't count; #5 shipped by v1.0.0, before
+the window (432000 s, counted in the 30-day window).
+
+Waiting since v1.3.0: #6 (merged 5 Nov 08:00) and #7 (10:00). A bot's #8
+doesn't count; #9 merged before v1.3.0 and was never matched, so it counts
+neither way; #10 is still open. Its pull requests began to be recorded on
+1 Oct.
+
+`bynk-lang/actions` has one final release, v2.0.0 on 1 Nov, and nothing
+recorded. `bynk-lang/quiet` has no release, so it isn't listed; the private
+and excluded repositories' releases are never shown.
+---
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/actions', 1, 'main'), ('bynk-lang/quiet', 1, 'main'),
+				  ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO releases (repo, tag, release_id, name, draft, prerelease, created_at, published_at, author_is_bot,
+				                      previous_tag, shipped, deleted_at) VALUES
+				  ('bynk-lang/bynk', 'v1.0.0', 1, 'v1.0.0', 0, 0, '2026-10-20T11:00:00.000Z', '2026-10-20T12:00:00.000Z', 1, '', NULL, NULL),
+				  ('bynk-lang/bynk', 'v1.1.0', 2, 'v1.1.0', 0, 0, '2026-10-30T11:00:00.000Z', '2026-10-30T12:00:00.000Z', 1, NULL, NULL, NULL),
+				  ('bynk-lang/bynk', 'v1.2.0-rc1', 3, NULL, 0, 1, '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 1, NULL, NULL, NULL),
+				  ('bynk-lang/bynk', 'v1.2.0', 4, 'v1.2.0', 0, 0, '2026-11-02T11:00:00.000Z', '2026-11-02T12:00:00.000Z', 1, NULL, NULL, NULL),
+				  ('bynk-lang/bynk', 'v0.9.0', 5, NULL, 0, 0, '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', 1, NULL, NULL, '2026-11-03T01:00:00.000Z'),
+				  ('bynk-lang/bynk', 'v1.3.0', 6, 'v1.3.0', 0, 0, '2026-11-04T11:00:00.000Z', '2026-11-04T12:00:00.000Z', 1, 'v1.2.0', 2, NULL),
+				  ('bynk-lang/bynk', 'v1.4.0', 7, NULL, 1, 0, '2026-11-05T00:00:00.000Z', NULL, 1, NULL, NULL, NULL),
+				  ('bynk-lang/actions', 'v2.0.0', 8, 'v2.0.0', 0, 0, '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 0, NULL, NULL, NULL),
+				  ('bynk-lang/secret', 'v1.0.0', 9, NULL, 0, 0, '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 0, NULL, NULL, NULL),
+				  ('bynk-lang/sandbox', 'v1.0.0', 10, NULL, 0, 0, '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', 0, NULL, NULL, NULL)
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+				                           opened_at, merged_at, updated_at, released_in, released_at) VALUES
+				  ('bynk-lang/bynk', 1, 'One', 'a-person', 0, 'main', 'h1', 0, 'merged', '2026-10-29T00:00:00.000Z',
+				   '2026-10-30T06:00:00.000Z', '2026-10-30T06:00:00.000Z', 'v1.1.0', '2026-10-30T12:00:00.000Z'),
+				  ('bynk-lang/bynk', 2, 'Two', 'a-person', 0, 'main', 'h2', 0, 'merged', '2026-11-01T00:00:00.000Z',
+				   '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', 'v1.2.0', '2026-11-02T12:00:00.000Z'),
+				  ('bynk-lang/bynk', 3, 'Three', 'a-person', 0, 'main', 'h3', 0, 'merged', '2026-11-04T00:00:00.000Z',
+				   '2026-11-04T11:00:00.000Z', '2026-11-04T11:00:00.000Z', 'v1.3.0', '2026-11-04T12:00:00.000Z'),
+				  ('bynk-lang/bynk', 4, 'Bot', 'a-bot[bot]', 1, 'main', 'h4', 0, 'merged', '2026-11-03T00:00:00.000Z',
+				   '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', 'v1.3.0', '2026-11-04T12:00:00.000Z'),
+				  ('bynk-lang/bynk', 5, 'Five', 'a-person', 0, 'main', 'h5', 0, 'merged', '2026-10-14T00:00:00.000Z',
+				   '2026-10-15T12:00:00.000Z', '2026-10-15T12:00:00.000Z', 'v1.0.0', '2026-10-20T12:00:00.000Z'),
+				  ('bynk-lang/bynk', 6, 'Six', 'a-person', 0, 'main', 'h6', 0, 'merged', '2026-11-05T00:00:00.000Z',
+				   '2026-11-05T08:00:00.000Z', '2026-11-05T08:00:00.000Z', NULL, NULL),
+				  ('bynk-lang/bynk', 7, 'Seven', 'a-person', 0, 'main', 'h7', 0, 'merged', '2026-11-05T00:00:00.000Z',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', NULL, NULL),
+				  ('bynk-lang/bynk', 8, 'Bot waits', 'a-bot[bot]', 1, 'main', 'h8', 0, 'merged', '2026-11-05T00:00:00.000Z',
+				   '2026-11-05T09:00:00.000Z', '2026-11-05T09:00:00.000Z', NULL, NULL),
+				  ('bynk-lang/bynk', 9, 'Nine', 'a-person', 0, 'main', 'h9', 0, 'merged', '2026-11-02T00:00:00.000Z',
+				   '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', NULL, NULL),
+				  ('bynk-lang/bynk', 10, 'Ten', 'a-person', 0, 'main', 'h10', 0, 'open', '2026-11-05T00:00:00.000Z',
+				   NULL, '2026-11-05T00:00:00.000Z', NULL, NULL)
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO pull_request_events (delivery, repo, number, action, reason, at) VALUES ('first', 'bynk-lang/bynk', 1, 'closed', NULL, '2026-10-01T00:00:00.000Z')",
+			params: [],
+		},
+	]
+}
+
+---
+`bynk-lang/bynk`'s release workflow (`release.yml`, as it ran on the tags of
+v1.2.0 and v1.3.0) ran in the week on v1.2.0 (20 minutes), v1.3.0 (30
+minutes) and v1.2.1, a tag whose run failed, so it has no release: 3 runs, 1
+failed, a median of 1200 s over the two that passed. Not counted: its run
+on v1.0.0, before the window; its run on `main` (the default branch, so not a
+release); CI on `main`; and a lint workflow pushed to a feature branch, which
+never ran on a release's tag.
+---
+fn runs() -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+			                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+			  ('bynk-lang/bynk', 1, 1, 'Release', '.github/workflows/release.yml', 'v1.2.0', 'a', 'push', 'completed', 'success',
+			   '2026-11-02T11:00:00.000Z', '2026-11-02T11:00:00.000Z', NULL, '2026-11-02T11:20:00.000Z', '2026-11-02T11:20:00.000Z'),
+			  ('bynk-lang/bynk', 2, 1, 'Release', '.github/workflows/release.yml', 'v1.3.0', 'b', 'push', 'completed', 'success',
+			   '2026-11-04T11:00:00.000Z', '2026-11-04T11:00:00.000Z', NULL, '2026-11-04T11:30:00.000Z', '2026-11-04T11:30:00.000Z'),
+			  ('bynk-lang/bynk', 3, 1, 'Release', '.github/workflows/release.yml', 'v1.2.1', 'c', 'push', 'completed', 'failure',
+			   '2026-11-03T10:00:00.000Z', '2026-11-03T10:00:00.000Z', NULL, '2026-11-03T10:10:00.000Z', '2026-11-03T10:10:00.000Z'),
+			  ('bynk-lang/bynk', 4, 1, 'Release', '.github/workflows/release.yml', 'v1.0.0', 'd', 'push', 'completed', 'success',
+			   '2026-10-20T11:00:00.000Z', '2026-10-20T11:00:00.000Z', NULL, '2026-10-20T11:30:00.000Z', '2026-10-20T11:30:00.000Z'),
+			  ('bynk-lang/bynk', 7, 1, 'Release', '.github/workflows/release.yml', 'main', 'g', 'push', 'completed', 'failure',
+			   '2026-11-04T08:00:00.000Z', '2026-11-04T08:00:00.000Z', NULL, '2026-11-04T08:01:00.000Z', '2026-11-04T08:01:00.000Z'),
+			  ('bynk-lang/bynk', 5, 1, 'CI', '.github/workflows/ci.yml', 'main', 'e', 'push', 'completed', 'success',
+			   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', NULL, '2026-11-04T09:10:00.000Z', '2026-11-04T09:10:00.000Z'),
+			  ('bynk-lang/bynk', 6, 1, 'Lint', '.github/workflows/lint.yml', 'a-feature', 'f', 'push', 'completed', 'failure',
+			   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', NULL, '2026-11-04T09:05:00.000Z', '2026-11-04T09:05:00.000Z')
+		""",
+		params: [],
+	}
+}
+
+case "a week of releases: cadence, merge to release, what's waiting, and the release workflow" {
+	let seeded <- Deliveries.batch(seed().append(runs()))
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/releases", ReleaseQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.since == "2026-10-29T12:00:00.000Z"
+	expect m.until == "2026-11-05T12:00:00.000Z"
+	expect m.repos.map((f) => f.repo) == ["bynk-lang/actions", "bynk-lang/bynk"]
+	let Some(b) = m.repos.get(1) else {
+		expect false
+	}
+	expect b.releases == 3
+	expect b.prereleases == 1
+	expect b.interval_p50_seconds == Some(259200)
+	expect b.last_tag == "v1.3.0"
+	expect b.last_at == "2026-11-04T12:00:00.000Z"
+	expect b.shipped_counted == 3
+	expect b.merge_to_release_p50_seconds == Some(21600)
+	expect b.merge_to_release_p95_seconds == Some(43200)
+	expect b.waiting == 2
+	expect b.waiting_since == Some("2026-11-05T08:00:00.000Z")
+	expect b.recording_since == Some("2026-10-01T00:00:00.000Z")
+	let Some(a) = m.repos.get(0) else {
+		expect false
+	}
+	expect a.releases == 1
+	expect a.prereleases == 0
+	expect a.interval_p50_seconds == None
+	expect a.last_tag == "v2.0.0"
+	expect a.shipped_counted == 0
+	expect a.merge_to_release_p50_seconds == None
+	expect a.waiting == 0
+	expect a.waiting_since == None
+	expect a.recording_since == None
+	expect m.pipeline == [
+		ReleasePipeline {
+			repo: "bynk-lang/bynk",
+			workflow: "Release",
+			path: ".github/workflows/release.yml",
+			runs: 3,
+			failed: 1,
+			p50_seconds: Some(1200),
+		},
+	]
+}
+
+case "a longer window of releases reaches further back, and a repository filter narrows it" {
+	let seeded <- Deliveries.batch(seed().append(runs()))
+	expect seeded is Ok(_)
+	// 30 days from 6 Oct: v1.0.0 joins (with no release before it, no
+	// interval), and so does #5's 432000 s: p50 21600, p95 432000.
+	let month <- api.GET(
+		"/metrics/releases",
+		ReleaseQuery {
+			repo: Some("Bynk-Lang/Bynk"),
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(m) = month else {
+		expect false
+	}
+	expect m.repos.map((f) => f.repo) == ["bynk-lang/bynk"]
+	let Some(b) = m.repos.first() else {
+		expect false
+	}
+	expect b.releases == 4
+	expect b.interval_p50_seconds == Some(259200)
+	expect b.shipped_counted == 4
+	expect b.merge_to_release_p50_seconds == Some(21600)
+	expect b.merge_to_release_p95_seconds == Some(432000)
+	expect m.pipeline.map((p) => p.runs) == [4]
+}
+
+case "recent releases, newest first: pre-releases marked, drafts and deleted ones left out" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/releases/recent", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.releases.map(
+		(x) => "\(x.repo) \(x.tag)"
+	) == [
+		"bynk-lang/bynk v1.3.0",
+		"bynk-lang/bynk v1.2.0",
+		"bynk-lang/actions v2.0.0",
+		"bynk-lang/bynk v1.2.0-rc1",
+		"bynk-lang/bynk v1.1.0",
+		"bynk-lang/bynk v1.0.0",
+	]
+	expect m.releases.get(
+		0
+	) == Some(RecentRelease {
+		repo: "bynk-lang/bynk",
+		tag: "v1.3.0",
+		name: Some("v1.3.0"),
+		prerelease: false,
+		published_at: "2026-11-04T12:00:00.000Z",
+		previous_tag: Some("v1.2.0"),
+		shipped: Some(2),
+		url: "https://github.com/bynk-lang/bynk/releases/tag/v1.3.0",
+	})
+	expect m.releases.map((x) => x.prerelease) == [false, false, false, true, false, false]
+	// v1.0.0 was the first: there was nothing before it to compare with.
+	expect m.releases.get(5).map((x) => x.previous_tag) == Some(None)
+}
+
+case "recent releases are each repository's latest 20" {
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/actions', 1, 'main')",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO releases (repo, tag, release_id, draft, prerelease, created_at, published_at, author_is_bot)
+					SELECT 'bynk-lang/actions', 'v1.' || value, value, 0, 0, '2026-10-01T00:00:00.000Z',
+					       '2026-10-' || printf('%02d', value + 1) || 'T00:00:00.000Z', 0
+					FROM json_each('[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]')
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let r <- api.GET(
+		"/metrics/releases/recent",
+		NowQuery { repo: Some("bynk-lang/actions") },
+		viewer()
+	) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.releases.length() == 20
+	expect m.releases.first().map((x) => x.tag) == Some("v1.20")
+	expect m.releases.get(19).map((x) => x.tag) == Some("v1.1")
+}
+
+case "empty tables are empty lists, not an error" {
+	let r <- api.GET("/metrics/releases", ReleaseQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.repos.length() == 0
+	expect m.pipeline.length() == 0
+	let recent <- api.GET("/metrics/releases/recent", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(x) = recent else {
+		expect false
+	}
+	expect x.releases.length() == 0
+}
+
+case "a releases window other than 7, 30 or 90 days is refused, and the limit applies to both release routes" {
+	stub MetricsLimit.allow(_) returns each [true, false, false]
+	let bad <- api.GET(
+		"/metrics/releases",
+		ReleaseQuery {
+			repo: None,
+			days: 14,
+		},
+		viewer()
+	) by Visitor
+	expect bad is BadRequest("days must be 7, 30 or 90")
+	let limited <- api.GET(
+		"/metrics/releases",
+		ReleaseQuery {
+			repo: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	expect limited is TooManyRequests(_)
+	let recent <- api.GET("/metrics/releases/recent", NowQuery { repo: None }, viewer()) by Visitor
+	expect recent is TooManyRequests(_)
+}

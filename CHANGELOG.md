@@ -43,6 +43,19 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 3, step 3 (#36): the public releases routes.
+  `GET /metrics/releases?days=7|30|90&repo=` gives, for each repository with a
+  final release:
+  - release cadence (count, pre-releases, median interval, latest);
+  - merge to release for pull requests by people (median and 95th
+    percentile);
+  - what's waiting to ship since the latest release;
+  - when its pull requests began to be recorded;
+  - its release workflow's runs, failures and median time.
+
+  `GET /metrics/releases/recent?repo=` lists each repository's latest 20
+  releases. Both are public, cached at the edge and rate-limited like the
+  other metrics routes. Migration `0010` adds the indexes they search by.
 - Phase 4, slice 3, step 2 (#36): the daily release sync. A `releaseSync`
   cron service (04:47 UTC) lists each public repository's releases (up to 90)
   and records them, so release history is there from the first run; marks

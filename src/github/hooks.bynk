@@ -1931,6 +1931,227 @@ service api from http {
 		Ok(PrsOpen { open: open })
 	}
 
+	// Releases over a window (#36): each public repository (less
+	// `DASHBOARD_EXCLUDE`) with a final release, its cadence, how long merged
+	// pull requests by people waited for a release, what is waiting now, and its
+	// release workflow. Cached and limited like the CI routes. The two reads run
+	// concurrently: 0 the releases, 1 the release workflows.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/releases") (query: ReleaseQuery, headers: RequestHeaders) -> Effect[HttpResult[ReleaseMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+			BadRequest("days must be 7, 30 or 90")
+		}
+		let now <- Clock.now()
+		let since = now - Duration.millis(query.days * 86_400_000)
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let window = [
+			Text(since.toIso()),
+			Text(now.toIso()),
+			text(query.repo.map((r) => "\(r)")),
+			Text(excludedNames(excluded)),
+		]
+		let reads <- [0, 1].parTraverseAll(
+			(read) => match read {
+				0 => Deliveries.all(
+					"""
+						WITH shown AS (
+						  SELECT repo FROM repositories
+						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+						),
+						finals AS MATERIALIZED (
+						  SELECT r.repo, r.tag, r.published_at,
+						    lag(r.published_at) OVER (PARTITION BY r.repo ORDER BY r.published_at) AS prev_at
+						  FROM releases r JOIN shown s ON s.repo = r.repo
+						  WHERE r.draft = 0 AND r.prerelease = 0 AND r.deleted_at IS NULL
+						    AND r.published_at IS NOT NULL AND r.published_at < ?2
+						),
+						latest AS MATERIALIZED (
+						  SELECT repo, tag, published_at AS at FROM (
+						    SELECT repo, tag, published_at,
+						      row_number() OVER (PARTITION BY repo ORDER BY published_at DESC, tag DESC) AS rn
+						    FROM finals
+						  ) WHERE rn = 1
+						),
+						counts AS (
+						  SELECT repo, count(*) AS n FROM finals WHERE published_at >= ?1 GROUP BY repo
+						),
+						pre AS (
+						  SELECT r.repo, count(*) AS n FROM releases r JOIN shown s ON s.repo = r.repo
+						  WHERE r.prerelease = 1 AND r.draft = 0 AND r.deleted_at IS NULL
+						    AND r.published_at >= ?1 AND r.published_at < ?2
+						  GROUP BY r.repo
+						),
+						waiting AS (
+						  SELECT p.repo, count(*) AS n, min(p.merged_at) AS oldest
+						  FROM latest l CROSS JOIN pull_requests p
+						  WHERE p.repo = l.repo AND p.merged_at > l.at AND p.released_in IS NULL AND p.author_is_bot = 0
+						  GROUP BY p.repo
+						),
+						recording AS (
+						  SELECT l.repo, (SELECT min(e.at) FROM pull_request_events e WHERE e.repo = l.repo) AS at FROM latest l
+						),
+						measures AS (
+						  SELECT repo, 'interval' AS k,
+						    CAST(round((julianday(published_at) - julianday(prev_at)) * 86400) AS INTEGER) AS v
+						  FROM finals WHERE published_at >= ?1 AND prev_at IS NOT NULL
+						  UNION ALL
+						  SELECT p.repo, 'ship', CAST(round((julianday(p.released_at) - julianday(p.merged_at)) * 86400) AS INTEGER)
+						  FROM pull_requests p JOIN shown s ON s.repo = p.repo
+						  WHERE p.released_at >= ?1 AND p.released_at < ?2 AND p.author_is_bot = 0
+						),
+						ranked AS (
+						  SELECT repo, k, v,
+						    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
+						    count(*) OVER (PARTITION BY repo, k) AS n
+						  FROM measures
+						),
+						pct AS (
+						  SELECT repo, k, max(n) AS n,
+						    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
+						    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
+						  FROM ranked GROUP BY repo, k
+						)
+						SELECT l.repo,
+						  coalesce(c.n, 0) AS releases,
+						  coalesce(pr.n, 0) AS prereleases,
+						  iv.p50 AS interval_p50_seconds,
+						  l.tag AS last_tag, l.at AS last_at,
+						  coalesce(sh.n, 0) AS shipped_counted, sh.p50 AS merge_to_release_p50_seconds, sh.p95 AS merge_to_release_p95_seconds,
+						  coalesce(w.n, 0) AS waiting, w.oldest AS waiting_since,
+						  rc.at AS recording_since
+						FROM latest l
+						LEFT JOIN counts c ON c.repo = l.repo
+						LEFT JOIN pre pr ON pr.repo = l.repo
+						LEFT JOIN waiting w ON w.repo = l.repo
+						LEFT JOIN recording rc ON rc.repo = l.repo
+						LEFT JOIN pct iv ON iv.repo = l.repo AND iv.k = 'interval'
+						LEFT JOIN pct sh ON sh.repo = l.repo AND sh.k = 'ship'
+						ORDER BY l.repo
+					""",
+					window
+				),
+				_ => Deliveries.all(
+					"""
+						WITH shown AS (
+						  SELECT repo, default_branch FROM repositories
+						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+						),
+						runs AS MATERIALIZED (
+						  SELECT w.repo, w.path, w.workflow, w.branch, w.conclusion, w.completed_at,
+						    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS v
+						  FROM workflow_runs w JOIN shown s ON s.repo = w.repo
+						  WHERE w.completed_at >= ?1 AND w.completed_at < ?2 AND w.event = 'push'
+						    AND w.branch IS NOT NULL AND w.branch != coalesce(s.default_branch, '')
+						),
+						release_paths AS (
+						  SELECT DISTINCT u.repo, u.path FROM runs u
+						  WHERE EXISTS (SELECT 1 FROM releases r WHERE r.repo = u.repo AND r.tag = u.branch)
+						),
+						release_runs AS (
+						  SELECT u.* FROM runs u JOIN release_paths p ON p.repo = u.repo AND p.path = u.path
+						),
+						ranked AS (
+						  SELECT repo, path, v,
+						    row_number() OVER (PARTITION BY repo, path ORDER BY v) AS rn,
+						    count(*) OVER (PARTITION BY repo, path) AS n
+						  FROM release_runs WHERE conclusion = 'success'
+						),
+						pct AS (
+						  SELECT repo, path, max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50
+						  FROM ranked GROUP BY repo, path
+						)
+						SELECT u.repo,
+						  (SELECT x.workflow FROM release_runs x WHERE x.repo = u.repo AND x.path = u.path ORDER BY x.completed_at DESC LIMIT 1) AS workflow,
+						  u.path, count(*) AS runs,
+						  sum(u.conclusion IN ('failure', 'timed_out')) AS failed,
+						  p.p50 AS p50_seconds
+						FROM release_runs u LEFT JOIN pct p ON p.repo = u.repo AND p.path = u.path
+						GROUP BY u.repo, u.path
+						ORDER BY u.repo, u.path
+					""",
+					window
+				),
+			}
+		)
+		let Some(Ok(flowRows)) = reads.get(0) else {
+			let _ <- Logger.error("could not compute releases: \(readError(reads.get(0)))")
+			ServerError("could not compute releases")
+		}
+		let Some(Ok(pipelineRows)) = reads.get(1) else {
+			let _ <- Logger.error("could not compute release workflows: \(readError(reads.get(1)))")
+			ServerError("could not compute release workflows")
+		}
+		let Ok(flow) = Json.decodeSql[List[ReleaseFlow]](flowRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode releases: \(jsonError(e))")
+				ServerError("releases did not decode")
+			},
+		}
+		let Ok(pipeline) = Json.decodeSql[List[ReleasePipeline]](pipelineRows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode release workflows: \(jsonError(e))")
+				ServerError("release workflows did not decode")
+			},
+		}
+		Ok(ReleaseMetrics {
+			since: since.toIso(),
+			until: now.toIso(),
+			repos: flow,
+			pipeline: pipeline,
+		})
+	}
+
+	// Each public repository's latest `MAX_RECENT_RELEASES` published releases
+	// (less `DASHBOARD_EXCLUDE`), newest first, pre-releases marked; drafts and
+	// deleted releases aren't shown.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/releases/recent") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[ReleasesRecent]] by v: Visitor given Deliveries, Logger, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let Ok(rows) <- Deliveries.all(
+			"""
+			WITH shown AS (
+			  SELECT repo FROM repositories
+			  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?3, ',' || lower(repo) || ',') = 0
+			),
+			ranked AS (
+			  SELECT r.*, row_number() OVER (PARTITION BY r.repo ORDER BY r.published_at DESC, r.tag DESC) AS rn
+			  FROM releases r JOIN shown s ON s.repo = r.repo
+			  WHERE r.draft = 0 AND r.deleted_at IS NULL AND r.published_at IS NOT NULL
+			)
+			SELECT repo, tag, name, prerelease = 1 AS prerelease, published_at,
+			  nullif(previous_tag, '') AS previous_tag, shipped,
+			  'https://github.com/' || repo || '/releases/tag/' || tag AS url
+			FROM ranked WHERE rn <= ?2
+			ORDER BY published_at DESC, repo, tag
+			""",
+			[
+				text(query.repo.map((r) => "\(r)")),
+				Integer(MAX_RECENT_RELEASES),
+				Text(excludedNames(excluded)),
+			]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not list recent releases: \(sqlError(e))")
+				ServerError("could not list recent releases")
+			},
+		}
+		let Ok(releases) = Json.decodeSql[List[RecentRelease]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode recent releases: \(jsonError(e))")
+				ServerError("recent releases did not decode")
+			},
+		}
+		Ok(ReleasesRecent { releases: releases })
+	}
+
 	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
 	// records the delivery and answers; work done in response belongs elsewhere.
 	@raw(contentType: "application/json")
@@ -2393,6 +2614,9 @@ fn syncFailed(why: String) -> Effect[Result[(), String]] given Logger {
 	let _ <- Logger.error(why)
 	Effect.pure(Err(why))
 }
+
+// How many of each repository's releases `/metrics/releases/recent` lists.
+const MAX_RECENT_RELEASES: Int = 20
 
 // How many pull requests one run reads on their own, per repository: enough
 // for any realistic run of lost deliveries, and bounded so one run can't make
