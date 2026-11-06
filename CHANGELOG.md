@@ -43,6 +43,15 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 5, step 1 (#48): issue facts for issue response.
+  - **Recording:** `issues` and `issue_comment` deliveries become `issues`
+    rows and `issue_labels` (migration `0013`): one row per issue, moving
+    only forward by `updated_at`, with its labels replaced alongside.
+  - **First response:** the first comment by a maintainer who isn't the
+    author and isn't a bot is recorded, and only moves earlier. It's
+    recorded, not shown, until issues from outside the org arrive.
+  - **Edge cases:** comments on pull requests are ignored. Deleted and
+    transferred issues become tombstones that a late delivery can't revive.
 - Phase 4, slice 4, step 3 (#42): runner wait on the CI health page.
   - **Waiting for runners:** each repository's card gains a section. It
     shows waits by runner label (median, 95th percentile drawn as a range,

@@ -1,0 +1,88 @@
+{
+  "action": "created",
+  "issue": {
+    "url": "https://api.github.com/repos/bynk-lang/bynk/issues/2982",
+    "html_url": "https://github.com/bynk-lang/bynk/issues/2982",
+    "id": 6232234593,
+    "node_id": "I_kwDOSfAttM8AAAABc3haYQ",
+    "number": 2982,
+    "title": "Crate hygiene D1: move bynk_emit::project into bynk-driver (four PRs)",
+    "user": {
+      "login": "accuser",
+      "id": 85733,
+      "node_id": "MDQ6VXNlcjg1NzMz",
+      "type": "User",
+      "html_url": "https://github.com/accuser"
+    },
+    "labels": [{"id": 11414340215, "name": "proposal", "color": "0e8a16", "default": false}, {"id": 11414340227, "name": "accepted", "color": "5319e7", "default": false}],
+    "state": "open",
+    "locked": false,
+    "assignee": null,
+    "assignees": [],
+    "milestone": null,
+    "comments": 1,
+    "created_at": "2026-11-05T21:46:31Z",
+    "updated_at": "2026-11-06T07:33:30Z",
+    "closed_at": null,
+    "author_association": "MEMBER",
+    "active_lock_reason": null,
+    "body": "Part of #2775 (crate-hygiene track). Cites `design/tracks/crate-hygiene.md` §8 D1, §3, §4 (H-1, H-2, H-5), §9 E1, §12, and #1533's split tests (`design/archive/retired-tracks.md`, \"Module decomposition\"). Measured at `origin/main` (post-#2776), on a fresh branch.\n\n## Summary\n\n- **Scope:** crate boun …",
+    "state_reason": null,
+    "type": null
+  },
+  "comment": {
+    "url": "https://api.github.com/repos/bynk-lang/bynk/issues/comments/6679726060",
+    "html_url": "https://github.com/bynk-lang/bynk/issues/2982#issuecomment-6679726060",
+    "issue_url": "https://api.github.com/repos/bynk-lang/bynk/issues/2982",
+    "id": 6679726060,
+    "node_id": "IC_kwDOSfAttM8AAAABjiSH7A",
+    "user": {
+      "login": "accuser",
+      "id": 85733,
+      "node_id": "MDQ6VXNlcjg1NzMz",
+      "type": "User",
+      "html_url": "https://github.com/accuser"
+    },
+    "created_at": "2026-11-06T07:33:30Z",
+    "updated_at": "2026-11-06T07:33:30Z",
+    "author_association": "MEMBER",
+    "body": "Decision B (the `native` cargo feature on `bynk-driver`) turned out to be unnecessary, so it was not built.\n\nI measured it while doing PR 3 (#2988). `bynk-driver` already compiles for `wasm32-unknown-unknown` unchanged: its `std::process`, `which` and `clap` uses build on that target (they only fail …"
+  },
+  "repository": {
+    "id": 1240477108,
+    "node_id": "R_kgDOSfAttA",
+    "name": "bynk",
+    "full_name": "bynk-lang/bynk",
+    "private": false,
+    "owner": {
+      "login": "bynk-lang",
+      "id": 295025398,
+      "node_id": "O_kgDOEZW69g",
+      "type": "Organization",
+      "html_url": "https://github.com/bynk-lang"
+    },
+    "html_url": "https://github.com/bynk-lang/bynk",
+    "description": "Bynk is a statically typed programming language for building services.",
+    "fork": false,
+    "url": "https://api.github.com/repos/bynk-lang/bynk",
+    "created_at": "2026-05-16T07:13:41Z",
+    "updated_at": "2026-11-06T14:57:09Z",
+    "pushed_at": "2026-11-06T14:57:07Z",
+    "default_branch": "main",
+    "visibility": "public"
+  },
+  "organization": {
+    "login": "bynk-lang",
+    "id": 295025398
+  },
+  "sender": {
+    "login": "accuser",
+    "id": 85733,
+    "node_id": "MDQ6VXNlcjg1NzMz",
+    "type": "User",
+    "html_url": "https://github.com/accuser"
+  },
+  "installation": {
+    "id": 1
+  }
+}

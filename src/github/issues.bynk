@@ -1,0 +1,167 @@
+commons github.issues
+
+uses github.events
+uses github.runs
+
+---
+The parts of an `issues` or `issue_comment` delivery the issue-response
+figures need (#48). Both carry the whole issue; `issue_comment` also carries
+the comment. GitHub sends comments on pull requests as `issue_comment` too,
+with `issue.pull_request` set.
+---
+type IssueDelivery = {
+	action: String,
+	issue: IssuePayload,
+	comment: Option[CommentPayload],
+	repository: RepoRef,
+}
+
+---
+An account as an issue or comment names it. `type` is `User`, `Bot` or
+`Organization`.
+---
+type Account = {
+	login: String,
+	type: String,
+}
+
+--- A label as an issue carries it.
+type LabelRef = {
+	name: String,
+}
+
+---
+Present on an issue that is a pull request. Only its presence matters.
+---
+type PullLink = {
+	url: Option[String],
+}
+
+---
+`issue` as GitHub sends it. `state_reason` is `completed`, `not_planned` or
+`duplicate` once closed, and `reopened` after a reopen.
+---
+type IssuePayload = {
+	number: Int,
+	title: String,
+	user: Account,
+	labels: List[LabelRef],
+	state: String,
+	state_reason: Option[String],
+	comments: Int,
+	created_at: String,
+	updated_at: String,
+	closed_at: Option[String],
+	author_association: String,
+	pull_request: Option[PullLink],
+}
+
+--- `comment` as an `issue_comment` delivery carries it.
+type CommentPayload = {
+	id: Int,
+	user: Account,
+	author_association: String,
+	created_at: String,
+}
+
+---
+One issue, as `issues` stores it, with times in the `received_at` format.
+`state` is GitHub's, or `deleted` or `transferred` for a delivery that
+removes the issue from its repository.
+---
+type IssueFact = {
+	repo: String,
+	number: Int,
+	action: String,
+	title: String,
+	author: String,
+	authorIsBot: Bool,
+	authorAssociation: String,
+	state: String,
+	stateReason: Option[String],
+	openedAt: String,
+	closedAt: Option[String],
+	updatedAt: String,
+	comments: Int,
+	labels: List[String],
+}
+
+--- A maintainer's response to an issue: when, and by whom.
+type IssueResponse = {
+	at: String,
+	by: String,
+}
+
+---
+What an `issues` or `issue_comment` delivery says: the issue, and, for a
+comment that counts as a response, the response.
+---
+type IssueNews = {
+	issue: IssueFact,
+	response: Option[IssueResponse],
+}
+
+---
+The author associations of a maintainer: someone who owns, belongs to, or
+collaborates on the repository.
+---
+fn isMaintainer(association: String) -> Bool {
+	association == "OWNER" || association == "MEMBER" || association == "COLLABORATOR"
+}
+
+---
+Whether a comment is a maintainer's response to an issue: by a maintainer, not
+a bot, and not the issue's own author (who can't respond to themselves).
+---
+fn isResponse(c: CommentPayload, issueAuthor: String) -> Bool {
+	isMaintainer(c.author_association) && c.user.type != "Bot" && c.user.login != issueAuthor
+}
+
+---
+The issue an `issues` or `issue_comment` delivery describes, `None` for one
+about a pull request (a comment on a PR), or why it couldn't be read.
+---
+fn issueOf(body: Bytes) -> Result[Option[IssueNews], String] {
+	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
+	let Ok(p) = Json.decode[IssueDelivery](text) else match {
+		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	let i = p.issue
+	let None = i.pull_request else { Ok(None) }
+	let Some(opened) = isoTime(i.created_at) else {
+		Err("created_at is not a time: \(i.created_at)")
+	}
+	let Some(updated) = isoTime(i.updated_at) else {
+		Err("updated_at is not a time: \(i.updated_at)")
+	}
+	let removed = p.action == "deleted" || p.action == "transferred"
+	let response: Option[IssueResponse] = match p.comment {
+		Some(c) => if p.action != "deleted" && isResponse(c, i.user.login) {
+			isoTime(c.created_at).map((at) => IssueResponse { at: at, by: c.user.login })
+		} else {
+			None
+		},
+		None => None,
+	}
+	// A deleted comment leaves the issue; only an `issues` delivery removes it.
+	let gone = removed && p.comment.isNone()
+	Ok(Some(IssueNews {
+		issue: IssueFact {
+			repo: p.repository.full_name,
+			number: i.number,
+			action: p.action,
+			title: i.title,
+			author: i.user.login,
+			authorIsBot: i.user.type == "Bot",
+			authorAssociation: i.author_association,
+			state: if gone { p.action } else { i.state },
+			stateReason: i.state_reason,
+			openedAt: opened,
+			closedAt: i.closed_at.andThen((t) => isoTime(t)),
+			updatedAt: updated,
+			comments: i.comments,
+			labels: i.labels.map((l) => l.name),
+		},
+		response: response,
+	}))
+}

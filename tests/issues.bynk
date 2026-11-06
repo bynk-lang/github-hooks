@@ -1,0 +1,347 @@
+// Phase 4, slice 5, step 1 (#48): `issues` and `issue_comment` deliveries
+// become `issues` and `issue_labels` rows, through the webhook, against an
+// in-memory D1 with the migrations applied. The fixtures are `bynk` issue
+// #2982 and a comment on it, as GitHub's REST API returned them, wrapped as
+// the webhook delivers them (the bodies cut short); each case varies them.
+suite github.hooks
+
+fixture closedIssue = "fixtures/github/issues.closed.json"
+
+fixture commented = "fixtures/github/issue_comment.created.json"
+
+--- A delivery's headers.
+fn headers(event: String, id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: \(event)", "X-GitHub-Delivery: \(id)"])
+}
+
+--- The fixtures' labels, `proposal` and `accepted`, as they appear.
+fn fixtureLabels() -> String {
+	"\"labels\": [{\"id\": 11414340215, \"name\": \"proposal\", \"color\": \"0e8a16\", \"default\": false}, {\"id\": 11414340227, \"name\": \"accepted\", \"color\": \"5319e7\", \"default\": false}]"
+}
+
+--- Labels as the webhook carries them, by name.
+fn labelled(names: List[String]) -> String {
+	let items = names.map((n) => "{\"name\": \"\(n)\", \"color\": \"ededed\", \"default\": false}")
+	"\"labels\": [\(joined(items, ", "))]"
+}
+
+---
+Issue #2982 at another moment: the delivery's `action`, the issue's state,
+`state_reason` and `closed_at` as JSON (`null` or quoted), its `updated_at`,
+and its labels.
+---
+fn issueAt(
+	action: String,
+	state: String,
+	reason: String,
+	updated: String,
+	closed: String,
+	labels: List[String]
+) -> Bytes {
+	Bytes.fromUtf8(closedIssue
+		.replace("\"action\": \"closed\"", "\"action\": \"\(action)\"")
+		.replace("\"state\": \"closed\"", "\"state\": \"\(state)\"")
+		.replace("\"state_reason\": \"completed\"", "\"state_reason\": \(reason)")
+		.replace("\"updated_at\": \"2026-11-06T08:51:18Z\"", "\"updated_at\": \"\(updated)\"")
+		.replace("\"closed_at\": \"2026-11-06T08:51:18Z\"", "\"closed_at\": \(closed)")
+		.replace(fixtureLabels(), labelled(labels)))
+}
+
+--- Issue #2982 open, at `updated`, with `labels`, after `action`.
+fn openIssue(action: String, updated: String, labels: List[String]) -> Bytes {
+	issueAt(action, "open", "null", updated, "null", labels)
+}
+
+---
+The comment delivery with the comment by `login` (an account of `kind`, `User`
+or `Bot`, with `association` to the repository) at `at`, and the delivery's
+`action`.
+---
+fn commentBy(
+	action: String,
+	login: String,
+	kind: String,
+	association: String,
+	at: String
+) -> Bytes {
+	Bytes.fromUtf8(
+		commented
+			.replace("\"action\": \"created\"", "\"action\": \"\(action)\"")
+			.replace(
+				"\"node_id\": \"IC_kwDOSfAttM8AAAABjiSH7A\",\n    \"user\": {\n      \"login\": \"accuser\"",
+				"\"node_id\": \"IC_kwDOSfAttM8AAAABjiSH7A\",\n    \"user\": {\n      \"login\": \"\(login)\""
+			)
+			.replace(
+				"\"type\": \"User\",\n      \"html_url\": \"https://github.com/accuser\"\n    },\n    \"created_at\": \"2026-11-06T07:33:30Z\",\n    \"updated_at\": \"2026-11-06T07:33:30Z\",\n    \"author_association\": \"MEMBER\"",
+				"\"type\": \"\(kind)\",\n      \"html_url\": \"https://github.com/\(login)\"\n    },\n    \"created_at\": \"\(at)\",\n    \"updated_at\": \"\(at)\",\n    \"author_association\": \"\(association)\""
+			)
+	)
+}
+
+--- The issue's row, every column but its key.
+fn row() -> String {
+	"SELECT title, author, author_is_bot, author_association, state, state_reason, opened_at, closed_at, updated_at, comments, first_response_at, first_responder FROM issues"
+}
+
+--- The issue's labels, in order, as one string.
+fn labels() -> String {
+	"SELECT group_concat(label, ',') AS labels FROM (SELECT label FROM issue_labels ORDER BY label)"
+}
+
+case "a closed issue is recorded with its labels, its times and who opened it" {
+	let r <- api.POST(
+		"/github",
+		headers("issues", "issue-1"),
+		Bytes.fromUtf8(closedIssue)
+	) by GitHub
+	expect r is Accepted(_)
+	let issue <- Deliveries.first(row(), [])
+	expect issue == Ok(Some("{\"title\":\"Crate hygiene D1: move bynk_emit::project into bynk-driver (four PRs)\",\"author\":\"accuser\",\"author_is_bot\":0,\"author_association\":\"MEMBER\",\"state\":\"closed\",\"state_reason\":\"completed\",\"opened_at\":\"2026-11-05T21:46:31.000Z\",\"closed_at\":\"2026-11-06T08:51:18.000Z\",\"updated_at\":\"2026-11-06T08:51:18.000Z\",\"comments\":2,\"first_response_at\":null,\"first_responder\":null}"))
+	let names <- Deliveries.first(labels(), [])
+	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
+	expect Logger.error never called
+}
+
+case "an issue's life: opened, labelled, closed; a stale delivery changes neither row nor labels" {
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "opened"),
+		openIssue("opened", "2026-11-05T21:46:31Z", ["proposal"])
+	) by GitHub
+	let opened <- Deliveries.first("SELECT state, closed_at FROM issues", [])
+	expect opened == Ok(Some("{\"state\":\"open\",\"closed_at\":null}"))
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "labeled"),
+		openIssue("labeled", "2026-11-05T21:50:00Z", ["proposal", "accepted"])
+	) by GitHub
+	let _ <- api.POST("/github", headers("issues", "closed"), Bytes.fromUtf8(closedIssue)) by GitHub
+	// The `labeled` delivery again, late and under a new id: older than the row.
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "labeled-late"),
+		openIssue("labeled", "2026-11-05T21:50:00Z", ["proposal"])
+	) by GitHub
+	let issue <- Deliveries.first("SELECT state, state_reason, updated_at FROM issues", [])
+	expect issue == Ok(Some("{\"state\":\"closed\",\"state_reason\":\"completed\",\"updated_at\":\"2026-11-06T08:51:18.000Z\"}"))
+	let names <- Deliveries.first(labels(), [])
+	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
+}
+
+case "removing a label replaces the set; removing the last leaves none" {
+	let _ <- api.POST("/github", headers("issues", "closed"), Bytes.fromUtf8(closedIssue)) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "unlabeled"),
+		issueAt(
+			"unlabeled",
+			"closed",
+			"\"completed\"",
+			"2026-11-06T09:00:00Z",
+			"\"2026-11-06T08:51:18Z\"",
+			["accepted"]
+		)
+	) by GitHub
+	let one <- Deliveries.first(labels(), [])
+	expect one == Ok(Some("{\"labels\":\"accepted\"}"))
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "unlabeled-last"),
+		issueAt(
+			"unlabeled",
+			"closed",
+			"\"completed\"",
+			"2026-11-06T09:01:00Z",
+			"\"2026-11-06T08:51:18Z\"",
+			[]
+		)
+	) by GitHub
+	let none <- Deliveries.first("SELECT count(*) AS n FROM issue_labels", [])
+	expect none == Ok(Some("{\"n\":0}"))
+}
+
+case "a reopened issue is open again, with no close time" {
+	let _ <- api.POST("/github", headers("issues", "closed"), Bytes.fromUtf8(closedIssue)) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "reopened"),
+		issueAt("reopened", "open", "\"reopened\"", "2026-11-06T09:00:00Z", "null", ["proposal"])
+	) by GitHub
+	let issue <- Deliveries.first("SELECT state, state_reason, closed_at FROM issues", [])
+	expect issue == Ok(Some("{\"state\":\"open\",\"state_reason\":\"reopened\",\"closed_at\":null}"))
+}
+
+case "a maintainer's comment is the first response; a later one isn't, an earlier one is" {
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "c-1"),
+		commentBy("created", "octo-maint", "User", "MEMBER", "2026-11-06T07:33:30Z")
+	) by GitHub
+	let first <- Deliveries.first("SELECT first_response_at, first_responder FROM issues", [])
+	expect first == Ok(Some("{\"first_response_at\":\"2026-11-06T07:33:30.000Z\",\"first_responder\":\"octo-maint\"}"))
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "c-2"),
+		commentBy("created", "other-maint", "User", "OWNER", "2026-11-06T08:00:00Z")
+	) by GitHub
+	let later <- Deliveries.first("SELECT first_response_at, first_responder FROM issues", [])
+	expect later == first
+	// Delivered late: a collaborator's comment from before the first one seen.
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "c-3"),
+		commentBy("created", "early-collab", "User", "COLLABORATOR", "2026-11-06T07:00:00Z")
+	) by GitHub
+	let earlier <- Deliveries.first("SELECT first_response_at, first_responder FROM issues", [])
+	expect earlier == Ok(Some("{\"first_response_at\":\"2026-11-06T07:00:00.000Z\",\"first_responder\":\"early-collab\"}"))
+}
+
+case "the author's own comment, bots' and an outsider's aren't responses, and a comment refreshes the issue" {
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "own"),
+		Bytes.fromUtf8(commented)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "bot"),
+		commentBy("created", "claude[bot]", "Bot", "CONTRIBUTOR", "2026-11-06T07:40:00Z")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "outsider"),
+		commentBy("created", "a-reader", "User", "NONE", "2026-11-06T07:45:00Z")
+	) by GitHub
+	// A bot counts nowhere, even one GitHub reports as a member.
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "member-bot"),
+		commentBy(
+			"created",
+			"bynk-lang-pull-requests[bot]",
+			"Bot",
+			"MEMBER",
+			"2026-11-06T07:50:00Z"
+		)
+	) by GitHub
+	let issue <- Deliveries.first(
+		"SELECT state, comments, updated_at, first_response_at FROM issues",
+		[]
+	)
+	expect issue == Ok(Some("{\"state\":\"open\",\"comments\":1,\"updated_at\":\"2026-11-06T07:33:30.000Z\",\"first_response_at\":null}"))
+	let names <- Deliveries.first(labels(), [])
+	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
+}
+
+case "a deleted comment leaves the issue, and doesn't count as a response" {
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "deleted"),
+		commentBy("deleted", "octo-maint", "User", "MEMBER", "2026-11-06T07:33:30Z")
+	) by GitHub
+	let issue <- Deliveries.first("SELECT state, first_response_at FROM issues", [])
+	expect issue == Ok(Some("{\"state\":\"open\",\"first_response_at\":null}"))
+}
+
+case "a comment on a pull request records nothing" {
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "on-a-pr"),
+		Bytes.fromUtf8(
+			commented.replace(
+				"\"number\": 2982,",
+				"\"number\": 2982,\n    \"pull_request\": {\"url\": \"https://api.github.com/repos/bynk-lang/bynk/pulls/2982\"},"
+			)
+		)
+	) by GitHub
+	let count <- Deliveries.first("SELECT count(*) AS n FROM issues", [])
+	expect count == Ok(Some("{\"n\":0}"))
+	expect Logger.error never called
+}
+
+case "a deleted issue becomes a tombstone with no labels, which a late delivery can't revive" {
+	let _ <- api.POST("/github", headers("issues", "closed"), Bytes.fromUtf8(closedIssue)) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "deleted"),
+		issueAt(
+			"deleted",
+			"closed",
+			"\"completed\"",
+			"2026-11-06T08:51:18Z",
+			"\"2026-11-06T08:51:18Z\"",
+			["proposal", "accepted"]
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "late"),
+		openIssue("labeled", "2026-11-06T10:00:00Z", ["bug"])
+	) by GitHub
+	let issue <- Deliveries.first("SELECT state FROM issues", [])
+	expect issue == Ok(Some("{\"state\":\"deleted\"}"))
+	let none <- Deliveries.first("SELECT count(*) AS n FROM issue_labels", [])
+	expect none == Ok(Some("{\"n\":0}"))
+}
+
+case "a transferred issue becomes a tombstone in the repository it left" {
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "opened"),
+		openIssue("opened", "2026-11-05T21:46:31Z", ["proposal"])
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "transferred"),
+		openIssue("transferred", "2026-11-05T22:00:00Z", ["proposal"])
+	) by GitHub
+	let issue <- Deliveries.first("SELECT repo, state FROM issues", [])
+	expect issue == Ok(Some("{\"repo\":\"bynk-lang/bynk\",\"state\":\"transferred\"}"))
+	let none <- Deliveries.first("SELECT count(*) AS n FROM issue_labels", [])
+	expect none == Ok(Some("{\"n\":0}"))
+}
+
+case "an issue opened by a bot is marked as a bot's" {
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "bot-issue"),
+		Bytes.fromUtf8(
+			closedIssue.replace(
+				"\"login\": \"accuser\",\n      \"id\": 85733,\n      \"node_id\": \"MDQ6VXNlcjg1NzMz\",\n      \"type\": \"User\"",
+				"\"login\": \"github-actions[bot]\",\n      \"id\": 41898282,\n      \"node_id\": \"MDM6Qm90NDE4OTgyODI=\",\n      \"type\": \"Bot\""
+			)
+		)
+	) by GitHub
+	let issue <- Deliveries.first("SELECT author, author_is_bot FROM issues", [])
+	expect issue == Ok(Some("{\"author\":\"github-actions[bot]\",\"author_is_bot\":1}"))
+}
+
+case "a redelivered issue changes nothing" {
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "issue-1"),
+		Bytes.fromUtf8(closedIssue)
+	) by GitHub
+	let again <- api.POST(
+		"/github",
+		headers("issues", "issue-1"),
+		Bytes.fromUtf8(closedIssue)
+	) by GitHub
+	expect again == Ok("duplicate")
+	let count <- Deliveries.first("SELECT count(*) AS n FROM issues", [])
+	expect count == Ok(Some("{\"n\":1}"))
+}
+
+case "an issue payload that doesn't decode is logged, and the delivery is still recorded" {
+	let r <- api.POST(
+		"/github",
+		headers("issues", "bad"),
+		Bytes.fromUtf8(
+			"{\"action\": \"opened\", \"issue\": {\"number\": \"not a number\"}, \"repository\": {\"full_name\": \"bynk-lang/bynk\"}}"
+		)
+	) by GitHub
+	expect r is Accepted(_)
+	expect Logger.error called once
+	let count <- Deliveries.first("SELECT count(*) AS n FROM issues", [])
+	expect count == Ok(Some("{\"n\":0}"))
+}

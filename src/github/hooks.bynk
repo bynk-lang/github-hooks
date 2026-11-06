@@ -9,6 +9,7 @@ uses github.metrics
 uses github.pulls
 uses github.releases
 uses github.jobs
+uses github.issues
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
@@ -407,8 +408,11 @@ a `workflow_run`, one `workflow_runs` row per run attempt (#20); for a
 `pull_request`, its `pull_requests` row and, for the moments the row can't
 hold, a `pull_request_events` row; for a `pull_request_review`, its
 `pull_request_reviews` row (#26); for a `release`, its `releases` row and,
-once a final release is published, which pull requests it shipped (#36). A
-redelivery records the same facts again, which changes nothing.
+once a final release is published, which pull requests it shipped (#36); for
+a `workflow_job`, its `workflow_jobs` row (#42); for an `issues` or
+`issue_comment`, its `issues` row and labels, and a maintainer's first
+response (#48). A redelivery records the same facts again, which changes
+nothing.
 ---
 capability Facts {
 	--- `fresh` when this is the delivery's first arrival, not a redelivery.
@@ -422,7 +426,13 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 			recordReview(d, body)
 		} else if d.event == "push" {
 			recordTag(d, body)
-		} else if d.event == "workflow_job" { recordJob(d, body) } else { Effect.pure(()) }
+		} else if d.event == "workflow_job" {
+			recordJob(d, body)
+		} else if d.event == "issues" || d.event == "issue_comment" {
+			recordIssue(d, body)
+		} else {
+			Effect.pure(())
+		}
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
@@ -645,6 +655,102 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 			params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
 		},
 	]
+}
+
+// Records an issue from an `issues` or `issue_comment` delivery (#48). Both
+// carry the whole issue, so either refreshes its row and labels (see
+// `issueStatements` for the ordering rules); a comment that is a maintainer's
+// response may also set the issue's first response. Comments on pull
+// requests are ignored. Open pages aren't told yet: the issues page and its
+// live events come in a later step.
+fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(read) = issueOf(body) else match {
+		Err(why) => Logger.error("could not read issue from \(d.id): \(why)"),
+	}
+	let Some(news) = read else { Effect.pure(()) }
+	let i = news.issue
+	let responded: List[SqlStatement] = match news.response {
+		Some(r) => [
+			SqlStatement {
+				sql: """
+					UPDATE issues SET first_response_at = ?3, first_responder = ?4
+					WHERE repo = ?1 AND number = ?2 AND (first_response_at IS NULL OR first_response_at > ?3)
+				""",
+				params: [Text(i.repo), Integer(i.number), Text(r.at), Text(r.by)],
+			},
+		],
+		None => [],
+	}
+	let Ok(_) <- Deliveries.batch(issueStatements(i).concat(responded)) else match {
+		Err(e) => Logger.error("could not record \(i.repo) issue #\(i.number): \(sqlError(e))"),
+	}
+	Effect.pure(())
+}
+
+// The statements that save an issue, so a run can save many in one batch.
+// The row moves forward only (by `updated_at`; a tie applies, so the later
+// arrival wins); a deleted or transferred issue becomes a tombstone that
+// nothing later changes. Its labels are replaced only when this fact is now
+// the row's, so a stale delivery never brings back an old set; a tombstone
+// keeps none.
+fn issueStatements(i: IssueFact) -> List[SqlStatement] {
+	let gone = i.state == "deleted" || i.state == "transferred"
+	let labels: List[String] = if gone { [] } else { i.labels }
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+				                    state_reason, opened_at, closed_at, updated_at, comments)
+				VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+				ON CONFLICT (repo, number) DO UPDATE SET
+				  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
+				  author_association = excluded.author_association, state = excluded.state,
+				  state_reason = excluded.state_reason, opened_at = excluded.opened_at,
+				  closed_at = excluded.closed_at, updated_at = excluded.updated_at, comments = excluded.comments
+				WHERE issues.state NOT IN ('deleted', 'transferred')
+				  AND (excluded.updated_at >= issues.updated_at OR excluded.state IN ('deleted', 'transferred'))
+			""",
+			params: [
+				Text(i.repo),
+				Integer(i.number),
+				Text(i.title),
+				Text(i.author),
+				Boolean(i.authorIsBot),
+				Text(i.authorAssociation),
+				Text(i.state),
+				text(i.stateReason),
+				Text(i.openedAt),
+				text(i.closedAt),
+				Text(i.updatedAt),
+				Integer(i.comments),
+			],
+		},
+		SqlStatement {
+			sql: """
+				DELETE FROM issue_labels
+				WHERE repo = ?1 AND number = ?2
+				  AND EXISTS (SELECT 1 FROM issues WHERE repo = ?1 AND number = ?2 AND updated_at = ?3 AND state = ?4)
+			""",
+			params: [Text(i.repo), Integer(i.number), Text(i.updatedAt), Text(i.state)],
+		},
+	].concat(
+		labels.map(
+			(label) => SqlStatement {
+				sql: """
+					INSERT OR IGNORE INTO issue_labels (repo, number, label)
+					SELECT ?1, ?2, ?3
+					WHERE EXISTS (SELECT 1 FROM issues WHERE repo = ?1 AND number = ?2 AND updated_at = ?4 AND state = ?5)
+				""",
+				params: [
+					Text(i.repo),
+					Integer(i.number),
+					Text(label),
+					Text(i.updatedAt),
+					Text(i.state),
+				],
+			}
+		)
+	)
 }
 
 // Records a job from a `workflow_job` delivery (#42). The row only moves
