@@ -3,8 +3,8 @@
 The second slice of the public dashboard
 ([#26](https://github.com/bynk-lang/github-hooks/issues/26)): how long pull
 requests take to land, what is open now, and how the merge queue behaves. This
-page covers what is recorded, how it is kept correct, and the public routes
-that read it; the page comes next.
+page covers what is recorded, how it is kept correct, the public routes that
+read it, and the page at `/prs`.
 
 ## What is recorded
 
@@ -158,3 +158,42 @@ last became ready (or opened, if that isn't known), then drafts.
 - **`ready_since`**: when it last became ready, so a draft made ready again
   waits from then. `null` for one that became ready before the service saw it.
 - **`stale`**: ready for more than 7 days and not in the queue.
+
+## The page
+
+`/prs` is the PR flow page, linked to and from the CI health page at `/`, with
+the same stylesheet, window choice (7, 30 or 90 days) and freshness line. For
+each public repository it shows:
+
+- **Tiles**: merged (and closed without merging), ready to merge, opened to
+  merge, time in the merge queue (and how many were queued more than once),
+  and median size. Each time gives its 95th percentile, and "ready to merge"
+  says how many it counts when some became ready before recording began.
+- **Why pull requests left the queue** without merging, and **bots'** figures,
+  in a line each.
+- **Merged per day**, a bar chart with its figures as a table.
+- **Open now**: each open pull request (linked to GitHub) with its author, its
+  stage (ready, in the queue, draft), how long it has waited, and a stale flag.
+
+Like the CI page it polls (open pull requests every 30 seconds, the window's
+figures every minute) and listens on the live feed, refetching both 31 seconds
+after a pull request changes, once any copy cached before the change has
+expired (the same rule as the CI page; see
+[ci-metrics.md](ci-metrics.md#live-feed)).
+
+## Live feed
+
+Pull requests share the CI page's live feed (`/live?board=ci`; see
+[ci-metrics.md](ci-metrics.md#live-feed)). An event for a pull request has
+`kind: "pull"`, the repository and `number`, its delivery's action as `status`
+and its state as `conclusion`:
+
+```json
+{"kind": "pull", "repo": "bynk-lang/bynk", "number": 2961, "path": "", "workflow": "",
+ "run_id": 0, "attempt": 0, "status": "ready_for_review", "conclusion": "open"}
+```
+
+It is sent for a delivery's first arrival only (a redelivery tells nothing
+new), and only for a repository the public pages may show. Each page acts on
+its own kind: the CI page ignores `pull` events, and this page ignores `run`
+events.

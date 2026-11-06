@@ -147,12 +147,17 @@ type LiveHello = {
 }
 
 ---
-A run that changed, pushed to every open dashboard so it refreshes at once.
-`conclusion` is `""` until the run completes (frames are Bynk's JSON, where an
-`Option` would be tagged, so a plain string keeps the page simple).
+Something that changed, pushed to every open page so it refreshes at once.
+`kind` is `run` (a workflow run: `path` to `conclusion` describe it, and
+`conclusion` is `""` until it completes) or `pull` (a pull request: `number`,
+`status` is the delivery's action and `conclusion` the PR's state; the run
+fields are empty). Frames are Bynk's JSON, where an `Option` would be tagged,
+so plain values keep the pages simple.
 ---
 type LiveEvent = {
+	kind: String,
 	repo: String,
+	number: Int,
 	path: String,
 	workflow: String,
 	run_id: Int,

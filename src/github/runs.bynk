@@ -136,7 +136,9 @@ The live-feed event for a run that changed.
 ---
 fn liveEventOf(r: RunFact) -> LiveEvent {
 	LiveEvent {
+		kind: "run",
 		repo: r.repo,
+		number: 0,
 		path: r.path,
 		workflow: r.workflow,
 		run_id: r.runId,

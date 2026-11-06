@@ -28,6 +28,14 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 2, step 4 (#26): the PR flow page at `/prs`, linked to and
+  from the CI health page. For each public repository: tiles for merged, ready
+  to merge, opened to merge, time in the merge queue and size; why pull
+  requests left the queue; bots' figures; merges per day as a chart and a
+  table; and the open pull requests with their stage, wait and a stale flag.
+  It polls and listens on the live feed, which now carries pull requests too:
+  `LiveEvent` gains `kind` (`run` or `pull`) and `number`, a pull request's
+  delivery is pushed on its first arrival, and each page acts on its own kind.
 - Phase 4, slice 2, step 3 (#26): public PR flow routes. `GET /metrics/prs`
   gives each repository's merged and closed-unmerged counts, time from ready
   (the headline, over pull requests whose ready time was seen, with how many)

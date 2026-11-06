@@ -7,7 +7,8 @@
   const NOW_EVERY_MS = 30_000;      // what is running, and the default-branch state
   const METRICS_EVERY_MS = 60_000;  // the window's figures move more slowly
   const LIVE_POLL_MS = 120_000;     // while the live feed is up, polling is only a safety net
-  const LIVE_SETTLE_MS = 3_000;     // a burst of runs costs one refresh, not one each
+  const LIVE_SETTLE_MS = 3_000;     // the shortest wait between two live refetches
+  const CACHE_MS = 30_000;          // the routes' `max-age`, at the edge and in the browser
   let days = 7;
   let metrics = null;
   let now = null;
@@ -552,14 +553,38 @@
   // The page refetches rather than patching itself, so it always shows the
   // routes' own definitions. Reconnects with backoff, falling back to polling.
   let socket = null;
-  let settle = null;
-  let completedSince = false; // did a run complete during the settle?
+  let completedSince = false; // did a run complete before the pending refetch?
   let retryMs = 5_000;
   let retry = null;
   // A fresh id per connection: the server drops a connection by id when it
   // closes, so reusing one would let an old socket's late close remove the new.
   const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
     : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+
+  // A live event's refetch. Responses are cached 30 seconds at the edge,
+  // keyed by URL and shared by every viewer, so any copy made before the event
+  // (by this page or another) may be served until 30 seconds after it: the
+  // refetch goes 31 seconds after the event. Events during the wait don't
+  // postpone it, so a steady stream still refreshes; one more refetch follows
+  // 31 seconds after the latest of them.
+  const LIVE_DELAY_MS = CACHE_MS + 1_000;
+  let liveTimer = null;
+  let lastEventAt = 0;
+  let timerFor = 0;
+  function onLiveEvent(refetch) {
+    lastEventAt = Date.now();
+    if (liveTimer) return;
+    timerFor = lastEventAt;
+    liveTimer = setTimeout(() => fireLive(refetch), LIVE_DELAY_MS);
+  }
+  function fireLive(refetch) {
+    liveTimer = null;
+    refetch();
+    if (lastEventAt > timerFor) {
+      timerFor = lastEventAt;
+      liveTimer = setTimeout(() => fireLive(refetch), Math.max(LIVE_SETTLE_MS, lastEventAt + LIVE_DELAY_MS - Date.now()));
+    }
+  }
 
   function connect() {
     if (socket || !("WebSocket" in globalThis)) return;
@@ -576,16 +601,17 @@
     // change moves what is running.
     ws.onmessage = (m) => {
       try {
-        if (JSON.parse(m.data).status === "completed") completedSince = true;
+        const e = JSON.parse(m.data);
+        if (e.kind === "pull") return; // pull requests are the PR flow page's
+        if (e.status === "completed") completedSince = true;
       } catch {
         completedSince = true; // unreadable: assume the worst and refetch it all
       }
-      clearTimeout(settle);
-      settle = setTimeout(() => {
+      onLiveEvent(() => {
         refreshNow();
         if (completedSince) refreshWindow();
         completedSince = false;
-      }, LIVE_SETTLE_MS);
+      });
     };
     ws.onclose = () => {
       if (socket !== ws) return;
@@ -603,7 +629,8 @@
 
   function disconnect() {
     clearTimeout(retry);
-    clearTimeout(settle);
+    clearTimeout(liveTimer);
+    liveTimer = null;
     const ws = socket;
     socket = null;
     live = false;

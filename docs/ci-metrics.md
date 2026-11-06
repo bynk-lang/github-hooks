@@ -174,14 +174,21 @@ The page opens a WebSocket to `/live?board=ci&client=<random id>` and is sent
 an event whenever a public run's facts change:
 
 ```json
-{"repo": "bynk-lang/bynk", "path": ".github/workflows/ci.yml", "workflow": "CI",
- "run_id": 41981894779, "attempt": 1, "status": "completed", "conclusion": "success"}
+{"kind": "run", "repo": "bynk-lang/bynk", "number": 0, "path": ".github/workflows/ci.yml",
+ "workflow": "CI", "run_id": 41981894779, "attempt": 1, "status": "completed", "conclusion": "success"}
 ```
 
-`conclusion` is `""` until the run completes. The page treats an event as a
-nudge: 3 seconds after the last one it refetches `/metrics/ci/now`, and
+`conclusion` is `""` until the run completes. Pull requests share the feed as
+`kind: "pull"` events ([pr-flow.md](pr-flow.md#live-feed)), which this page
+ignores. The page treats an event as a
+nudge: 31 seconds after it, the page refetches `/metrics/ci/now`, and
 `/metrics/ci` and `/metrics/ci/history` too if any run completed meanwhile
-(nothing else moves them), so what it shows always follows the routes' definitions. While
+(nothing else moves them), so what it shows always follows the routes' definitions.
+The wait is the routes' cache: they are cached 30 seconds per URL at the edge,
+shared by every viewer, so a copy made just before the event (by any viewer)
+may be served until 30 seconds after it. Events during the wait don't postpone
+the refetch, so a steady stream of runs still refreshes the page; one more
+refetch follows 31 seconds after the latest of them. While
 the feed is connected it polls only every 2 minutes, as a safety net; if the
 feed drops it reconnects with backoff (5 seconds, doubling to a minute) and
 polls every 30 seconds meanwhile.

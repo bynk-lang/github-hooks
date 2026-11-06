@@ -5,6 +5,8 @@ suite github.hooks
 
 fixture completedRun = "fixtures/github/workflow_run.completed.json"
 
+fixture mergedPull = "fixtures/github/pull_request.closed.json"
+
 --- A `workflow_run` delivery's headers.
 fn runHeaders(id: String) -> RequestHeaders {
 	RequestHeaders.of(["X-GitHub-Event: workflow_run", "X-GitHub-Delivery: \(id)"])
@@ -12,7 +14,7 @@ fn runHeaders(id: String) -> RequestHeaders {
 
 case "a public run that changed is pushed, once" {
 	let _ <- api.POST("/github", runHeaders("live-1"), Bytes.fromUtf8(completedRun)) by GitHub
-	expect LiveFeed.publish called once with e == LiveEvent { repo: "bynk-lang/github-hooks", path: ".github/workflows/ci.yml", workflow: "CI", run_id: 41978704067, attempt: 1, status: "completed", conclusion: "success" }
+	expect LiveFeed.publish called once with e == LiveEvent { kind: "run", repo: "bynk-lang/github-hooks", number: 0, path: ".github/workflows/ci.yml", workflow: "CI", run_id: 41978704067, attempt: 1, status: "completed", conclusion: "success" }
 }
 
 case "a redelivery, which changes nothing, pushes nothing more" {
@@ -50,6 +52,31 @@ case "other events push nothing" {
 		"/github",
 		RequestHeaders.of(["X-GitHub-Event: push", "X-GitHub-Delivery: push-1"]),
 		Bytes.fromUtf8("{\"repository\": {\"full_name\": \"bynk-lang/bynk\", \"private\": false}}")
+	) by GitHub
+	expect LiveFeed.publish never called
+}
+
+--- A `pull_request` delivery's headers.
+fn pullHeaders(id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: pull_request", "X-GitHub-Delivery: \(id)"])
+}
+
+case "a public pull request's delivery is pushed, as a pull" {
+	let _ <- api.POST("/github", pullHeaders("pr-live-1"), Bytes.fromUtf8(mergedPull)) by GitHub
+	expect LiveFeed.publish called once with e == LiveEvent { kind: "pull", repo: "bynk-lang/github-hooks", number: 25, path: "", workflow: "", run_id: 0, attempt: 0, status: "closed", conclusion: "merged" }
+}
+
+case "a pull request's redelivery pushes nothing more" {
+	let _ <- api.POST("/github", pullHeaders("pr-live-1"), Bytes.fromUtf8(mergedPull)) by GitHub
+	let _ <- api.POST("/github", pullHeaders("pr-live-1"), Bytes.fromUtf8(mergedPull)) by GitHub
+	expect LiveFeed.publish called once
+}
+
+case "a private repository's pull request is never pushed" {
+	let _ <- api.POST(
+		"/github",
+		pullHeaders("pr-private-1"),
+		Bytes.fromUtf8(mergedPull.replace("\"private\": false", "\"private\": true"))
 	) by GitHub
 	expect LiveFeed.publish never called
 }
