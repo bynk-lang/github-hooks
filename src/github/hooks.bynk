@@ -210,11 +210,53 @@ capability GitHubApi {
 	answers 204 for a member, private or public, and 404 for anyone else.
 	---
 	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]]
+	---
+	A repository's open issues, every page (at most `MAX_ISSUE_PAGES`). GitHub
+	lists open pull requests among them, with `pull_request` set.
+	---
+	fn openIssues(installation: Int, repo: String) -> Effect[Result[List[IssuePayload], ApiFailure]]
+	--- One issue, whatever its state; after a transfer, the issue where it now is.
+	fn issue(
+		installation: Int,
+		repo: String,
+		number: Int
+	) -> Effect[Result[IssuePayload, ApiFailure]]
 }
 
 provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]] {
 		openPullsFrom(installation, repo, 1, [])
+	}
+
+	fn openIssues(
+		installation: Int,
+		repo: String
+	) -> Effect[Result[List[IssuePayload], ApiFailure]] {
+		openIssuesFrom(installation, repo, 1, [])
+	}
+
+	fn issue(
+		installation: Int,
+		repo: String,
+		number: Int
+	) -> Effect[Result[IssuePayload, ApiFailure]] {
+		let url = "https://api.github.com/repos/\(repo)/issues/\(number)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused \(repo) issue #\(number): \(refusal(res.status, res.body))",
+			}))
+		}
+		match Json.decode[IssuePayload](res.body) {
+			Ok(i) => Effect.pure(Ok(i)),
+			Err(e) => Effect.pure(Err(ApiFailure {
+				status: None,
+				message: "\(repo) issue #\(number) did not decode: \(e.kind) at \(e.path)",
+			})),
+		}
 	}
 
 	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]] {
@@ -337,6 +379,45 @@ fn openPullsFrom(
 		openPullsFrom(installation, repo, page + 1, all)
 	}
 }
+
+// One page of open issues after another, until a short page says it was the
+// last, or `MAX_ISSUE_PAGES` have been read. GitHub lists open pull requests
+// here too (with `pull_request` set); the caller leaves them out.
+fn openIssuesFrom(
+	installation: Int,
+	repo: String,
+	page: Int,
+	sofar: List[IssuePayload]
+) -> Effect[Result[List[IssuePayload], ApiFailure]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/issues?state=open&per_page=\(ISSUE_PAGE)&page=\(page)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err(ApiFailure {
+			status: Some(res.status),
+			message: "GitHub refused \(repo)'s open issues: \(refusal(res.status, res.body))",
+		}))
+	}
+	let Ok(issues) = Json.decode[List[IssuePayload]](res.body) else match {
+		Err(e) => Effect.pure(Err(ApiFailure {
+			status: None,
+			message: "\(repo)'s open issues did not decode: \(e.kind) at \(e.path)",
+		})),
+	}
+	let all = sofar.concat(issues)
+	if issues.length() < ISSUE_PAGE || page >= MAX_ISSUE_PAGES {
+		Effect.pure(Ok(all))
+	} else {
+		openIssuesFrom(installation, repo, page + 1, all)
+	}
+}
+
+// GitHub's largest page, and how many the issue sync reads: 500 open issues
+// and pull requests together in one repository, against `bynk`'s few dozen.
+const ISSUE_PAGE: Int = 100
+
+const MAX_ISSUE_PAGES: Int = 5
 
 // One page of a comparison's commits after another, until every commit GitHub
 // counted has been read, or `MAX_COMPARE_PAGES` have been.
@@ -2918,6 +2999,32 @@ service pullSync from cron {
 }
 
 ---
+The open-issue sync, daily (#48): for each public repository, every issue
+GitHub lists as open is saved (filling in those opened before the service saw
+them, and correcting any a lost delivery left behind), and each one the table
+still holds open that GitHub no longer lists is read on its own and saved as
+it is now. Repositories in `DASHBOARD_EXCLUDE` are skipped. One repository
+failing doesn't stop the others; the run then fails, naming each. Six minutes
+after the release sync.
+---
+service issueSync from cron {
+	on schedule("53 4 * * *") (
+		at: Int
+	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, GitHubApi {
+		let Ok(targets) <- syncTargets() else match {
+			Err(why) => syncFailed(why),
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let results <- targets
+			.filter((t) => !allows(excluded, t.repo))
+			.traverseAll((t) => syncIssues(t))
+		let failures = errorsOf(results)
+		let true = failures.length() > 0 else { Effect.pure(Ok(())) }
+		Effect.pure(Err(joined(failures, "; ")))
+	}
+}
+
+---
 The daily release sync (#36): for each public repository (not in
 `DASHBOARD_EXCLUDE`), as the installation that last delivered for it, it
 records every release GitHub lists (up to `MAX_RELEASE_PAGES` pages), so
@@ -3425,6 +3532,114 @@ fn markGone(repo: String, number: Int) -> Effect[Result[Bool, String]] given Del
 		[Text(repo), Integer(number)]
 	) else match {
 		Err(e) => Effect.pure(Err("could not mark \(repo)#\(number) gone: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(true))
+}
+
+// Syncs one repository's issues: saves every open issue GitHub lists, in one
+// batch, then reads each one still open here that GitHub didn't list (oldest
+// first, at most `MAX_REPAIRS` a run) and saves it as it now is. A saved issue
+// follows the same rules as a delivery (`issueStatements`): a listing older
+// than the row changes nothing. A repository that can't be synced for good is
+// skipped with a warning, as the pull request sync does.
+fn syncIssues(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+	let Some(installation) = t.installation else {
+		syncSkipped("\(t.repo): no installation has delivered for it; issues skipped")
+	}
+	let Ok(listed) <- GitHubApi.openIssues(installation, t.repo) else match {
+		Err(f) => if isGone(f) {
+			syncSkipped("\(t.repo): GitHub no longer has it; issues skipped (\(f.message))")
+		} else {
+			syncFailed("\(t.repo): \(f.message)")
+		},
+	}
+	// GitHub redirects a renamed repository's old name. Its issues belong to
+	// the new name, which syncs under its own `repositories` row.
+	let current = listed.first().andThen((i) => repoOfIssue(i)).getOrElse(t.repo)
+	let true = current == t.repo else {
+		syncSkipped("\(t.repo): GitHub now calls it \(current); issues skipped")
+	}
+	let open = listed.filter((i) => i.pull_request.isNone())
+	let facts = open.map((i) => issueFact(t.repo, "sync", None, None, i))
+	let none: List[SqlStatement] = []
+	let statements = facts.fold(none, (all, f) => match f {
+		Ok(i) => all.concat(issueStatements(i)),
+		Err(_) => all,
+	})
+	let unread = errorsOf(facts.map((f) => f.map((_) => ())))
+	let Ok(_) <- Deliveries.batch(statements) else match {
+		Err(e) => syncFailed("\(t.repo): could not save its open issues: \(sqlError(e))"),
+	}
+	let Ok(held) <- Deliveries.all(
+		"SELECT repo, number FROM issues WHERE repo = ?1 COLLATE NOCASE AND state = 'open' ORDER BY updated_at, number",
+		[Text(t.repo)]
+	) else match {
+		Err(e) => syncFailed("\(t.repo): could not read the issues held open: \(sqlError(e))"),
+	}
+	let Ok(heldOpen) = Json.decodeSql[List[PullNumber]](held) else match {
+		Err(e) => syncFailed("\(t.repo): the issues held open did not decode: \(jsonError(e))"),
+	}
+	let gone = heldOpen.filter((h) => !open.any((i) => i.number == h.number)).take(MAX_REPAIRS)
+	// Each is saved under the name its row has, so a difference in case can't
+	// make a second row.
+	let repairs <- gone.traverseAll((h) => repairIssue(installation, h.repo, h.number))
+	let repaired = repairs.filter((r) => r == Ok(true)).length()
+	let failed = unread.concat(errorsOf(repairs.map((r) => r.map((_) => ()))))
+	let _ <- Logger.info(
+		"issue sync: \(t.repo) has \(open.length()) open, \(repaired) repaired\(if failed.length() > 0 { ", \(failed.length()) failed" } else { "" })"
+	)
+	let true = failed.length() == 0 else { Effect.pure(Err("\(t.repo): \(joined(failed, "; "))")) }
+	Effect.pure(Ok(()))
+}
+
+// An issue held open here that GitHub no longer lists as open: read it on its
+// own and save it as it now is. `true` when that moved it out of `open`.
+// GitHub answers for a transferred issue with the issue where it now is, so
+// one in another repository becomes a `transferred` tombstone; one GitHub
+// no longer has at all (404 or 410: deleted) becomes a `deleted` one.
+fn repairIssue(
+	installation: Int,
+	repo: String,
+	number: Int
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi {
+	let Ok(i) <- GitHubApi.issue(installation, repo, number) else match {
+		Err(f) => if isGone(f) {
+			removeIssue(repo, number, "deleted")
+		} else {
+			Effect.pure(Err(f.message))
+		},
+	}
+	let now = repoOfIssue(i).getOrElse(repo)
+	let true = now.toLower() == repo.toLower() && i.number == number else {
+		removeIssue(repo, number, "transferred")
+	}
+	let Ok(fact) = issueFact(repo, "sync", None, None, i) else match {
+		Err(why) => Effect.pure(Err("\(repo) issue #\(number): \(why)")),
+	}
+	let Ok(_) <- Deliveries.batch(issueStatements(fact)) else match {
+		Err(e) => Effect.pure(Err("could not record \(repo) issue #\(number): \(sqlError(e))")),
+	}
+	Effect.pure(Ok(fact.state != "open"))
+}
+
+// Makes an open issue a tombstone (`deleted` or `transferred`), with no labels,
+// as the delivery saying so would have.
+fn removeIssue(
+	repo: String,
+	number: Int,
+	how: String
+) -> Effect[Result[Bool, String]] given Deliveries {
+	let Ok(_) <- Deliveries.batch([
+		SqlStatement {
+			sql: "UPDATE issues SET state = ?3 WHERE repo = ?1 AND number = ?2 AND state = 'open'",
+			params: [Text(repo), Integer(number), Text(how)],
+		},
+		SqlStatement {
+			sql: "DELETE FROM issue_labels WHERE repo = ?1 AND number = ?2",
+			params: [Text(repo), Integer(number)],
+		},
+	]) else match {
+		Err(e) => Effect.pure(Err("could not mark \(repo) issue #\(number) \(how): \(sqlError(e))")),
 	}
 	Effect.pure(Ok(true))
 }

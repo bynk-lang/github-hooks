@@ -43,6 +43,15 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 5, step 2 (#48): the daily open-issue sync.
+  - **What it does:** the `issueSync` cron (04:53 UTC) lists each public
+    repository's open issues through the REST API, leaving out the pull
+    requests GitHub lists with them, and saves them as deliveries would.
+  - **Repairs:** each issue still held open that GitHub didn't list is read
+    on its own. It's saved as it now is, or becomes a `transferred` or
+    `deleted` tombstone.
+  - **Failures:** renamed and vanished repositories are skipped with a
+    warning, as the pull request sync does.
 - Phase 4, slice 5, step 1 (#48): issue facts for issue response.
   - **Recording:** `issues` and `issue_comment` deliveries become `issues`
     rows and `issue_labels` (migration `0013`): one row per issue, moving

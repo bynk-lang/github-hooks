@@ -20,7 +20,7 @@ It is two things at once:
 | 1 | Receive, verify and record every delivery | released in [v0.1.0](CHANGELOG.md#010---2026-11-03) |
 | 2 | Read API over recorded activity, daily digest, retention | read API and digest live ([docs](docs/read-api.md)); retention hourly, 90 days ([#6](https://github.com/bynk-lang/github-hooks/issues/6)) |
 | 3 | Act on events through the App's installation token | welcoming first-time contributors, live on `bynk-lang/bynk` ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
-| 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/`, updated live over WebSocket, with recent runs and daily trends; PR flow facts recorded and synced daily, a public PR flow API, and the PR flow page at `/prs`, live ([#26](https://github.com/bynk-lang/github-hooks/issues/26), [docs](docs/pr-flow.md)); release facts recorded, synced daily and matched to the pull requests they shipped, a public releases API, and the releases page at `/releases`, live ([#36](https://github.com/bynk-lang/github-hooks/issues/36), [docs](docs/releases.md)); job facts recorded for runner wait, a public runner-wait API computed hourly, and runner wait on the CI health page ([#42](https://github.com/bynk-lang/github-hooks/issues/42), [docs](docs/runners.md)); issue facts recorded for issue response ([#48](https://github.com/bynk-lang/github-hooks/issues/48), [docs](docs/issues.md)) |
+| 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/`, updated live over WebSocket, with recent runs and daily trends; PR flow facts recorded and synced daily, a public PR flow API, and the PR flow page at `/prs`, live ([#26](https://github.com/bynk-lang/github-hooks/issues/26), [docs](docs/pr-flow.md)); release facts recorded, synced daily and matched to the pull requests they shipped, a public releases API, and the releases page at `/releases`, live ([#36](https://github.com/bynk-lang/github-hooks/issues/36), [docs](docs/releases.md)); job facts recorded for runner wait, a public runner-wait API computed hourly, and runner wait on the CI health page ([#42](https://github.com/bynk-lang/github-hooks/issues/42), [docs](docs/runners.md)); issue facts recorded and open issues synced daily, for issue response ([#48](https://github.com/bynk-lang/github-hooks/issues/48), [docs](docs/issues.md)) |
 
 ## How it works
 
@@ -187,7 +187,7 @@ docs/ci-metrics.md       the public CI metrics: routes, definitions, settings
 docs/pr-flow.md          the PR flow: facts, the daily open-PR sync, routes
 docs/releases.md         releases: facts, matching, the daily sync, routes, the page and live feed
 docs/runners.md          runner wait: job facts, how long they're kept, routes, the page
-docs/issues.md           issue response: issue facts, and how they're kept
+docs/issues.md           issue response: issue facts, how they're kept, the daily sync
 ```
 
 ## The Bynk canary

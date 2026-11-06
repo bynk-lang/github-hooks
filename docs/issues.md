@@ -5,8 +5,8 @@ The fifth slice of the public dashboard
 are closed as fast as they're opened, how long they take to close, and what
 is open and gone quiet. Later, once people outside the org file issues, it
 also covers how long they wait for a maintainer to respond. This page covers
-what is recorded. The daily sync, the routes and the page at `/issues`
-follow in later steps.
+what is recorded and the daily sync that keeps it right. The routes and the
+page at `/issues` follow in later steps.
 
 ## What the data says about the design
 
@@ -83,6 +83,60 @@ the organisation. Each costs a few D1 writes: the row, plus one per label.
 
 ## History
 
-There's no backfill: closed-issue figures start when this ships. From step
-2, a daily sync of open issues through the REST API keeps the backlog right
-from the first day, and corrects any delivery that was missed.
+There's no backfill: closed-issue figures start when this ships. The daily
+sync below keeps the open backlog right from its first run.
+
+## The daily sync
+
+Deliveries alone miss two things: issues opened before the service saw them,
+and a `closed` (or `deleted`, or `transferred`) delivery that never arrived,
+which would leave an issue open for good. The `issueSync` cron service, daily
+at 04:53 UTC, repairs both. It runs six minutes after the release sync.
+
+1. **Listing:** for each public repository (not in `DASHBOARD_EXCLUDE`), it
+   lists the open issues through the REST API, as the installation that last
+   delivered for that repository. It reads up to 500, a page of 100 at a time,
+   and saves them all in one D1 batch.
+   - **Pull requests:** GitHub lists open pull requests here too (with
+     `pull_request` set). They're left out.
+   - **Ordering:** each saved issue follows the delivery rules above. A
+     listing older than what deliveries recorded changes nothing, and its
+     labels replace the set only when it's strictly newer.
+2. **Repairs:** each issue the table still holds open that GitHub didn't list
+   is read on its own and saved as it now is. The oldest go first, at most 50
+   a repository per run.
+   - **Transferred:** after a transfer, GitHub answers the old address with
+     the issue where it now is. One answered from another repository becomes
+     a `transferred` tombstone.
+   - **Deleted:** one GitHub answers `404` or `410` for becomes a `deleted`
+     tombstone.
+
+It reads as the App, with the installation token the other syncs use, so it
+needs only the **Issues: Read** permission the App already has. A refused call
+is retried once with a fresh token.
+
+**What it skips, with a warning rather than failing the run**, since each would
+otherwise fail every day:
+
+- a repository no installation has delivered for (and one whose deliveries
+  have all aged out after the App was uninstalled);
+- a repository GitHub answers `404` or `410` for;
+- a renamed repository: GitHub redirects the old name, and the listed issues
+  name the new one, which syncs under its own row.
+
+Anything else (a refused token, a `5xx`, an issue that won't decode) fails the
+run, naming each repository, after the others have synced. Each repository
+logs one line:
+
+```text
+issue sync: bynk-lang/bynk has 22 open, 0 repaired
+```
+
+"Repaired" counts issues the run moved out of `open`. A repair that failed is
+counted under "failed" instead.
+
+**Its cost per run**, per repository: at most 5 list pages and 50 single reads
+from GitHub (plus a token from KV), and a handful of D1 calls (the listing is
+saved in one batch, and each repair in one more). With the pull request and
+release syncs, that's far inside a Worker invocation's subrequest limit for
+bynk-lang's few public repositories.
