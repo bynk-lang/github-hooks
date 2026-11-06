@@ -356,6 +356,12 @@ All notable changes to github-hooks. The format follows
 
 ### Fixed
 
+- Organisation membership is read from GitHub's membership endpoint
+  (`GET /orgs/{org}/memberships/{login}`), not the "check membership" one,
+  which answers `404` when it won't show a private membership. Private
+  members, the owner among them, were refused at maintainer sign-in and could
+  count as outsiders in issue response. A `403` (the App can't see members) is
+  now an error, never "not a member".
 - A comment or token GitHub refuses is logged with GitHub's own message as well
   as the status (`403 Resource not accessible by integration`), so a missing
   permission names itself. A `422` adds GitHub's `errors` details

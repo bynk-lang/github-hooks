@@ -325,7 +325,7 @@ case "the author's own comment, bots' and an outsider's aren't responses, and a 
 	expect issue == Ok(Some("{\"state\":\"open\",\"comments\":1,\"updated_at\":\"2026-11-06T07:33:30.000Z\",\"first_response_at\":null}"))
 	let names <- Deliveries.first(labels(), [])
 	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
-	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/a-reader"
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/memberships/a-reader"
 }
 
 case "a maintainer whose membership is private counts, once GitHub confirms they belong to the org" {
@@ -334,14 +334,14 @@ case "a maintainer whose membership is private counts, once GitHub confirms they
 	// answer kept: a second comment by them, in a different case, isn't asked
 	// about again.
 	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns Ok(Response { status: 204, headers: Map.empty(), body: "" })
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 200, headers: Map.empty(), body: "{\"state\": \"active\", \"role\": \"member\"}" })
 	let _ <- api.POST(
 		"/github",
 		headers("issue_comment", "private"),
 		commentBy("created", "private-maint", "User", "CONTRIBUTOR", "2026-11-06T07:40:00Z")
 	) by GitHub
 	expect AppAuth.token called with installation == 1
-	expect GitHubHttp.get called with url == "https://api.github.com/orgs/bynk-lang/members/private-maint"
+	expect GitHubHttp.get called with url == "https://api.github.com/orgs/bynk-lang/memberships/private-maint"
 	let first <- Deliveries.first("SELECT first_responder FROM issues", [])
 	expect first == Ok(Some("{\"first_responder\":\"private-maint\"}"))
 	let _ <- api.POST(
@@ -461,7 +461,7 @@ case "a transferred issue becomes a tombstone in the repository it left" {
 case "an issue's author whom GitHub reports as a contributor is a maintainer if the org says they belong to it" {
 	// GitHub reports a member whose membership is private as a CONTRIBUTOR.
 	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns Ok(Response { status: 204, headers: Map.empty(), body: "" })
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 200, headers: Map.empty(), body: "{\"state\": \"active\", \"role\": \"member\"}" })
 	let _ <- api.POST(
 		"/github",
 		headers("issues", "private-author"),
@@ -470,7 +470,7 @@ case "an issue's author whom GitHub reports as a contributor is a maintainer if 
 			"\"author_association\": \"CONTRIBUTOR\""
 		))
 	) by GitHub
-	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/memberships/accuser"
 	let issue <- Deliveries.first("SELECT author_association, author_maintainer FROM issues", [])
 	expect issue == Ok(Some("{\"author_association\":\"CONTRIBUTOR\",\"author_maintainer\":1}"))
 }
@@ -501,7 +501,7 @@ case "an issue's author outside the org isn't a maintainer; a member by associat
 case "if the org can't say whether an author belongs to it, the issue is recorded, keeping what was known, and the log says why" {
 	stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 204, headers: Map.empty(), body: "" }), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })]
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 200, headers: Map.empty(), body: "{\"state\": \"active\", \"role\": \"member\"}" }), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })]
 	let contributor = closedIssue.replace(
 		"\"author_association\": \"MEMBER\"",
 		"\"author_association\": \"CONTRIBUTOR\""

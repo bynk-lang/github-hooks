@@ -50,7 +50,11 @@ fn installed() -> List[SqlStatement] {
 }
 
 fn member() -> Result[Response, String] {
-	Ok(Response { status: 204, headers: Map.empty(), body: "" })
+	Ok(Response {
+		status: 200,
+		headers: Map.empty(),
+		body: "{\"state\": \"active\", \"role\": \"member\"}",
+	})
 }
 
 fn notMember() -> Result[Response, String] {
@@ -112,7 +116,7 @@ case "a member who signs in with GitHub gets a token for their login" {
 	expect GitHubSignIn.revoke called once with token == "ghu_user"
 	expect GitHubSignIn.revoke called once with clientSecret == "test-client-secret"
 	expect AppAuth.token called once with installation == 42
-	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/memberships/accuser"
 }
 
 case "someone outside the organisation who signs in with GitHub gets no token" {
@@ -158,7 +162,7 @@ case "signing in asks GitHub afresh: a kept answer from yesterday doesn't issue 
 	expect kept is Ok(_)
 	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
 	expect r is RawError(403, _, _)
-	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/a-leaver"
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/memberships/a-leaver"
 	// The fresh answer is kept, so the next request is refused without asking.
 	let after <- api.GET("/maintainers/me") by Maintainer("a-leaver")
 	expect after is RawError(403, _, _)
@@ -270,6 +274,29 @@ case "someone who has left the organisation is refused, even with a token" {
 		expect false
 	}
 	expect body.decodeUtf8().getOrElse("").contains("not_a_member")
+}
+
+case "a private member is a member, an invitation isn't, and an App that can't see members is an error" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 200, headers: Map.empty(), body: "{\"state\": \"active\", \"role\": \"admin\"}" }), Ok(Response { status: 200, headers: Map.empty(), body: "{\"state\": \"pending\", \"role\": \"member\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" })]
+	let owner <- GitHubApi.isMember(42, "bynk-lang", "accuser")
+	expect owner == Ok(true)
+	let invited <- GitHubApi.isMember(42, "bynk-lang", "invitee")
+	expect invited == Ok(false)
+	let unseen <- GitHubApi.isMember(42, "bynk-lang", "someone")
+	expect unseen is Err(_)
+	expect GitHubHttp.get called with url == "https://api.github.com/orgs/bynk-lang/memberships/accuser"
+}
+
+case "signing in while the App can't see members is unavailable, not a refusal" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" })
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is ServiceUnavailable(_)
 }
 
 case "if GitHub can't say, or no installation is known, the answer is unavailable, not a refusal" {

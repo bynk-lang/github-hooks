@@ -312,8 +312,10 @@ capability GitHubApi {
 		head: String
 	) -> Effect[Result[Comparison, ApiFailure]]
 	---
-	Whether `login` belongs to `org` (the App's Members read permission): GitHub
-	answers 204 for a member, private or public, and 404 for anyone else.
+	Whether `login` belongs to `org` (the App's Members read permission), from
+	their membership's state: `active` is a member, private or public; `pending`
+	(invited) and 404 are not. A 403 means the App can't see members, which is
+	an error, never "not a member".
 	---
 	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]]
 	---
@@ -364,14 +366,32 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	}
 
 	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]] {
-		let url = "https://api.github.com/orgs/\(org)/members/\(login)"
+		// The membership itself, not the "check membership" endpoint: that one
+		// answers 404 both for a non-member and when it won't show the asker a
+		// private membership (redirecting to the public-members check), so a
+		// private member read as an outsider. This one answers the state, 404
+		// only for someone outside the organisation, and 403 when the App
+		// can't see members at all.
+		let url = "https://api.github.com/orgs/\(org)/memberships/\(login)"
 		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
 			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
 		}
-		if res.status == 204 {
-			Effect.pure(Ok(true))
+		// An invitation not yet accepted (`pending`) isn't membership.
+		if res.status == 200 {
+			match Json.decode[OrgMembership](res.body) {
+				Ok(m) => Effect.pure(Ok(m.state == "active")),
+				Err(_) => Effect.pure(Err(ApiFailure {
+					status: Some(200),
+					message: "GitHub's membership of \(login) in \(org) did not decode",
+				})),
+			}
 		} else if res.status == 404 {
 			Effect.pure(Ok(false))
+		} else if res.status == 403 {
+			Effect.pure(Err(ApiFailure {
+				status: Some(403),
+				message: "GitHub won't show \(org)'s members to the App (is the Members: Read permission granted and accepted on the installation?): \(refusal(res.status, res.body))",
+			}))
 		} else {
 			Effect.pure(Err(ApiFailure {
 				status: Some(res.status),
@@ -1015,6 +1035,11 @@ fn askMember(
 
 // How long GitHub's answer on organisation membership is reused.
 const MEMBER_RECHECK: Duration = 1.days
+
+--- A user's membership of an organisation, as GitHub's `GET /orgs/{org}/memberships/{user}` describes it: `active` or `pending`.
+type OrgMembership = {
+	state: String,
+}
 
 --- A cached membership answer.
 type CachedMember = {
