@@ -10,6 +10,7 @@ uses github.pulls
 uses github.releases
 uses github.jobs
 uses github.issues
+uses github.maintainers
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
@@ -57,6 +58,14 @@ embed issuesTemplate = "embeds/issues.html"
 asset issuesJs = "assets/issues.js"
 
 ---
+Signing maintainers in (#53): the script every page loads for the sign-in
+link, and the page Access returns to.
+---
+asset signinJs = "assets/signin.js"
+
+embed callbackTemplate = "embeds/callback.html"
+
+---
 The public metrics routes' per-address limit: 60 uncached requests a minute
 is ample for a page polling every 30 seconds, and bounds what anyone can make
 D1 read by varying the query string past the cache.
@@ -73,6 +82,47 @@ Every `@cache` route here is served `by v: Visitor`: a cached answer is
 shared with every caller.
 ---
 capability Edge = EdgeCache
+
+---
+Exchanging a maintainer's sign-in code for an ID token at Cloudflare Access
+(#53). Access's token endpoint doesn't answer a browser's CORS preflight, so
+the page can't make the exchange itself: the Worker does, for a public client
+with PKCE (no secret). `tokenUrl` and `clientId` come from the trust in force.
+---
+capability AccessOidc {
+	fn exchange(
+		tokenUrl: String,
+		clientId: String,
+		r: TokenRequest
+	) -> Effect[Result[AccessTokenReply, String]]
+}
+
+provides AccessOidc = AccessTokenEndpoint given Fetch {
+	fn exchange(
+		tokenUrl: String,
+		clientId: String,
+		r: TokenRequest
+	) -> Effect[Result[AccessTokenReply, String]] {
+		let sent <- Fetch.send(Request {
+			method: Post,
+			url: tokenUrl,
+			contentType: Some("application/x-www-form-urlencoded"),
+			authorization: None,
+			headers: Map
+				.empty()
+				.insert("accept", "application/json")
+				.insert("user-agent", "bynk-lang-github-hooks"),
+			body: Some(tokenForm(clientId, r)),
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("Cloudflare Access could not be reached")),
+		}
+		match Json.decode[AccessTokenReply](res.body) {
+			Ok(reply) => Effect.pure(Ok(reply)),
+			Err(_) => Effect.pure(Err("Cloudflare Access answered \(res.status) with a body that isn't a token reply")),
+		}
+	}
+}
 
 ---
 Acting as the GitHub App. `token` gives an installation token: from `Tokens`
@@ -1749,6 +1799,23 @@ Who may read recorded activity: a caller presenting a JWT signed (HS256) with
 actor Reader { auth = Bearer(secret = "API_TOKEN_SECRET"), identity = ReaderId }
 
 ---
+A bynk-lang maintainer, signed in through Cloudflare Access as an OIDC
+provider (#53). The token is verified against the Access application's JWKS;
+`MAINTAINER_OIDC`, when set, replaces the declared trust (`trustFrom`), so a
+fake issuer can stand in for end-to-end checks. Whether they still belong to
+the organisation is checked by the routes, as a token outlives a membership.
+---
+actor Maintainer {
+	auth = Oidc(
+		issuer = "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a",
+		audience = "fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a",
+		jwks = "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a/jwks",
+		trustFrom = "MAINTAINER_OIDC"
+	),
+	identity = MaintainerId
+}
+
+---
 A reader's name, from their token's `sub`.
 ---
 type ReaderId = String where NonEmpty
@@ -1774,13 +1841,17 @@ service api from http {
 		let page = dashboardTemplate
 			.replace("{css}", dashboardCss.url)
 			.replace("{js}", dashboardJs.url)
+			.replace("{signin}", signinJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 
 	// The PR flow page. Not `@cache`d, for the same reason as `/`: it names
 	// this deploy's assets.
 	on GET("/prs") () -> Effect[HttpResult[String]] by v: Visitor {
-		let page = prsTemplate.replace("{css}", dashboardCss.url).replace("{js}", prsJs.url)
+		let page = prsTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", prsJs.url)
+			.replace("{signin}", signinJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 
@@ -1789,13 +1860,118 @@ service api from http {
 		let page = releasesTemplate
 			.replace("{css}", dashboardCss.url)
 			.replace("{js}", releasesJs.url)
+			.replace("{signin}", signinJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
 	}
 
 	// The issues page. Not `@cache`d, for the same reason as `/`.
 	on GET("/issues") () -> Effect[HttpResult[String]] by v: Visitor {
-		let page = issuesTemplate.replace("{css}", dashboardCss.url).replace("{js}", issuesJs.url)
+		let page = issuesTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", issuesJs.url)
+			.replace("{signin}", signinJs.url)
 		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The page's sign-in settings (#53), all public: where to send the
+	// browser, which Access application, and how to sign out. From the trust
+	// in force, so the page and the actor never disagree.
+	on GET("/maintainers/config") () -> Effect[HttpResult[SignInConfig]] by v: Visitor given Secrets {
+		let setting <- Secrets.get("MAINTAINER_OIDC")
+		Ok(signInConfigOf(trustOf(setting)))
+	}
+
+	// The page Access sends a maintainer back to after signing in. The shared
+	// sign-in script finishes the sign-in there and returns to the page they
+	// came from. Not `@cache`d, as it names this deploy's assets.
+	on GET("/maintainers/callback") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = callbackTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{signin}", signinJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// Exchanges a sign-in code for an ID token at Access, for the page (#53):
+	// Access's token endpoint refuses a browser's cross-origin call. A public
+	// client with PKCE, so no secret is involved, and the code is only good
+	// with the verifier the page kept. Limited per address like the metrics
+	// routes; the redirect URI must be this service's callback.
+	on POST("/maintainers/token") (body: TokenRequest, headers: RequestHeaders) -> Effect[HttpResult[SignedIn]] by v: Visitor given Secrets, Logger, MetricsLimit, AccessOidc {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many sign-in attempts; try again in a minute")
+		}
+		let true = body.redirect_uri.endsWith("/maintainers/callback") else {
+			BadRequest("the redirect URI must be this service's /maintainers/callback")
+		}
+		let setting <- Secrets.get("MAINTAINER_OIDC")
+		let trust = trustOf(setting)
+		let Ok(reply) <- AccessOidc.exchange(
+			"\(trust.issuer)/token",
+			signInConfigOf(trust).client_id,
+			body
+		) else match {
+			Err(why) => {
+				let _ <- Logger.error("could not exchange a maintainer's sign-in code: \(why)")
+				BadGateway("Cloudflare Access could not be reached")
+			},
+		}
+		let Some(token) = reply.id_token else {
+			let _ <- Logger.warn(
+				"Cloudflare Access refused a sign-in code: \(reply.error.getOrElse("no reason")) \(reply.error_description.getOrElse(""))"
+			)
+			BadRequest(
+				"Cloudflare Access refused the sign-in: \(reply.error.getOrElse("no reason given"))"
+			)
+		}
+		Ok(SignedIn { id_token: token, expires_in: reply.expires_in })
+	}
+
+	// Who is signed in (#53): their GitHub login, from the token's claims, if
+	// GitHub says they belong to the organisation now (cached a day, through
+	// the installation that last delivered for it). A token without a GitHub
+	// login, or someone outside the organisation, is refused with the reason;
+	// the claims this service looks for are named either way, so a missing
+	// login can be told from a refusal.
+	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock {
+		let present = loginClaims().concat(["email", "name"]).filter((c) => m.claims.has(c))
+		let found = loginClaims().filter((c) => m.claims.get(c).isSome()).first()
+		let Some(claim) = found else {
+			RawError(
+				Forbidden,
+				refusal403(
+					"no_login",
+					"the token carries no GitHub login (looked for \(joined(loginClaims(), ", ")); present: \(joined(present, ", ")))"
+				),
+				"application/json"
+			)
+		}
+		let login = m.claims.get(claim).getOrElse("")
+		let Some(installation) <- orgInstallation(MAINTAINER_ORG) else {
+			ServiceUnavailable("no installation of the App has delivered for \(MAINTAINER_ORG) yet")
+		}
+		let Ok(member) <- orgMember(installation, MAINTAINER_ORG, login) else match {
+			Err(why) => {
+				let _ <- Logger.error(
+					"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
+				)
+				ServiceUnavailable("GitHub could not say whether you belong to \(MAINTAINER_ORG)")
+			},
+		}
+		let true = member else {
+			RawError(
+				Forbidden,
+				refusal403("not_a_member", "\(login) doesn't belong to \(MAINTAINER_ORG)"),
+				"application/json"
+			)
+		}
+		Ok(Me {
+			sub: "\(m.identity)",
+			login: login,
+			email: m.claims.get("email"),
+			name: m.claims.get("name"),
+			claims: present,
+		})
 	}
 
 	on GET("/about") () -> Effect[HttpResult[String]] by v: Visitor {
@@ -4059,6 +4235,34 @@ fn removeIssue(
 		Err(e) => Effect.pure(Err("could not mark \(repo) issue #\(number) \(how): \(sqlError(e))")),
 	}
 	Effect.pure(Ok(true))
+}
+
+// A 403's body: a code, and why, as JSON.
+fn refusal403(code: String, message: String) -> Bytes {
+	Bytes.fromUtf8(Json.encode(Refusal { error: code, message: message }))
+}
+
+type Refusal = {
+	error: String,
+	message: String,
+}
+
+// The installation that last delivered for any of `org`'s repositories: the
+// one whose token can ask about its members.
+fn orgInstallation(org: String) -> Effect[Option[Int]] given Deliveries {
+	let found <- Deliveries.first(
+		"SELECT installation FROM deliveries WHERE repo LIKE ?1 AND installation IS NOT NULL ORDER BY received_at DESC LIMIT 1",
+		[Text("\(org)/%")]
+	)
+	let Ok(Some(row)) = found else { Effect.pure(None) }
+	match Json.decode[InstallationRow](row) {
+		Ok(r) => Effect.pure(Some(r.installation)),
+		Err(_) => Effect.pure(None),
+	}
+}
+
+type InstallationRow = {
+	installation: Int,
 }
 
 fn syncSkipped(why: String) -> Effect[Result[(), String]] given Logger {

@@ -43,6 +43,19 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 6, step 1 (#53): maintainer sign-in.
+  - **Sign-in:** maintainers sign in through Cloudflare Access as an OIDC
+    provider (GitHub its only login method). The page uses PKCE, and the
+    Worker exchanges the code at Access (`POST /maintainers/token`), as
+    Access's token endpoint refuses browsers.
+  - **The actor:** a `Maintainer` actor (Bynk's `Oidc`, with `trustFrom =
+    "MAINTAINER_OIDC"`) verifies Access's ID token.
+  - **`GET /maintainers/me`:** answers with the person's GitHub login, from
+    the token's claims, once GitHub confirms they belong to the organisation.
+  - **The pages:** every dashboard gains a sign-in link, and
+    `/maintainers/callback` finishes the sign-in.
+  - **Testing:** `scripts/oidc.mjs` checks the token handling end to end
+    against a fake issuer, in CI's smoke job.
 - Phase 4, slice 5, step 4 (#48): the issues page at `/issues`, a fourth
   dashboard tab linked from the others.
   - **Each repository:** headline tiles (opened, closed by reason, time to
