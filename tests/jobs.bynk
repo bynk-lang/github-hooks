@@ -140,3 +140,50 @@ case "a later delivery that names no runner group keeps the one already known" {
 	let job <- Deliveries.first("SELECT status, conclusion, runner_group FROM workflow_jobs", [])
 	expect job == Ok(Some("{\"status\":\"completed\",\"conclusion\":\"cancelled\",\"runner_group\":\"default\"}"))
 }
+
+case "a job cancelled before any runner took it has no start, so no wait" {
+	// GitHub fills `started_at` with `created_at` for it, with runner id 0.
+	let _ <- api.POST(
+		"/github",
+		headers("job-cancelled"),
+		Bytes.fromUtf8(completedJob
+			.replace("\"conclusion\": \"success\"", "\"conclusion\": \"cancelled\"")
+			.replace(
+				"\"started_at\": \"2026-11-06T09:16:50Z\"",
+				"\"started_at\": \"2026-11-06T09:16:48Z\""
+			)
+			.replace("\"runner_id\": 778", "\"runner_id\": 0")
+			.replace("\"runner_group_name\": \"default\"", "\"runner_group_name\": null"))
+	) by GitHub
+	let job <- Deliveries.first(
+		"SELECT status, conclusion, started_at, completed_at FROM workflow_jobs",
+		[]
+	)
+	expect job == Ok(Some("{\"status\":\"completed\",\"conclusion\":\"cancelled\",\"started_at\":null,\"completed_at\":\"2026-11-06T09:19:43.000Z\"}"))
+}
+
+case "a job held for an approval is marked, and stays marked, whatever order the deliveries arrive in" {
+	let _ <- api.POST(
+		"/github",
+		headers("job-waiting"),
+		jobAt("waiting", "null", "null", "null")
+	) by GitHub
+	let waiting <- Deliveries.first("SELECT status, approval FROM workflow_jobs", [])
+	expect waiting == Ok(Some("{\"status\":\"waiting\",\"approval\":1}"))
+	let _ <- api.POST("/github", headers("job-done"), Bytes.fromUtf8(completedJob)) by GitHub
+	let done <- Deliveries.first("SELECT status, approval FROM workflow_jobs", [])
+	expect done == Ok(Some("{\"status\":\"completed\",\"approval\":1}"))
+}
+
+case "a waiting delivery that arrives after the job completed still marks it" {
+	let _ <- api.POST("/github", headers("job-done"), Bytes.fromUtf8(completedJob)) by GitHub
+	let plain <- Deliveries.first("SELECT approval FROM workflow_jobs", [])
+	expect plain == Ok(Some("{\"approval\":0}"))
+	let _ <- api.POST(
+		"/github",
+		headers("job-waiting-late"),
+		jobAt("waiting", "null", "null", "null")
+	) by GitHub
+	let marked <- Deliveries.first("SELECT status, approval FROM workflow_jobs", [])
+	expect marked == Ok(Some("{\"status\":\"completed\",\"approval\":1}"))
+}

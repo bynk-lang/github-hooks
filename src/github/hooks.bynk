@@ -651,8 +651,10 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 // forward: a delivery replaces it when its status is further along
 // (queued/waiting < in_progress < completed), or equally far (filling in what
 // it knows, such as the runner group). So a late `in_progress` never undoes
-// `completed`, and a redelivery changes nothing. Open pages aren't told: jobs
-// change constantly, and the section that shows them polls.
+// `completed`, and a redelivery changes nothing. A `waiting` delivery marks
+// the job as having waited for an approval, whenever it arrives, and nothing
+// clears that: its wait isn't a wait for a runner. Open pages aren't told:
+// jobs change constantly, and the section that shows them polls.
 fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 	let Ok(j) = jobOf(body) else match {
 		Err(why) => Logger.error("could not read workflow job from \(d.id): \(why)"),
@@ -660,8 +662,8 @@ fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 	let Ok(_) <- Deliveries.run(
 		"""
 		INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
-		                           conclusion, created_at, started_at, completed_at)
-		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+		                           conclusion, created_at, started_at, completed_at, approval)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
 		ON CONFLICT (job_id) DO UPDATE SET
 		  runner = excluded.runner,
 		  runner_group = coalesce(excluded.runner_group, workflow_jobs.runner_group),
@@ -685,9 +687,21 @@ fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 			Text(j.createdAt),
 			text(j.startedAt),
 			text(j.completedAt),
+			Boolean(j.approval),
 		]
 	) else match {
 		Err(e) => Logger.error("could not record \(j.repo) job \(j.jobId): \(sqlError(e))"),
+	}
+	// A `waiting` delivery that arrives after a later one changes nothing
+	// above (the row doesn't move back), so the mark is set on its own.
+	let true = j.approval else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"UPDATE workflow_jobs SET approval = 1 WHERE job_id = ?1",
+		[Integer(j.jobId)]
+	) else match {
+		Err(e) => Logger.error(
+			"could not mark \(j.repo) job \(j.jobId) as waiting for approval: \(sqlError(e))"
+		),
 	}
 	Effect.pure(())
 }
@@ -2418,11 +2432,12 @@ fn rollUpJobDay(before: String) -> Effect[Result[JobDayRolled, String]] given De
 		[
 			SqlStatement {
 				sql: """
-						INSERT OR IGNORE INTO workflow_job_days (repo, day, workflow, name, runner, jobs, failed, waited, wait_sum_seconds,
+						INSERT OR IGNORE INTO workflow_job_days (repo, day, workflow, name, runner, jobs, failed, gated, waited, wait_sum_seconds,
 						                                         wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds, duration_p50_seconds)
 						WITH d AS (
 						  SELECT repo, workflow, name, runner, conclusion,
-						    CASE WHEN started_at IS NOT NULL
+						    approval,
+						    CASE WHEN started_at IS NOT NULL AND approval = 0
 						      THEN CAST(round((julianday(started_at) - julianday(created_at)) * 86400) AS INTEGER) END AS wait,
 						    CASE WHEN conclusion = 'success' AND started_at IS NOT NULL AND completed_at IS NOT NULL
 						      THEN CAST(round((julianday(completed_at) - julianday(started_at)) * 86400) AS INTEGER) END AS dur
@@ -2453,12 +2468,12 @@ fn rollUpJobDay(before: String) -> Effect[Result[JobDayRolled, String]] given De
 						),
 						g AS (
 						  SELECT repo, workflow, name, runner, count(*) AS jobs,
-						    sum(conclusion IN ('failure', 'timed_out')) AS failed,
+						    sum(conclusion IN ('failure', 'timed_out')) AS failed, sum(approval) AS gated,
 						    count(wait) AS waited, coalesce(sum(wait), 0) AS wait_sum,
 						    count(dur) AS succeeded, coalesce(sum(dur), 0) AS dur_sum
 						  FROM d GROUP BY repo, workflow, name, runner
 						)
-						SELECT g.repo, ?1, g.workflow, g.name, g.runner, g.jobs, g.failed, g.waited, g.wait_sum,
+						SELECT g.repo, ?1, g.workflow, g.name, g.runner, g.jobs, g.failed, g.gated, g.waited, g.wait_sum,
 						  wp.p50, wp.p95, g.succeeded, g.dur_sum, dp.p50
 						FROM g
 						LEFT JOIN wp ON wp.repo = g.repo AND wp.workflow = g.workflow AND wp.name = g.name AND wp.runner = g.runner

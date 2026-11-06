@@ -34,16 +34,23 @@ Migration `0011` adds two tables:
   - **`runner`:** the first label the job asked for (`ubuntu-latest`,
     `self-hosted`, …), or `unknown` for none. `runner_group` is known once a
     runner takes the job, and a later delivery that names none keeps it.
-  - **`started_at`:** set only once the job is `in_progress`. A `queued`
-    delivery carries `created_at` in that field, which would make every wait
-    zero. A job's wait for a runner is `started_at − created_at`.
+  - **`started_at`:** set only once a runner has taken the job (in progress
+    or completed, with a runner id). A `queued` delivery carries `created_at`
+    in that field, and so does a job cancelled before any runner took it
+    (8 of 1,069 sampled `bynk` jobs). Either would read as a zero wait. A job's
+    wait for a runner is `started_at − created_at`.
+  - **`approval`:** set when a `waiting` delivery says the job was held for a
+    protected environment's approval, whenever it arrives, and never cleared.
+    Such a job's `started_at − created_at` includes a person's approval time,
+    not just a wait for a runner, so the figures leave its wait out.
   - **Skipped jobs:** kept, but counted nowhere.
   - **Steps:** not kept.
 - **`workflow_job_days`**: each day's jobs by repository, workflow, job and
   runner, kept indefinitely. It holds:
-  - the number of jobs and failures;
-  - how many started (`waited`), the sum, median and 95th percentile of their
-    waits;
+  - the number of jobs and failures, and how many waited for an approval
+    (`gated`);
+  - how many waited for a runner (`waited`: started on one, not gated), and the
+    sum, median and 95th percentile of their waits;
   - how many succeeded, and the sum and median of their durations.
 
   Skipped jobs aren't counted. Days are UTC, by when the job was queued.

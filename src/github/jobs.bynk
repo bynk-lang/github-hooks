@@ -15,10 +15,12 @@ type JobDelivery = {
 
 ---
 `workflow_job` as GitHub sends it. `labels` names the runner it asked for
-(`ubuntu-latest`, `self-hosted`, …); `runner_group_name` is known once a
-runner takes it. `conclusion` and `completed_at` arrive with `completed`.
-`started_at` is only meaningful once the job is `in_progress`: a `queued`
-delivery carries `created_at` there.
+(`ubuntu-latest`, `self-hosted`, …); `runner_id` and `runner_group_name` are
+known once a runner takes it. `conclusion` and `completed_at` arrive with
+`completed`. `started_at` only means a runner started it when a runner took
+it: a `queued` delivery carries `created_at` there, and so does a job
+cancelled before any runner took it (null or 0 `runner_id`). `waiting` is a
+job held for a protected environment's approval.
 ---
 type JobPayload = {
 	id: Int,
@@ -28,6 +30,7 @@ type JobPayload = {
 	name: String,
 	labels: List[String],
 	runner_group_name: Option[String],
+	runner_id: Option[Int],
 	status: String,
 	conclusion: Option[String],
 	created_at: String,
@@ -38,8 +41,9 @@ type JobPayload = {
 ---
 One job attempt, as `workflow_jobs` stores it, with times in the
 `received_at` format. `runner` is the first label it asked for (`unknown`
-when it asked for none). `startedAt` is set only once the job has started,
-and `completedAt` once it has completed.
+when it asked for none). `startedAt` is set only once a runner has taken the
+job, and `completedAt` once it has completed. `approval` when this delivery
+says the job is waiting for a protected environment's approval.
 ---
 type JobFact = {
 	jobId: Int,
@@ -51,6 +55,7 @@ type JobFact = {
 	runner: String,
 	runnerGroup: Option[String],
 	status: String,
+	approval: Bool,
 	conclusion: Option[String],
 	createdAt: String,
 	startedAt: Option[String],
@@ -69,7 +74,8 @@ fn jobOf(body: Bytes) -> Result[JobFact, String] {
 	let Some(created) = isoTime(j.created_at) else {
 		Err("created_at is not a time: \(j.created_at)")
 	}
-	let started = j.status == "in_progress" || j.status == "completed"
+	let ranOnARunner = j.runner_id.getOrElse(0) > 0
+	let started = ranOnARunner && (j.status == "in_progress" || j.status == "completed")
 	Ok(JobFact {
 		jobId: j.id,
 		repo: p.repository.full_name,
@@ -80,6 +86,7 @@ fn jobOf(body: Bytes) -> Result[JobFact, String] {
 		runner: j.labels.first().getOrElse("unknown"),
 		runnerGroup: j.runner_group_name.filter((g) => g != ""),
 		status: j.status,
+		approval: j.status == "waiting",
 		conclusion: j.conclusion,
 		createdAt: created,
 		startedAt: if started { j.started_at.andThen((t) => isoTime(t)) } else { None },

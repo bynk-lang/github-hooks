@@ -135,10 +135,12 @@ case "job deliveries go after 7 days, whatever their action" {
 Jobs from before the 90-day window (2026-08-07), and one inside it. On
 5 August, `bynk-lang/bynk`'s self-hosted test job ran three times: queued 60 s
 and ran 240 s (success); queued 600 s and failed after 120 s; and queued
-30 s and ran 180 s (success). A fourth was skipped, and counts nowhere. So:
-3 jobs, 1 failed, 3 waited, waits [30, 60, 600] summing 690 (p50 60, p95
-600), 2 succeeded, durations [180, 240] summing 420 (p50 180). One job on
-6 August, and one on 8 August, which is kept.
+30 s and ran 180 s (success). A fourth waited 2 hours for a protected
+environment's approval and ran 180 s: it counts as a job and a success, but
+its wait isn't a wait for a runner. A fifth was skipped, and counts nowhere.
+So: 4 jobs, 1 failed, 1 gated, 3 waited, waits [30, 60, 600] summing 690
+(p50 60, p95 600), 3 succeeded, durations [180, 180, 240] summing 600 (p50
+180). One job on 6 August, and one on 8 August, which is kept.
 ---
 fn jobs() -> SqlStatement {
 	SqlStatement {
@@ -153,6 +155,8 @@ fn jobs() -> SqlStatement {
 			   '2026-08-05T23:59:00.000Z', '2026-08-05T23:59:30.000Z', '2026-08-06T00:02:30.000Z'),
 			  (4, 'bynk-lang/bynk', 4, 1, 'CI', 'Test suite', 'self-hosted', NULL, 'completed', 'skipped',
 			   '2026-08-05T12:00:00.000Z', '2026-08-05T12:00:00.000Z', '2026-08-05T12:00:00.000Z'),
+			  (7, 'bynk-lang/bynk', 7, 1, 'CI', 'Test suite', 'self-hosted', 'default', 'completed', 'success',
+			   '2026-08-05T13:00:00.000Z', '2026-08-05T15:00:00.000Z', '2026-08-05T15:03:00.000Z'),
 			  (5, 'bynk-lang/bynk', 5, 1, 'CI', 'Lint', 'ubuntu-latest', 'GitHub Actions', 'completed', 'success',
 			   '2026-08-06T09:00:00.000Z', '2026-08-06T09:00:05.000Z', '2026-08-06T09:01:05.000Z'),
 			  (6, 'bynk-lang/bynk', 6, 1, 'CI', 'Lint', 'ubuntu-latest', 'GitHub Actions', 'completed', 'success',
@@ -163,16 +167,22 @@ fn jobs() -> SqlStatement {
 }
 
 case "the oldest day of jobs past 90 days is rolled up, then pruned, a day a run" {
-	let seeded <- Deliveries.batch([jobs()])
+	let seeded <- Deliveries.batch([
+		jobs(),
+		SqlStatement {
+			sql: "UPDATE workflow_jobs SET approval = 1 WHERE job_id = 7",
+			params: [],
+		},
+	])
 	expect seeded is Ok(_)
 	let first <- retention.schedule("23 * * * *", nowMs())
 	expect first is Ok(_)
-	expect Logger.info called with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, and rolled up and pruned 4 jobs of 2026-08-05"
+	expect Logger.info called with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, and rolled up and pruned 5 jobs of 2026-08-05"
 	let day <- Deliveries.all(
-		"SELECT day, workflow, name, runner, jobs, failed, waited, wait_sum_seconds, wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds, duration_p50_seconds FROM workflow_job_days",
+		"SELECT day, workflow, name, runner, jobs, failed, gated, waited, wait_sum_seconds, wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds, duration_p50_seconds FROM workflow_job_days",
 		[]
 	)
-	expect day == Ok("[{\"day\":\"2026-08-05\",\"workflow\":\"CI\",\"name\":\"Test suite\",\"runner\":\"self-hosted\",\"jobs\":3,\"failed\":1,\"waited\":3,\"wait_sum_seconds\":690,\"wait_p50_seconds\":60,\"wait_p95_seconds\":600,\"succeeded\":2,\"duration_sum_seconds\":420,\"duration_p50_seconds\":180}]")
+	expect day == Ok("[{\"day\":\"2026-08-05\",\"workflow\":\"CI\",\"name\":\"Test suite\",\"runner\":\"self-hosted\",\"jobs\":4,\"failed\":1,\"gated\":1,\"waited\":3,\"wait_sum_seconds\":690,\"wait_p50_seconds\":60,\"wait_p95_seconds\":600,\"succeeded\":3,\"duration_sum_seconds\":600,\"duration_p50_seconds\":180}]")
 	let left <- Deliveries.all("SELECT job_id FROM workflow_jobs ORDER BY job_id", [])
 	expect left == Ok("[{\"job_id\":5},{\"job_id\":6}]")
 	// The next run takes 6 August; 8 August is inside the window and stays.
@@ -182,7 +192,7 @@ case "the oldest day of jobs past 90 days is rolled up, then pruned, a day a run
 		"SELECT group_concat(day || ' ' || name || ' ' || jobs, ', ') AS days FROM (SELECT * FROM workflow_job_days ORDER BY day)",
 		[]
 	)
-	expect days == Ok(Some("{\"days\":\"2026-08-05 Test suite 3, 2026-08-06 Lint 1\"}"))
+	expect days == Ok(Some("{\"days\":\"2026-08-05 Test suite 4, 2026-08-06 Lint 1\"}"))
 	let kept <- Deliveries.all("SELECT job_id FROM workflow_jobs", [])
 	expect kept == Ok("[{\"job_id\":6}]")
 	let third <- retention.schedule("23 * * * *", nowMs())
@@ -197,10 +207,10 @@ case "a day already rolled up keeps its rollup when a late job for it is pruned"
 			jobs(),
 			SqlStatement {
 				sql: """
-					INSERT INTO workflow_job_days (repo, day, workflow, name, runner, jobs, failed, waited, wait_sum_seconds,
+					INSERT INTO workflow_job_days (repo, day, workflow, name, runner, jobs, failed, gated, waited, wait_sum_seconds,
 					                               wait_p50_seconds, wait_p95_seconds, succeeded, duration_sum_seconds,
 					                               duration_p50_seconds)
-					VALUES ('bynk-lang/bynk', '2026-08-05', 'CI', 'Test suite', 'self-hosted', 9, 0, 9, 90, 10, 10, 9, 900, 100)
+					VALUES ('bynk-lang/bynk', '2026-08-05', 'CI', 'Test suite', 'self-hosted', 9, 0, 0, 9, 90, 10, 10, 9, 900, 100)
 				""",
 				params: [],
 			},

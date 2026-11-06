@@ -17,9 +17,10 @@ CREATE TABLE workflow_jobs (
   runner       TEXT    NOT NULL,              -- the first label asked for: ubuntu-latest, self-hosted, …
   runner_group TEXT,                          -- once a runner takes it
   status       TEXT    NOT NULL,              -- queued, waiting, in_progress, completed
+  approval     INTEGER NOT NULL DEFAULT 0,    -- it waited for a protected environment's approval; never cleared
   conclusion   TEXT,                          -- success, failure, cancelled, skipped, …
   created_at   TEXT    NOT NULL,              -- when it was queued
-  started_at   TEXT,                          -- when a runner took it; null until then
+  started_at   TEXT,                          -- when a runner took it; null until then, and for one no runner took
   completed_at TEXT
 );
 
@@ -34,7 +35,9 @@ CREATE INDEX workflow_jobs_by_created ON workflow_jobs (created_at);
 
 -- Each day's jobs by repository, workflow, job and runner, rolled up from
 -- `workflow_jobs` before its rows are pruned, and kept indefinitely. Skipped
--- jobs aren't counted. `waited` jobs started (their wait is known);
+-- jobs aren't counted. `waited` jobs started on a runner without waiting for
+-- an approval (their wait is a wait for a runner); `gated` jobs waited for a
+-- protected environment's approval, and their wait isn't counted;
 -- `succeeded` jobs have a duration. The sums give means over many days; the
 -- medians and 95th percentile are the day's own (nearest rank).
 CREATE TABLE workflow_job_days (
@@ -45,6 +48,7 @@ CREATE TABLE workflow_job_days (
   runner               TEXT    NOT NULL,
   jobs                 INTEGER NOT NULL,
   failed               INTEGER NOT NULL,      -- failure or timed_out
+  gated                INTEGER NOT NULL,
   waited               INTEGER NOT NULL,
   wait_sum_seconds     INTEGER NOT NULL,
   wait_p50_seconds     INTEGER,
