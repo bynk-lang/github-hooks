@@ -29,9 +29,13 @@ jobs 3, p50 120, p95 600, longest 600. Ubuntu jobs waited 3 s and 5 s (Lint,
 ran 60 s and 90 s): p50 3, p95 5. A Deploy job waited 2 hours for an
 approval and ran 100 s: its wait isn't counted, its duration is. Not counted
 at all: a skipped job, one cancelled before a runner took it, and one from
-July. 20 days ago a self-hosted Test suite waited 900 s and ran 1,300 s, so
-the 30-day window's self-hosted waits are [60, 120, 600, 900] (p50 120, p95
-900) and its Test suite times [1,200, 1,300, 1,500] (p50 1,300, p95 1,500).
+July. On macOS, a Test suite waited 10 s and ran 1,400 s, and a Lint waited
+20 s and ran 75 s: p50 10, p95 20. So the week's Test suite times are
+[1,200, 1,400, 1,500] (p50 1,400) and Lint's [60, 75, 90] (p50 75); Deploy,
+with one run, is too few to rank. 20 days ago a self-hosted Test suite waited
+900 s and ran 1,300 s, so the 30-day window's self-hosted waits are [60, 120,
+600, 900] (p50 120, p95 900) and its Test suite times [1,200, 1,300, 1,400,
+1,500] (p50 1,300, p95 1,500).
 
 Waiting now: two Ubuntu jobs queued (since 11:50 and 11:58), a self-hosted
 job held for approval since 11:30, and a self-hosted job queued on 3
@@ -84,7 +88,11 @@ fn seed() -> List[SqlStatement] {
 				  (16, 'bynk-lang/secret', 16, 1, 'CI', 'Test', 'ubuntu-latest', NULL, 'queued', NULL,
 				   '2026-11-05T11:55:00.000Z', NULL, NULL, 0),
 				  (17, 'bynk-lang/sandbox', 17, 1, 'CI', 'Test', 'ubuntu-latest', NULL, 'completed', 'success',
-				   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:01.000Z', '2026-11-04T09:01:00.000Z', 0)
+				   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:01.000Z', '2026-11-04T09:01:00.000Z', 0),
+				  (18, 'bynk-lang/bynk', 18, 1, 'CI', 'Test suite', 'macos-latest', 'GitHub Actions', 'completed', 'success',
+				   '2026-11-02T12:00:00.000Z', '2026-11-02T12:00:10.000Z', '2026-11-02T12:23:30.000Z', 0),
+				  (19, 'bynk-lang/bynk', 19, 1, 'CI', 'Lint', 'macos-latest', 'GitHub Actions', 'completed', 'success',
+				   '2026-11-03T09:00:00.000Z', '2026-11-03T09:00:20.000Z', '2026-11-03T09:01:35.000Z', 0)
 			""",
 			params: [],
 		},
@@ -115,6 +123,14 @@ case "the hourly figures: waits by runner, the longest waits and the slowest job
 		},
 		RunnerWait {
 			repo: "bynk-lang/bynk",
+			runner: "macos-latest",
+			jobs: 2,
+			p50_seconds: Some(10),
+			p95_seconds: Some(20),
+			longest_seconds: Some(20),
+		},
+		RunnerWait {
+			repo: "bynk-lang/bynk",
 			runner: "ubuntu-latest",
 			jobs: 2,
 			p50_seconds: Some(3),
@@ -128,6 +144,8 @@ case "the hourly figures: waits by runner, the longest waits and the slowest job
 		"Docs self-hosted 600",
 		"Test suite self-hosted 120",
 		"Test suite self-hosted 60",
+		"Lint macos-latest 20",
+		"Test suite macos-latest 10",
 		"Lint ubuntu-latest 5",
 		"Lint ubuntu-latest 3",
 	]
@@ -145,24 +163,16 @@ case "the hourly figures: waits by runner, the longest waits and the slowest job
 			repo: "bynk-lang/bynk",
 			workflow: "CI",
 			name: "Test suite",
-			runs: 2,
-			p50_seconds: Some(1200),
+			runs: 3,
+			p50_seconds: Some(1400),
 			p95_seconds: Some(1500),
-		},
-		JobTime {
-			repo: "bynk-lang/bynk",
-			workflow: "Release",
-			name: "Deploy",
-			runs: 1,
-			p50_seconds: Some(100),
-			p95_seconds: Some(100),
 		},
 		JobTime {
 			repo: "bynk-lang/bynk",
 			workflow: "CI",
 			name: "Lint",
-			runs: 2,
-			p50_seconds: Some(60),
+			runs: 3,
+			p50_seconds: Some(75),
 			p95_seconds: Some(90),
 		},
 	]
@@ -196,7 +206,7 @@ case "the 30-day window reaches further back, and a repository filter narrows it
 		.first()
 		.map(
 			(j) => "\(j.name) \(j.runs) \(j.p50_seconds.getOrElse(0)) \(j.p95_seconds.getOrElse(0))"
-		) == Some("Test suite 3 1300 1500")
+		) == Some("Test suite 4 1300 1500")
 	let other <- api.GET(
 		"/metrics/runners",
 		RunnerQuery {
@@ -227,7 +237,7 @@ case "a private or excluded repository's figures are computed, but never shown" 
 	let Ok(m) = r else {
 		expect false
 	}
-	expect m.runners.map((w) => w.repo) == ["bynk-lang/bynk", "bynk-lang/bynk"]
+	expect m.runners.map((w) => w.repo) == ["bynk-lang/bynk", "bynk-lang/bynk", "bynk-lang/bynk"]
 	expect m.longest.all((l) => l.repo == "bynk-lang/bynk")
 	expect m.slowest.all((j) => j.repo == "bynk-lang/bynk")
 }
@@ -305,9 +315,9 @@ case "a runners window other than 7, 30 or 90 days is refused, and the limit app
 }
 
 case "each repository keeps its 10 longest waits and 10 slowest jobs" {
-	// Twelve jobs, each its own job name, waiting 1 to 12 s and running 10 to
-	// 120 s: the 10 longest waits are 12 s down to 3 s, and the 10 slowest
-	// jobs those that ran 120 s down to 30 s.
+	// Twelve job names, each run three times: 36 jobs waiting 1 to 36 s, job
+	// k running k × 10 s each time. The 10 longest waits are 36 s down to
+	// 27 s, and the 10 slowest jobs those that ran 120 s down to 30 s.
 	let seeded <- Deliveries.batch(
 		[
 			SqlStatement {
@@ -318,12 +328,14 @@ case "each repository keeps its 10 longest waits and 10 slowest jobs" {
 				sql: """
 					INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
 					                           conclusion, created_at, started_at, completed_at, approval)
-					SELECT value, 'bynk-lang/bynk', value, 1, 'CI', 'Job ' || value, 'ubuntu-latest', NULL, 'completed', 'success',
+					WITH RECURSIVE n (value) AS (SELECT 1 UNION ALL SELECT value + 1 FROM n WHERE value < 36),
+					jobs (value, k) AS (SELECT value, (value - 1) % 12 + 1 FROM n)
+					SELECT value, 'bynk-lang/bynk', value, 1, 'CI', 'Job ' || k, 'ubuntu-latest', NULL, 'completed', 'success',
 					       '2026-11-04T09:00:00.000Z',
 					       strftime('%Y-%m-%dT%H:%M:%fZ', '2026-11-04T09:00:00.000Z', '+' || value || ' seconds'),
-					       strftime('%Y-%m-%dT%H:%M:%fZ', '2026-11-04T09:00:00.000Z', '+' || (value + value * 10) || ' seconds'),
+					       strftime('%Y-%m-%dT%H:%M:%fZ', '2026-11-04T09:00:00.000Z', '+' || (value + k * 10) || ' seconds'),
 					       0
-					FROM json_each('[1,2,3,4,5,6,7,8,9,10,11,12]')
+					FROM jobs
 				""",
 				params: [],
 			},
@@ -335,7 +347,7 @@ case "each repository keeps its 10 longest waits and 10 slowest jobs" {
 	let Ok(m) = r else {
 		expect false
 	}
-	expect m.longest.map((l) => l.wait_seconds) == [12, 11, 10, 9, 8, 7, 6, 5, 4, 3]
+	expect m.longest.map((l) => l.wait_seconds) == [36, 35, 34, 33, 32, 31, 30, 29, 28, 27]
 	expect m.slowest.map(
 		(j) => j.p50_seconds.getOrElse(0)
 	) == [120, 110, 100, 90, 80, 70, 60, 50, 40, 30]

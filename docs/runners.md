@@ -93,7 +93,7 @@ is a 400. `repo` is optional, and matched without regard to case.
 | `data_since` | when the first job was recorded, so a window longer than the data says so |
 | `runners` | each repository's waits by runner label: `jobs`, `p50_seconds`, `p95_seconds`, `longest_seconds` |
 | `longest` | each repository's 10 longest waits: job, workflow, runner, `wait_seconds`, `queued_at`, and a link to the job |
-| `slowest` | each repository's 10 slowest jobs by median duration: `runs`, `p50_seconds`, `p95_seconds` |
+| `slowest` | each repository's 10 slowest jobs by median duration, among those with at least 3 successful runs: `runs`, `p50_seconds`, `p95_seconds` |
 
 A wait is `started_at − created_at`, over jobs that started in the window,
 leaving out skipped jobs and jobs held for an approval. A duration is
@@ -106,10 +106,31 @@ the cache missed. Instead the `runnerFigures` cron (`37 * * * *`) computes all
 three windows for every repository and stores them in `runner_windows`
 (migration `0012`), one row a window; the route reads one row and filters it.
 
-- **Cost:** each of its three queries reads the 90 days once, through
-  `workflow_jobs_by_started`, and tags each job with the windows it falls in.
-  That's about 1.3 million rows read an hour, roughly 1 billion a month. That's
-  inside the Workers Paid plan's 25 billion a month.
+- **Time:** D1 runs one query at a time per database, so a slow computation
+  would hold up the deliveries that arrive while it runs (GitHub allows a
+  delivery 10 s). So the run never ranks jobs row by row:
+  - **Stored values:** a job's wait and duration are generated columns
+    (`wait_seconds`, `took_seconds`, migration `0012`), each in its own partial
+    index: the waits that count by repository and runner; the same by
+    repository alone; and successful jobs' durations by repository, workflow
+    and job.
+  - **Waits and slowest:** these read their index in order and count jobs by
+    each wait or duration, per window, so nothing is sorted. The percentiles
+    are read off the running totals.
+  - **Longest:** this reads each repository's waits from the longest down,
+    until 10 fall in the window.
+
+  At 90 days' volume (440,000 jobs, seeded into the local D1 under
+  `bynk dev`), a whole run takes about 0.3 s, writes included. Ranking every
+  job, as the first version did, took about 9 s in memory for the three
+  queries alone.
+- **Cost:** the waits and slowest-jobs queries each scan their index once,
+  about 850,000 rows read an hour, roughly 0.6 billion a month. That's inside
+  the Workers Paid plan's 25 billion a month. Each job delivery writes the
+  three indexes too.
+- **Slowest jobs:** a job needs 3 successful runs in the window to be ranked
+  (`SLOWEST_MIN_RUNS`). One run is one sample, and a one-off job would top
+  the list on it.
 - **Freshness:** the figures are at most an hour old; `computed_at` says how
   old.
 - **Failure:** if a computation fails, it's logged and the previous figures
@@ -117,8 +138,9 @@ three windows for every repository and stores them in `runner_windows`
 
 D1 refuses a statement given more parameters than its SQL uses ("Wrong number
 of parameter bindings"), but the in-memory D1 the suites run against doesn't
-(bynk-lang/bynk#3003). So the waits query gets the four window bounds alone,
-and the two lists get the bounds plus the list length.
+(bynk-lang/bynk#3003). So each query gets exactly its own parameters: the
+waits the four window bounds; the longest waits those and the list length; and
+the slowest jobs those and the minimum number of runs.
 
 ### `GET /metrics/runners/now?repo=owner/name`
 
