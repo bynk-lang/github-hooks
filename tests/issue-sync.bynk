@@ -1,0 +1,307 @@
+// Phase 4, slice 5, step 2 (#48): the daily open-issue sync, against an
+// in-memory D1 with the migrations applied. GitHub is stubbed at the wire
+// (`AppAuth` for the token, `GitHubHttp` for each response), so the real
+// `GitHubApi` decodes GitHub's JSON. The issues are written as GitHub's REST
+// API gives them (plain values and `null`s), not with `Json.encode`, which
+// writes `Option` tagged (bynk-lang/bynk#2991).
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+--- A response from GitHub with `status` and `body`.
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+fn ok(body: String) -> Result[Response, String] {
+	answer(200, body)
+}
+
+fn notFound() -> Result[Response, String] {
+	answer(404, "{\"message\": \"Not Found\"}")
+}
+
+---
+An issue as GitHub's REST API gives it, in the repository it names: its state,
+`updated_at`, `closed_at` as JSON (`null` or quoted), and labels. `pull` makes
+it a pull request, as the issues listing includes them.
+---
+fn issueIn(
+	repo: String,
+	number: Int,
+	state: String,
+	updated: String,
+	closed: String,
+	labels: List[String],
+	pull: Bool
+) -> String {
+	let names = joined(
+		labels.map(
+			(l) => "{\"id\": 1, \"name\": \"\(l)\", \"color\": \"ededed\", \"default\": false}"
+		),
+		", "
+	)
+	let reason = if state == "closed" { "\"completed\"" } else { "null" }
+	let pr = if pull {
+		", \"pull_request\": {\"url\": \"https://api.github.com/repos/\(repo)/pulls/\(number)\", \"merged_at\": null}"
+	} else {
+		""
+	}
+	"{\"url\": \"https://api.github.com/repos/\(repo)/issues/\(number)\", \"repository_url\": \"https://api.github.com/repos/\(repo)\", \"number\": \(number), \"title\": \"Issue \(number)\", \"user\": {\"login\": \"accuser\", \"id\": 85733, \"type\": \"User\"}, \"labels\": [\(names)], \"state\": \"\(state)\", \"locked\": false, \"assignee\": null, \"comments\": 0, \"created_at\": \"2026-11-01T09:00:00Z\", \"updated_at\": \"\(updated)\", \"closed_at\": \(closed), \"author_association\": \"MEMBER\", \"state_reason\": \(reason)\(pr)}"
+}
+
+--- An issue in `bynk-lang/bynk`.
+fn issue(
+	number: Int,
+	state: String,
+	updated: String,
+	closed: String,
+	labels: List[String]
+) -> String {
+	issueIn("bynk-lang/bynk", number, state, updated, closed, labels, false)
+}
+
+--- An open issue in `bynk-lang/bynk`, as the listing gives it.
+fn listed(number: Int, updated: String, labels: List[String]) -> String {
+	issue(number, "open", updated, "null", labels)
+}
+
+--- A listing: the issues as a JSON array.
+fn listing(items: List[String]) -> String {
+	"[\(joined(items, ", "))]"
+}
+
+--- `n` open issues, numbered `n` down to 1.
+fn many(n: Int) -> List[String] {
+	let first = [listed(n, "2026-11-05T08:00:00Z", [])]
+	if n <= 1 { first } else { first.concat(many(n - 1)) }
+}
+
+---
+`bynk-lang/bynk` is public, and installation 42 last delivered for it (7
+before that; a delivery with none after). A private repository and an
+excluded one have deliveries too, and must never be asked about.
+---
+fn repositories() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES
+				  ('d-old', 'push', 'bynk-lang/bynk', 7, 1, '2026-11-01T00:00:00.000Z'),
+				  ('d-new', 'push', 'bynk-lang/bynk', 42, 1, '2026-11-05T00:00:00.000Z'),
+				  ('d-none', 'push', 'bynk-lang/bynk', NULL, 1, '2026-11-05T01:00:00.000Z'),
+				  ('d-secret', 'push', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z'),
+				  ('d-sandbox', 'push', 'bynk-lang/sandbox', 42, 1, '2026-11-05T00:00:00.000Z')
+			""",
+			params: [],
+		},
+	]
+}
+
+---
+Issue `number` held open in `bynk-lang/bynk`, last updated at `updated`,
+labelled `stale-label`.
+---
+fn heldOpen(number: Int, updated: String) -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+				                    opened_at, updated_at, comments)
+				VALUES ('bynk-lang/bynk', ?1, 'Issue held open', 'accuser', 0, 'MEMBER', 'open',
+				        '2026-11-01T09:00:00.000Z', ?2, 0)
+			""",
+			params: [Integer(number), Text(updated)],
+		},
+		SqlStatement {
+			sql: "INSERT INTO issue_labels (repo, number, label) VALUES ('bynk-lang/bynk', ?1, 'stale-label')",
+			params: [Integer(number)],
+		},
+	]
+}
+
+--- Every issue, in order, as `number:state:labels`.
+fn rows() -> String {
+	"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i"
+}
+
+case "open issues the service never saw are filled in, with their labels; pull requests in the listing aren't" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing([listed(12, "2026-11-05T08:30:00Z", ["bug", "accepted"]), issueIn("bynk-lang/bynk", 11, "open", "2026-11-05T08:20:00Z", "null", [], true), listed(10, "2026-11-05T08:00:00Z", [])]))
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect AppAuth.token called once with installation == 42
+	expect GitHubHttp.get called once with url == "https://api.github.com/repos/bynk-lang/bynk/issues?state=open&per_page=100&page=1"
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"10:open:- 12:open:accepted+bug\"}"))
+	let row <- Deliveries.first(
+		"SELECT title, author, author_association, opened_at, updated_at FROM issues WHERE number = 12",
+		[]
+	)
+	expect row == Ok(Some("{\"title\":\"Issue 12\",\"author\":\"accuser\",\"author_association\":\"MEMBER\",\"opened_at\":\"2026-11-01T09:00:00.000Z\",\"updated_at\":\"2026-11-05T08:30:00.000Z\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 2 open, 0 repaired"
+}
+
+case "a listing older than what deliveries recorded changes nothing" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing([listed(5, "2026-11-04T09:00:00Z", ["old-label"])]))
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-05T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:open:stale-label\"}"))
+	let updated <- Deliveries.first("SELECT title, updated_at FROM issues", [])
+	expect updated == Ok(Some("{\"title\":\"Issue held open\",\"updated_at\":\"2026-11-05T09:00:00.000Z\"}"))
+}
+
+case "an issue held open that GitHub no longer lists is read and saved as it is now" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([])), ok(issue(5, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\"", ["bug"]))]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/issues/5"
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:closed:bug\"}"))
+	let closed <- Deliveries.first("SELECT state_reason, closed_at FROM issues", [])
+	expect closed == Ok(Some("{\"state_reason\":\"completed\",\"closed_at\":\"2026-11-04T12:00:00.000Z\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 1 repaired"
+}
+
+case "an issue GitHub no longer has becomes a deleted tombstone, with no labels" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([])), answer(410, "{\"message\": \"This issue was deleted\"}")]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:deleted:-\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 1 repaired"
+}
+
+case "an issue GitHub answers for from another repository was transferred, and becomes a tombstone" {
+	// GitHub redirects a transferred issue's old address to where it now is.
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([])), ok(issueIn("bynk-lang/shop", 40, "open", "2026-11-04T12:00:00Z", "null", ["bug"], false))]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:transferred:-\"}"))
+}
+
+case "every page of open issues is read, until a short one" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing(many(100))), ok(listing([listed(101, "2026-11-05T08:00:00Z", [])]))]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called 2 times
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/issues?state=open&per_page=100&page=2"
+	let count <- Deliveries.first("SELECT count(*) AS n FROM issues WHERE state = 'open'", [])
+	expect count == Ok(Some("{\"n\":101}"))
+}
+
+case "a renamed repository is skipped with a warning: its issues sync under the new name" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing([issueIn("bynk-lang/bynk-lang", 3, "open", "2026-11-05T08:00:00Z", "null", [], false)]))
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect Logger.warn called once with msg == "bynk-lang/bynk: GitHub now calls it bynk-lang/bynk-lang; issues skipped"
+	let count <- Deliveries.first("SELECT count(*) AS n FROM issues", [])
+	expect count == Ok(Some("{\"n\":0}"))
+}
+
+case "a repository GitHub no longer has is skipped with a warning, not a failure" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns notFound()
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect Logger.warn called once
+}
+
+case "a listing GitHub refuses fails the run, naming the repository" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns answer(500, "{\"message\": \"Server Error\"}")
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r is Err(_)
+	expect Logger.error called once
+}
+
+case "a repair GitHub refuses is counted as failed, and fails the run once the rest are saved" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([listed(10, "2026-11-05T08:00:00Z", [])])), answer(500, "{\"message\": \"Server Error\"}")]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r is Err(_)
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:open:stale-label 10:open:-\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 1 open, 0 repaired, 1 failed"
+}
+
+case "an issue GitHub still has open, though the listing missed it, is saved but not counted as repaired" {
+	// Past the listing's last page, or reopened between the two calls.
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([])), ok(listed(5, "2026-11-04T12:00:00Z", ["bug"]))]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:open:bug\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 0 repaired"
+}
+
+case "a renamed repository with nothing open leaves its held-open issues alone, rather than marking them transferred" {
+	// The empty listing names no repository, so the rename shows only when an
+	// issue is read: GitHub follows the old name to the new one, and a rename
+	// keeps the issue's number (a transfer gives it a new one).
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([])), ok(issueIn("bynk-lang/bynk-lang", 5, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\"", [], false))]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:open:stale-label\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 0 repaired"
+}
+
+case "a listing cut short at its last page repairs nothing, as the issues it didn't reach may still be open" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing(many(100)))
+	let seeded <- Deliveries.batch(repositories().concat(
+		heldOpen(1000, "2026-11-03T09:00:00.000Z")
+	))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	// Five full pages, and no single reads.
+	expect GitHubHttp.get called 5 times
+	expect Logger.warn called once with msg == "bynk-lang/bynk: more open issues and pull requests than the sync reads (500); repairs skipped"
+	let held <- Deliveries.first("SELECT state FROM issues WHERE number = 1000", [])
+	expect held == Ok(Some("{\"state\":\"open\"}"))
+}

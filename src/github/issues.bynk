@@ -40,8 +40,9 @@ type PullLink = {
 }
 
 ---
-`issue` as GitHub sends it. `state_reason` is `completed`, `not_planned` or
-`duplicate` once closed, and `reopened` after a reopen.
+`issue` as GitHub sends it, in a delivery or from the REST API.
+`state_reason` is `completed`, `not_planned` or `duplicate` once closed, and
+`reopened` after a reopen. `repository_url` names the repository it is in.
 ---
 type IssuePayload = {
 	number: Int,
@@ -56,6 +57,16 @@ type IssuePayload = {
 	closed_at: Option[String],
 	author_association: String,
 	pull_request: Option[PullLink],
+	repository_url: Option[String],
+}
+
+---
+A repository's open issues as the REST API listed them, and whether that was
+all of them (the last page read was short).
+---
+type IssueListing = {
+	issues: List[IssuePayload],
+	complete: Bool,
 }
 
 --- `comment` as an `issue_comment` delivery carries it.
@@ -146,37 +157,69 @@ fn issueOf(body: Bytes) -> Result[Option[IssueNews], String] {
 	}
 	let i = p.issue
 	let None = i.pull_request else { Ok(None) }
+	let response: Option[IssueResponse] = match p.comment {
+		Some(c) => if p.action != "deleted" { responseOf(c, i.user.login) } else { None },
+		None => None,
+	}
+	// A deleted comment leaves the issue; only an `issues` delivery removes it.
+	let removed = (p.action == "deleted" || p.action == "transferred") && p.comment.isNone()
+	let Ok(fact) = issueFact(
+		p.repository.full_name,
+		p.action,
+		if removed { Some(p.action) } else { None },
+		p.label.map((l) => l.name),
+		i
+	) else match {
+		Err(why) => Err(why),
+	}
+	Ok(Some(IssueNews { issue: fact, response: response }))
+}
+
+---
+An issue as `issues` stores it, from GitHub's `issue` (a delivery's, or the
+REST API's, which has the same shape): `repo` it belongs to, the `action`
+that said so (`sync` for the daily sync), `removed` (`deleted` or
+`transferred`) when it has left the repository, and the one `label` a
+`labeled` or `unlabeled` delivery names.
+---
+fn issueFact(
+	repo: String,
+	action: String,
+	removed: Option[String],
+	label: Option[String],
+	i: IssuePayload
+) -> Result[IssueFact, String] {
 	let Some(opened) = isoTime(i.created_at) else {
 		Err("created_at is not a time: \(i.created_at)")
 	}
 	let Some(updated) = isoTime(i.updated_at) else {
 		Err("updated_at is not a time: \(i.updated_at)")
 	}
-	let removed = p.action == "deleted" || p.action == "transferred"
-	let response: Option[IssueResponse] = match p.comment {
-		Some(c) => if p.action != "deleted" { responseOf(c, i.user.login) } else { None },
-		None => None,
-	}
-	// A deleted comment leaves the issue; only an `issues` delivery removes it.
-	let gone = removed && p.comment.isNone()
-	Ok(Some(IssueNews {
-		issue: IssueFact {
-			repo: p.repository.full_name,
-			number: i.number,
-			action: p.action,
-			title: i.title,
-			author: i.user.login,
-			authorIsBot: i.user.type == "Bot",
-			authorAssociation: i.author_association,
-			state: if gone { p.action } else { i.state },
-			stateReason: i.state_reason,
-			openedAt: opened,
-			closedAt: i.closed_at.andThen((t) => isoTime(t)),
-			updatedAt: updated,
-			comments: i.comments,
-			labels: i.labels.map((l) => l.name),
-			label: p.label.map((l) => l.name),
-		},
-		response: response,
-	}))
+	Ok(IssueFact {
+		repo: repo,
+		number: i.number,
+		action: action,
+		title: i.title,
+		author: i.user.login,
+		authorIsBot: i.user.type == "Bot",
+		authorAssociation: i.author_association,
+		state: removed.getOrElse(i.state),
+		stateReason: i.state_reason,
+		openedAt: opened,
+		closedAt: i.closed_at.andThen((t) => isoTime(t)),
+		updatedAt: updated,
+		comments: i.comments,
+		labels: i.labels.map((l) => l.name),
+		label: label,
+	})
+}
+
+---
+The repository an issue from the REST API belongs to, from its
+`repository_url` (`https://api.github.com/repos/{owner}/{name}`): after a
+transfer, GitHub answers for the old number with the issue where it now is.
+---
+fn repoOfIssue(i: IssuePayload) -> Option[String] {
+	let prefix = "https://api.github.com/repos/"
+	i.repository_url.filter((u) => u.startsWith(prefix)).map((u) => u.replace(prefix, ""))
 }
