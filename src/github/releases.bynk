@@ -106,6 +106,16 @@ fn previousFinal(r: ReleaseFact, listed: List[ReleasePayload]) -> Option[String]
 	latest.map((o) => o.tag)
 }
 
+---
+The release before a new one, as far as the pages read show: `complete` when
+every release was seen, so `tag` being `None` means there is none.
+---
+type PreviousRelease = {
+	tag: Option[String],
+	searched: Int,
+	complete: Bool,
+}
+
 type ReleaseAt = {
 	tag: String,
 	at: String,

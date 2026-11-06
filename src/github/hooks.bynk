@@ -185,8 +185,12 @@ capability GitHubApi {
 	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]]
 	--- One pull request, whatever its state.
 	fn pull(installation: Int, repo: String, number: Int) -> Effect[Result[PullPayload, ApiFailure]]
-	--- A repository's latest releases, newest first: one page of `RELEASE_PAGE`.
-	fn releases(installation: Int, repo: String) -> Effect[Result[List[ReleasePayload], ApiFailure]]
+	--- One page of a repository's releases, newest first, `RELEASE_PAGE` to a page.
+	fn releases(
+		installation: Int,
+		repo: String,
+		page: Int
+	) -> Effect[Result[List[ReleasePayload], ApiFailure]]
 	--- The commits from `base` to `head`, oldest first (at most `MAX_COMPARE_PAGES` pages).
 	fn compare(
 		installation: Int,
@@ -227,9 +231,10 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 
 	fn releases(
 		installation: Int,
-		repo: String
+		repo: String,
+		page: Int
 	) -> Effect[Result[List[ReleasePayload], ApiFailure]] {
-		let url = "https://api.github.com/repos/\(repo)/releases?per_page=\(RELEASE_PAGE)"
+		let url = "https://api.github.com/repos/\(repo)/releases?per_page=\(RELEASE_PAGE)&page=\(page)"
 		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
 			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
 		}
@@ -340,10 +345,12 @@ fn compareFrom(
 	}
 }
 
-// One page of releases is enough to find the one before a new release. A
-// comparison is read 100 commits a page, up to 500: `bynk` ships about 30
-// between releases.
+// The release before a new one is looked for 30 releases a page, up to 90 (a
+// run of pre-releases can push it off the first page). A comparison is read
+// 100 commits a page, up to 500: `bynk` ships about 30 between releases.
 const RELEASE_PAGE: Int = 30
+
+const MAX_RELEASE_PAGES: Int = 3
 
 const COMPARE_PAGE: Int = 100
 
@@ -668,9 +675,10 @@ fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logge
 	let Ok(_) = saved else match {
 		Err(e) => Logger.error("could not record release \(r.repo) \(r.tag): \(sqlError(e))"),
 	}
-	let true = (r.action == "published" || r.action == "released") && isFinal(r) else {
-		Effect.pure(())
-	}
+	// GitHub sends `released` for a final release as it is published (alongside
+	// `published`) and for a pre-release made final, so matching on it alone
+	// matches each final release once.
+	let true = r.action == "released" && isFinal(r) else { Effect.pure(()) }
 	let Some(installation) = d.installation else {
 		Logger.warn(
 			"cannot match \(r.repo) \(r.tag) to pull requests: \(d.id) names no installation"
@@ -692,11 +700,17 @@ fn shipRelease(
 	installation: Int,
 	r: ReleaseFact
 ) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
-	let Ok(listed) <- GitHubApi.releases(installation, r.repo) else match {
+	let Ok(found) <- previousRelease(installation, r, 1, []) else match {
 		Err(f) => Effect.pure(Err(f.message)),
 	}
-	let Some(previous) = previousFinal(r, listed) else {
-		let _ <- Logger.info("\(r.repo) \(r.tag) is its first release: nothing to compare it with")
+	let Some(previous) = found.tag else {
+		let _ <- if found.complete {
+			Logger.info("\(r.repo) \(r.tag) is its first release: nothing to compare it with")
+		} else {
+			Logger.warn(
+				"\(r.repo) \(r.tag): no earlier final release among its latest \(found.searched) releases; its pull requests are left unknown"
+			)
+		}
 		Effect.pure(Ok(()))
 	}
 	let Ok(c) <- GitHubApi.compare(installation, r.repo, previous, r.tag) else match {
@@ -742,6 +756,30 @@ fn shipRelease(
 		Err(e) => Effect.pure(Err(sqlError(e))),
 	}
 	Effect.pure(Ok(()))
+}
+
+// The final release before `r`, looked for a page of releases at a time. A
+// short page means every release has been seen, so finding none there means
+// `r` is the repository's first; reaching `MAX_RELEASE_PAGES` without one
+// leaves it unknown.
+fn previousRelease(
+	installation: Int,
+	r: ReleaseFact,
+	page: Int,
+	sofar: List[ReleasePayload]
+) -> Effect[Result[PreviousRelease, ApiFailure]] given GitHubApi {
+	let Ok(listed) <- GitHubApi.releases(installation, r.repo, page) else match {
+		Err(f) => Effect.pure(Err(f)),
+	}
+	let seen = sofar.concat(listed)
+	let found = previousFinal(r, seen)
+	if found.isSome() || listed.length() < RELEASE_PAGE {
+		Effect.pure(Ok(PreviousRelease { tag: found, searched: seen.length(), complete: true }))
+	} else if page >= MAX_RELEASE_PAGES {
+		Effect.pure(Ok(PreviousRelease { tag: None, searched: seen.length(), complete: false }))
+	} else {
+		previousRelease(installation, r, page + 1, seen)
+	}
 }
 
 // Records a review (#26): submitted, edited or dismissed. Review payloads

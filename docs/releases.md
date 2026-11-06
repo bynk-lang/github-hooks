@@ -23,8 +23,9 @@ and kept indefinitely (retention prunes `deliveries`, not these).
 
 - **`releases`**: one row per release, keyed by repository and tag, from every
   `release` delivery (`created`, `published`, `edited`, `prereleased`,
-  `released`, `deleted`). A release deleted and published again for the same
-  tag (a release re-run) is the same row. A `deleted` delivery keeps the row
+  `released`, `deleted`). A `published` delivery records the release but
+  doesn't match it; `released` does (below). A release deleted and published
+  again for the same tag (a release re-run) is the same row. A `deleted` delivery keeps the row
   and sets `deleted_at` to when it arrived, so lead times don't shift; the
   pages won't show it. A draft has no `published_at` and is never shown. A
   **final** release is published and neither a draft nor a pre-release: only
@@ -39,11 +40,16 @@ and kept indefinitely (retention prunes `deliveries`, not these).
 
 ## Matching a release to the pull requests it shipped
 
-When a final release is published (a `published` delivery, or `released` for
-a pre-release made final), the Worker, as the installation that delivered it:
+When a final release is published, the Worker matches it once, on the
+`released` delivery. GitHub sends `released` alongside `published` when a
+final release is published, and on its own when a pre-release is made final.
+As the installation that delivered it, the Worker:
 
-1. Lists the repository's latest 30 releases and takes the **previous final
-   release**: the other final release published latest before this one.
+1. Looks for the **previous final release**: the other final release
+   published latest before this one. It reads the repository's releases 30 a
+   page, newest first, and stops when it finds one or reaches a short page
+   (every release seen). It reads at most 3 pages (90 releases), since a run
+   of pre-releases can push the previous final release off the first page.
 2. Asks GitHub to compare the two tags (`previous...this`). That's 100 commits
    a page, up to 500; `bynk` ships about 30 between releases, about half of
    them version stamps.
@@ -62,6 +68,7 @@ wrong:
 | Case | What happens |
 |---|---|
 | A repository's first release | Nothing to compare against: `previous_tag` and `shipped` stay null, logged at `info` |
+| No final release among the latest 90 | Not taken for a first release: `shipped` stays null, logged as a warning |
 | A pre-release or a draft | Recorded; GitHub isn't asked anything |
 | GitHub refuses the list or the compare | Logged as an error; `shipped` stays null |
 | A delivery with no installation | Logged as a warning; `shipped` stays null |
