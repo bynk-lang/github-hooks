@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
         with:
           node-version: 22
-      - uses: bynk-lang/setup-bynk@v1
+      - uses: bynk-lang/setup-bynk@b89391b688710887f4623aceee894e6b335d3da4 # v1
         with:
           # Pushes and pull requests use BYNK_VERSION; the canary passes newer
           # releases in.

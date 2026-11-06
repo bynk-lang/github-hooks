@@ -25,11 +25,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: bynk-lang/bynk-ci@v1
+      - uses: bynk-lang/bynk-ci@5bb74c76051d513386506c41b9c2bbde5bef91c8 # v1
         with:
           version-file: BYNK_VERSION   # the canary proposes moving it
           source: .
 
+  # No `name:` here, so the check reports as
+  # "smoke / signed deliveries against the local Worker", whichever workflow
+  # calls it: a stable name for a required check.
   smoke:
-    name: signed deliveries against the local Worker
     uses: ./.github/workflows/smoke.yml
