@@ -51,7 +51,12 @@ All notable changes to github-hooks. The format follows
   - **The actor:** a `Maintainer` actor (Bynk's `Oidc`, with `trustFrom =
     "MAINTAINER_OIDC"`) verifies Access's ID token.
   - **`GET /maintainers/me`:** answers with the person's GitHub login, from
-    the token's claims, once GitHub confirms they belong to the organisation.
+    the token's `login` claim only, once GitHub confirms they belong to the
+    organisation. A membership answer kept from the last day is used first;
+    otherwise the installation to ask with is found per repository, through
+    the repository index.
+  - **The code exchange:** the redirect URI must be the callback on the
+    origin the request came to.
   - **The pages:** every dashboard gains a sign-in link, and
     `/maintainers/callback` finishes the sign-in.
   - **Testing:** `scripts/oidc.mjs` checks the token handling end to end

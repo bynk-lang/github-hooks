@@ -20,6 +20,12 @@ That's checked twice:
   permission, and keeps each answer a day. So someone who leaves the
   organisation loses access within a day, even with a token that hasn't
   expired.
+  - **A kept answer comes first:** while one is fresh, the Worker doesn't
+    look for an installation at all.
+  - **Otherwise:** it asks through the installation that last delivered for
+    one of the organisation's repositories. It finds that installation from
+    each repository's latest delivery, so the cost grows with the number of
+    repositories, not deliveries.
 
 ## Cloudflare Access
 
@@ -67,17 +73,21 @@ The per-person view matches people to their pull requests and issues by
 **GitHub login**. Access's own `sub` is an Access user id, and an email address
 may not match GitHub, so the token needs the login as a claim.
 
-`/maintainers/me` looks for it under `login`, `github_login`,
-`preferred_username` or `nickname`, in that order. A token without any of
-these is refused with a `403` that names which of the claims it looks for
-were present:
+`/maintainers/me` takes it from the **`login` claim only**. Generic claims
+such as `preferred_username` or `nickname` depend on how Access is set up, and
+could carry something a user controls, so trusting them could let one member
+act as another. A token without `login` is refused with a `403`. The refusal
+names which of `login`, `github_login`, `preferred_username`, `nickname`,
+`email` and `name` the token did carry:
 
 ```json
-{"error": "no_login", "message": "the token carries no GitHub login (looked for login, github_login, preferred_username, nickname); present: email, name"}
+{"error": "no_login", "message": "the token carries no GitHub login (the `login` claim); present: email, name"}
 ```
 
 So the first sign-in shows whether the claim is configured. If it isn't, add it
-in the application's claim settings (step 4 above).
+in the application's claim settings (step 4 above). If Access sends the login
+under another name, map it to `login` there, rather than changing the
+Worker.
 
 ## Signing in
 
@@ -113,7 +123,11 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 | `GET /maintainers/me` | a maintainer | `{sub, login, email, name, claims}` |
 
 **`/maintainers/token`:**
-- **Callback only:** the `redirect_uri` must end in `/maintainers/callback`.
+- **Callback only:** the `redirect_uri` must be `/maintainers/callback` on
+  the origin the request came to: `https://<host>/maintainers/callback`, where
+  the host is the request's `Host` header. Plain `http` is accepted only for a
+  local Worker (`localhost` or `127.0.0.1`). Access also checks it against the
+  application's redirect URLs.
 - **Limit:** it shares the metrics routes' per-address limit.
 - **A code alone is useless:** it works only with the verifier the page made.
 

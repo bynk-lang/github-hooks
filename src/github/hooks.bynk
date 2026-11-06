@@ -935,17 +935,7 @@ fn orgMember(
 ) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
 	let who = login.toLower()
 	let now <- Clock.now()
-	let cached <- Deliveries.first(
-		"SELECT member FROM org_members WHERE org = ?1 AND login = ?2 AND checked_at >= ?3",
-		[Text(org), Text(who), Text((now - MEMBER_RECHECK).toIso())]
-	)
-	let known: Option[Bool] = match cached {
-		Ok(Some(row)) => match Json.decode[CachedMember](row) {
-			Ok(m) => Some(m.member == 1),
-			Err(_) => None,
-		},
-		_ => None,
-	}
+	let known <- recentMember(org, login)
 	let None = known else { Effect.pure(Ok(known == Some(true))) }
 	let Ok(member) <- GitHubApi.isMember(installation, org, login) else match {
 		Err(f) => Effect.pure(Err(f.message)),
@@ -1895,13 +1885,14 @@ service api from http {
 	// Access's token endpoint refuses a browser's cross-origin call. A public
 	// client with PKCE, so no secret is involved, and the code is only good
 	// with the verifier the page kept. Limited per address like the metrics
-	// routes; the redirect URI must be this service's callback.
+	// routes; the redirect URI must be the callback on the origin this
+	// request came to.
 	on POST("/maintainers/token") (body: TokenRequest, headers: RequestHeaders) -> Effect[HttpResult[SignedIn]] by v: Visitor given Secrets, Logger, MetricsLimit, AccessOidc {
 		let allowed <- withinMetricsLimit(headers)
 		let true = allowed else {
 			TooManyRequests("too many sign-in attempts; try again in a minute")
 		}
-		let true = body.redirect_uri.endsWith("/maintainers/callback") else {
+		let true = isOwnCallback(body.redirect_uri, headers.get("Host").getOrElse("")) else {
 			BadRequest("the redirect URI must be this service's /maintainers/callback")
 		}
 		let setting <- Secrets.get("MAINTAINER_OIDC")
@@ -1927,30 +1918,30 @@ service api from http {
 		Ok(SignedIn { id_token: token, expires_in: reply.expires_in })
 	}
 
-	// Who is signed in (#53): their GitHub login, from the token's claims, if
-	// GitHub says they belong to the organisation now (cached a day, through
-	// the installation that last delivered for it). A token without a GitHub
-	// login, or someone outside the organisation, is refused with the reason;
-	// the claims this service looks for are named either way, so a missing
-	// login can be told from a refusal.
+	// Who is signed in (#53): their GitHub login, from the token's `login`
+	// claim only, if GitHub says they belong to the organisation now (an
+	// answer kept a day; only a miss looks for an installation to ask with).
+	// A token without the claim, or someone outside the organisation, is
+	// refused with the reason, naming the claims the token did carry.
 	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock {
-		let present = loginClaims().concat(["email", "name"]).filter((c) => m.claims.has(c))
-		let found = loginClaims().filter((c) => m.claims.get(c).isSome()).first()
-		let Some(claim) = found else {
+		let present = reportedClaims().filter((c) => m.claims.has(c))
+		let Some(login) = m.claims.get(LOGIN_CLAIM) else {
 			RawError(
 				Forbidden,
 				refusal403(
 					"no_login",
-					"the token carries no GitHub login (looked for \(joined(loginClaims(), ", ")); present: \(joined(present, ", ")))"
+					"the token carries no GitHub login (the `\(LOGIN_CLAIM)` claim); present: \(joined(present, ", "))"
 				),
 				"application/json"
 			)
 		}
-		let login = m.claims.get(claim).getOrElse("")
-		let Some(installation) <- orgInstallation(MAINTAINER_ORG) else {
-			ServiceUnavailable("no installation of the App has delivered for \(MAINTAINER_ORG) yet")
+		// A recent answer settles it without looking for an installation.
+		let known <- recentMember(MAINTAINER_ORG, login)
+		let checked: Result[Bool, String] <- match known {
+			Some(answer) => Effect.pure(Ok(answer)),
+			None => askOrg(login),
 		}
-		let Ok(member) <- orgMember(installation, MAINTAINER_ORG, login) else match {
+		let Ok(member) = checked else match {
 			Err(why) => {
 				let _ <- Logger.error(
 					"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
@@ -4247,12 +4238,49 @@ type Refusal = {
 	message: String,
 }
 
-// The installation that last delivered for any of `org`'s repositories: the
-// one whose token can ask about its members.
+// Whether `login` belongs to `org`, if GitHub answered in the last
+// `MEMBER_RECHECK`: no installation is needed to know it.
+fn recentMember(org: String, login: String) -> Effect[Option[Bool]] given Deliveries, Clock {
+	let now <- Clock.now()
+	let cached <- Deliveries.first(
+		"SELECT member FROM org_members WHERE org = ?1 AND login = ?2 AND checked_at >= ?3",
+		[Text(org), Text(login.toLower()), Text((now - MEMBER_RECHECK).toIso())]
+	)
+	let Ok(Some(row)) = cached else { Effect.pure(None) }
+	match Json.decode[CachedMember](row) {
+		Ok(m) => Effect.pure(Some(m.member == 1)),
+		Err(_) => Effect.pure(None),
+	}
+}
+
+// Asks GitHub whether `login` belongs to the maintainers' organisation,
+// through an installation that has delivered for it.
+fn askOrg(login: String) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let Some(installation) <- orgInstallation(MAINTAINER_ORG) else {
+		Effect.pure(Err("no installation of the App has delivered for \(MAINTAINER_ORG) yet"))
+	}
+	orgMember(installation, MAINTAINER_ORG, login)
+}
+
+// The installation that last delivered for one of `org`'s repositories: the
+// one whose token can ask about its members. It walks the organisation's
+// repositories by key and reads each one's latest delivery from
+// `deliveries_by_repo_nocase`, so it sorts only the repositories, never the
+// deliveries. Asked only when no recent membership answer is kept.
 fn orgInstallation(org: String) -> Effect[Option[Int]] given Deliveries {
 	let found <- Deliveries.first(
-		"SELECT installation FROM deliveries WHERE repo LIKE ?1 AND installation IS NOT NULL ORDER BY received_at DESC LIMIT 1",
-		[Text("\(org)/%")]
+		"""
+		SELECT installation FROM (
+		  SELECT (SELECT d.installation FROM deliveries d
+		          WHERE d.repo = r.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		          ORDER BY d.received_at DESC LIMIT 1) AS installation,
+		         (SELECT d.received_at FROM deliveries d
+		          WHERE d.repo = r.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		          ORDER BY d.received_at DESC LIMIT 1) AS latest
+		  FROM repositories r WHERE r.repo >= ?1 AND r.repo < ?2
+		) WHERE installation IS NOT NULL ORDER BY latest DESC LIMIT 1
+		""",
+		[Text("\(org)/"), Text("\(org)0")]
 	)
 	let Ok(Some(row)) = found else { Effect.pure(None) }
 	match Json.decode[InstallationRow](row) {

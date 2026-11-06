@@ -5,14 +5,26 @@
 // routes do with them. GitHub is stubbed at the wire, Access at its capability.
 suite github.hooks
 
---- A viewer's request headers: one address, well within the limit.
+--- A viewer's request headers: one address, well within the limit, at the deployed host.
 fn viewer() -> RequestHeaders {
-	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7"])
+	at("github-hooks.bynk-lang.workers.dev")
+}
+
+--- The same viewer, reaching the Worker at `host`.
+fn at(host: String) -> RequestHeaders {
+	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7", "Host: \(host)"])
 }
 
 --- Installation 42 last delivered for one of bynk-lang's repositories.
 fn installed() -> List[SqlStatement] {
 	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public) VALUES
+				  ('bynk-lang/bynk', 1), ('bynk-lang/github-hooks', 0), ('someone-else/repo', 1)
+			""",
+			params: [],
+		},
 		SqlStatement {
 			sql: """
 				INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES
@@ -85,19 +97,41 @@ case "a signed-in member is told who they are, by their GitHub login, after GitH
 	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
 }
 
-case "a login under another claim name is found too" {
+case "only the login claim authorises: a login under another claim name is refused, and named" {
 	stub AppAuth.token(_) returns Ok("ghs_test")
 	stub GitHubHttp.get(_, _) returns member()
 	let seeded <- Deliveries.batch(installed())
 	expect seeded is Ok(_)
 	let r <- api.GET(
 		"/maintainers/me"
-	) by Maintainer("access-user-1", TokenClaims.of(["preferred_username: accuser"]))
+	) by Maintainer("access-user-1", TokenClaims.of(["preferred_username: accuser", "nickname: accuser"]))
+	expect r is RawError(403, _, _)
+	let RawError(_, body, _) = r else {
+		expect false
+	}
+	let text = body.decodeUtf8().getOrElse("")
+	expect text.contains("no_login")
+	expect text.contains("present: preferred_username, nickname")
+	expect GitHubHttp.get never called
+}
+
+case "a membership GitHub confirmed today is used without finding an installation" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let kept <- Deliveries.run(
+		"INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+		[]
+	)
+	expect kept is Ok(_)
+	let r <- api.GET(
+		"/maintainers/me"
+	) by Maintainer("access-user-1", TokenClaims.of(["login: Accuser"]))
 	let Ok(me) = r else {
 		expect false
 	}
-	expect me.login == "accuser"
-	expect me.claims == ["preferred_username"]
+	expect me.login == "Accuser"
+	expect AppAuth.token never called
+	expect GitHubHttp.get never called
 }
 
 case "a token with no GitHub login is refused, naming the claims it did carry" {
@@ -142,7 +176,7 @@ case "if GitHub can't say, or no installation is known, the answer is unavailabl
 		"/maintainers/me"
 	) by Maintainer("access-user-1", TokenClaims.of(["login: accuser"]))
 	expect failing is ServiceUnavailable(_)
-	expect Logger.error called once
+	expect Logger.error called 2 times
 }
 
 case "a sign-in code is exchanged at Access's token endpoint for the page" {
@@ -174,13 +208,26 @@ case "a code Access refuses is a bad request with its reason; Access unreachable
 }
 
 case "only this service's callback may receive a code, and exchanges are limited per address" {
-	stub MetricsLimit.allow(_) returns each [true, false]
+	stub MetricsLimit.allow(_) returns each [true, true, true, false]
 	let elsewhere <- api.POST(
 		"/maintainers/token",
 		exchange("https://evil.example/steal"),
 		viewer()
 	) by Visitor
 	expect elsewhere is BadRequest(_)
+	// Ending in the callback's path isn't enough: it must be this origin's.
+	let lookalike <- api.POST(
+		"/maintainers/token",
+		exchange("https://evil.example/maintainers/callback"),
+		viewer()
+	) by Visitor
+	expect lookalike is BadRequest(_)
+	let downgraded <- api.POST(
+		"/maintainers/token",
+		exchange("http://github-hooks.bynk-lang.workers.dev/maintainers/callback"),
+		viewer()
+	) by Visitor
+	expect downgraded is BadRequest(_)
 	let limited <- api.POST(
 		"/maintainers/token",
 		exchange("https://github-hooks.bynk-lang.workers.dev/maintainers/callback"),
@@ -210,4 +257,27 @@ case "the callback page loads the sign-in script, and every dashboard has the si
 	expect pages.all((p) => p.contains("src=\"\(signinJs.url)\"")
 		&& p.contains("id=\"signin\"")
 		&& !p.contains("{signin}"))
+}
+
+case "a local Worker's plain-http callback is accepted, on its own host only" {
+	stub AccessOidc.exchange(_, _, _) returns Ok(AccessTokenReply { id_token: Some("eyJ.token.sig"), expires_in: Some(3600), error: None, error_description: None })
+	let local <- api.POST(
+		"/maintainers/token",
+		exchange("http://localhost:8787/maintainers/callback"),
+		at("localhost:8787")
+	) by Visitor
+	expect local is Ok(_)
+	let otherPort <- api.POST(
+		"/maintainers/token",
+		exchange("http://localhost:9999/maintainers/callback"),
+		at("localhost:8787")
+	) by Visitor
+	expect otherPort is BadRequest(_)
+	expect isOwnCallback(
+		"https://github-hooks.bynk-lang.workers.dev/maintainers/callback",
+		"github-hooks.bynk-lang.workers.dev"
+	)
+	expect !isOwnCallback("http://github-hooks.bynk-lang.workers.dev/maintainers/callback", "github-hooks.bynk-lang.workers.dev")
+	expect !isOwnCallback("https://github-hooks.bynk-lang.workers.dev/maintainers/callback", "")
+	expect AccessOidc.exchange called once
 }

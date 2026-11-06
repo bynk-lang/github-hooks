@@ -57,9 +57,8 @@ type AccessTokenReply = {
 
 ---
 `GET /maintainers/me`: who is signed in. `login` is their GitHub login, from
-the first of `LOGIN_CLAIMS` the token carries; `claims` names which of the
-claims this service looks for were present, so a missing login can be
-diagnosed.
+the token's `login` claim; `claims` names which of `reportedClaims` were
+present, so a missing login can be diagnosed.
 ---
 type Me = {
 	sub: String,
@@ -81,12 +80,31 @@ const ACCESS_CLIENT_ID: String = "fba9900eff8cefeca28cc95d364cae191a747ead0d670a
 const MAINTAINER_ORG: String = "bynk-lang"
 
 ---
-The claims a GitHub login may arrive in, in order: Access passes the identity
-provider's attributes through as custom claims under the name the application
-gives them.
+The claim a maintainer's GitHub login must arrive in: the custom claim the
+Access application maps from the GitHub login method's login attribute
+(docs/maintainers.md). Only this one authorises. Generic claims such as
+`preferred_username` or `nickname` depend on Access's configuration and could
+carry something the user controls, which would let one member act as another.
 ---
-fn loginClaims() -> List[String] {
-	["login", "github_login", "preferred_username", "nickname"]
+const LOGIN_CLAIM: String = "login"
+
+---
+The claims `/maintainers/me` names when it refuses a token without a login,
+so the first sign-in shows what Access sent. Only `LOGIN_CLAIM` is trusted.
+---
+fn reportedClaims() -> List[String] {
+	["login", "github_login", "preferred_username", "nickname", "email", "name"]
+}
+
+---
+Whether `uri` is this service's sign-in callback, on the origin the request
+came to (`host`, from its `Host` header): `https`, or `http` for a local
+Worker only.
+---
+fn isOwnCallback(uri: String, host: String) -> Bool {
+	let local = host.startsWith("localhost:") || host == "localhost" || host.startsWith("127.0.0.1")
+	uri == "https://\(host)/maintainers/callback"
+		|| (local && uri == "http://\(host)/maintainers/callback")
 }
 
 ---
