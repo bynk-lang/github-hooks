@@ -55,9 +55,14 @@ prunes `deliveries`, not these).
     API.
     - **Why ask:** GitHub reports a member whose membership is **private** as
       a `CONTRIBUTOR` (or `NONE`), so for any other commenter the service asks
-      `GET /orgs/{org}/members/{login}`, through the installation that sent
-      the delivery. That needs the App's **Members: Read-only** permission
-      ([setup](github-app.md)).
+      `GET /orgs/{org}/memberships/{login}`, through the installation that
+      sent the delivery. An `active` membership is a member; a `pending`
+      invitation and a `404` are not. That needs the App's **Members:
+      Read-only** permission ([setup](github-app.md)).
+    - **Not the "check membership" endpoint:** `GET /orgs/{org}/members/{login}`
+      answers `404` both for a non-member and when it won't show the asker a
+      private membership, so it once read private members as outsiders.
+      Migration `0016` forgot those answers.
     - **Caching:** the answer is kept in `org_members` and reused for a day.
     - **Failures:** if GitHub can't say (a missing permission, an outage), the
       comment isn't counted, and a warning says why.
