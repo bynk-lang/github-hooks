@@ -97,6 +97,7 @@ capability GitHubSignIn {
 		r: TokenRequest
 	) -> Effect[Result[GitHubTokenReply, String]]
 	fn user(token: String) -> Effect[Result[GitHubUser, String]]
+	fn revoke(clientId: String, clientSecret: String, token: String) -> Effect[Result[(), String]]
 }
 
 provides GitHubSignIn = GitHubOAuth given Fetch {
@@ -145,6 +146,33 @@ provides GitHubSignIn = GitHubOAuth given Fetch {
 			Err(_) => Effect.pure(Err("GitHub's description of the signed-in user did not decode")),
 		}
 	}
+
+	// GitHub's `DELETE /applications/{client_id}/token`, authenticated as the
+	// App with its client ID and secret.
+	fn revoke(clientId: String, clientSecret: String, token: String) -> Effect[Result[(), String]] {
+		let basic = Bytes.fromUtf8("\(clientId):\(clientSecret)").toBase64()
+		let sent <- Fetch.send(Request {
+			method: Delete,
+			url: "https://api.github.com/applications/\(clientId)/token",
+			contentType: Some("application/json"),
+			authorization: Some("Basic \(basic)"),
+			headers: apiHeaders(),
+			body: Some(Json.encode(RevokedToken { access_token: token })),
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+		if res.status == 204 {
+			Effect.pure(Ok(()))
+		} else {
+			Effect.pure(Err("GitHub answered \(res.status)"))
+		}
+	}
+}
+
+--- The body of GitHub's token revocation.
+type RevokedToken = {
+	access_token: String,
 }
 
 ---
@@ -956,10 +984,20 @@ fn orgMember(
 	org: String,
 	login: String
 ) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
-	let who = login.toLower()
-	let now <- Clock.now()
 	let known <- recentMember(org, login)
 	let None = known else { Effect.pure(Ok(known == Some(true))) }
+	askMember(installation, org, login)
+}
+
+// Whether `login` belongs to `org`, asked of GitHub now, and kept for
+// `orgMember` and `recentMember`.
+fn askMember(
+	installation: Int,
+	org: String,
+	login: String
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let who = login.toLower()
+	let now <- Clock.now()
 	let Ok(member) <- GitHubApi.isMember(installation, org, login) else match {
 		Err(f) => Effect.pure(Err(f.message)),
 	}
@@ -1902,8 +1940,9 @@ service api from http {
 	}
 
 	// Finishes a sign-in (#53): exchanges the code at GitHub with the App's
-	// client secret, asks GitHub who signed in, checks they belong to the
-	// organisation, and answers this service's token for them. The code is
+	// client secret, asks GitHub who signed in (then revokes GitHub's token),
+	// checks with GitHub now that they belong to the organisation, and answers
+	// this service's token for them. The code is
 	// only good with the PKCE verifier the page kept, and the redirect URI
 	// must be the callback on the origin this request came to. Limited per
 	// address like the metrics routes.
@@ -1943,13 +1982,23 @@ service api from http {
 			)
 			BadRequest("GitHub refused the sign-in: \(reply.error.getOrElse("no reason given"))")
 		}
-		let Ok(user) <- GitHubSignIn.user(userToken) else match {
+		let asked <- GitHubSignIn.user(userToken)
+		// The user token has done its one job: revoke it, so nothing usable is
+		// left behind. A failed revocation is logged, not fatal: the token
+		// still expires, and the Worker never kept it.
+		let revoked <- GitHubSignIn.revoke(clientId, clientSecret, userToken)
+		let _ <- match revoked {
+			Ok(_) => Effect.pure(()),
+			Err(why) => Logger.warn("could not revoke a maintainer's GitHub user token: \(why)"),
+		}
+		let Ok(user) = asked else match {
 			Err(why) => {
 				let _ <- Logger.error("could not ask GitHub who signed in: \(why)")
 				BadGateway("GitHub could not say who signed in")
 			},
 		}
-		let Ok(member) <- maintainerMember(user.login) else match {
+		// Asked fresh: a kept answer could be a day old, and a token outlives it.
+		let Ok(member) <- maintainerMember(user.login, true) else match {
 			Err(why) => {
 				let _ <- Logger.error(
 					"could not tell whether \(user.login) belongs to \(MAINTAINER_ORG): \(why)"
@@ -1974,7 +2023,7 @@ service api from http {
 	// miss looks for an installation to ask with).
 	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock {
 		let login = "\(m.identity)"
-		let Ok(member) <- maintainerMember(login) else match {
+		let Ok(member) <- maintainerMember(login, false) else match {
 			Err(why) => {
 				let _ <- Logger.error(
 					"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
@@ -4280,18 +4329,25 @@ fn recentMember(org: String, login: String) -> Effect[Option[Bool]] given Delive
 	}
 }
 
-// Whether `login` belongs to the maintainers' organisation: from an answer
-// kept in the last `MEMBER_RECHECK`, else from GitHub, through an
-// installation that has delivered for it.
+// Whether `login` belongs to the maintainers' organisation, through an
+// installation that has delivered for it. `fresh` asks GitHub now, as signing
+// in does, so a token is never issued on a kept answer; otherwise an answer
+// kept in the last `MEMBER_RECHECK` settles it without an installation. The
+// answer is kept either way.
 fn maintainerMember(
-	login: String
+	login: String,
+	fresh: Bool
 ) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
-	let known <- recentMember(MAINTAINER_ORG, login)
+	let known: Option[Bool] <- if fresh {
+		Effect.pure(None)
+	} else {
+		recentMember(MAINTAINER_ORG, login)
+	}
 	let None = known else { Effect.pure(Ok(known == Some(true))) }
 	let Some(installation) <- orgInstallation(MAINTAINER_ORG) else {
 		Effect.pure(Err("no installation of the App has delivered for \(MAINTAINER_ORG) yet"))
 	}
-	orgMember(installation, MAINTAINER_ORG, login)
+	askMember(installation, MAINTAINER_ORG, login)
 }
 
 // A maintainer's token (#53): an HS256 JWT for `login`, issued at `now`,

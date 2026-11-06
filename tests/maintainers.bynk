@@ -14,6 +14,9 @@ env {
 
 stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
+// GitHub's user token is revoked once it has said who signed in.
+stub GitHubSignIn.revoke(_, _, _) returns Ok(())
+
 --- A viewer's request headers: one address, well within the limit, at the deployed host.
 fn viewer() -> RequestHeaders {
 	at("github-hooks.bynk-lang.workers.dev")
@@ -106,6 +109,8 @@ case "a member who signs in with GitHub gets a token for their login" {
 	expect GitHubSignIn.exchange called once with clientId == "Iv23liTestClient"
 	expect GitHubSignIn.exchange called once with clientSecret == "test-client-secret"
 	expect GitHubSignIn.user called once with token == "ghu_user"
+	expect GitHubSignIn.revoke called once with token == "ghu_user"
+	expect GitHubSignIn.revoke called once with clientSecret == "test-client-secret"
 	expect AppAuth.token called once with installation == 42
 	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
 }
@@ -134,6 +139,43 @@ case "a code GitHub refuses is a bad request with its reason; GitHub unreachable
 	expect down is BadGateway(_)
 	let nobody <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
 	expect nobody is BadGateway(_)
+	// Even when GitHub can't say who it is, the user token is revoked.
+	expect GitHubSignIn.revoke called once with token == "ghu_user"
+}
+
+case "signing in asks GitHub afresh: a kept answer from yesterday doesn't issue a token to a leaver" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "a-leaver" })
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns notMember()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	// GitHub said yes yesterday afternoon, within the day an answer is kept.
+	let kept <- Deliveries.run(
+		"INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'a-leaver', 1, '2026-11-05T15:00:00.000Z')",
+		[]
+	)
+	expect kept is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is RawError(403, _, _)
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/a-leaver"
+	// The fresh answer is kept, so the next request is refused without asking.
+	let after <- api.GET("/maintainers/me") by Maintainer("a-leaver")
+	expect after is RawError(403, _, _)
+	expect GitHubHttp.get called once
+}
+
+case "a user token GitHub won't revoke is logged, and the sign-in still finishes" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	stub GitHubSignIn.revoke(_, _, _) returns Err("GitHub answered 422")
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is Ok(_)
+	expect Logger.warn called once
 }
 
 case "if GitHub can't say whether they belong, the sign-in is unavailable, not refused" {

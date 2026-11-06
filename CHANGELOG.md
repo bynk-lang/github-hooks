@@ -47,8 +47,9 @@ All notable changes to github-hooks. The format follows
   - **Sign-in:** maintainers sign in through the GitHub App's user
     authorisation, with PKCE. The Worker exchanges the code with the App's
     client secret (`POST /maintainers/token`), reads the login from GitHub's
-    `GET /user`, and issues its own token once GitHub confirms they belong to
-    the organisation. GitHub's user token is never kept.
+    `GET /user`, and issues its own token once GitHub confirms, asked fresh,
+    that they belong to the organisation. GitHub's user token is revoked
+    straight after, and never kept.
   - **The actor:** a `Maintainer` actor (Bynk's `Bearer`, signed with the new
     `MAINTAINER_TOKEN_SECRET`) verifies that token, whose subject is the
     GitHub login. `bynk token Maintainer` mints one for testing.

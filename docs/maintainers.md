@@ -14,7 +14,9 @@ That's checked twice, with the cached lookup issue response uses
 ([issues.md](issues.md)), which needs the App's **Members: Read** permission:
 
 - **At sign-in:** the Worker asks GitHub who signed in, then whether they
-  belong to the organisation. Someone who doesn't gets no token.
+  belong to the organisation, **fresh**, never from a kept answer. Someone who
+  doesn't gets no token. The fresh answer is kept, so it also updates what
+  the per-request check sees.
 - **On every maintainer request:** the Worker asks again. Each answer is kept
   a day, so someone who leaves the organisation loses access within a day,
   even with a token that hasn't expired.
@@ -39,7 +41,9 @@ The Worker then issues **its own token**: an HS256 JWT whose `sub` is the
 GitHub login, signed with `MAINTAINER_TOKEN_SECRET`, lasting a working day (8
 hours). The `Maintainer` actor (Bynk's `Bearer`) verifies it, including `exp`
 and `nbf`, and answers `401` to a missing, forged or expired one. GitHub's own
-user token is used once, to ask who signed in, and never kept.
+user token is used once, to ask who signed in, then revoked
+(`DELETE /applications/{client_id}/token`), so nothing usable is left behind.
+A failed revocation is logged as a warning and doesn't stop the sign-in.
 
 ## Setting it up
 
@@ -86,8 +90,12 @@ login · Sign out*.
    organisation. It answers its own token, how long it lasts, and the login.
    The page keeps them in `sessionStorage`, so they last as long as the tab,
    and goes back to where the sign-in started.
-4. **Signing out:** this forgets the token. GitHub's own session is
+4. **Signing out:** this forgets the token in the tab. GitHub's own session is
    GitHub's, so the next sign-in may not ask again.
+   - **Not yet server-side:** a token copied elsewhere stays valid until it
+     expires, up to 8 hours, or until a membership recheck refuses it. Ending
+     a session on the server (a per-login token version, bumped on sign-out
+     or a membership change) is planned before step 5's actions.
 
 Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 (`null` when signed out or expired). They send the token as
