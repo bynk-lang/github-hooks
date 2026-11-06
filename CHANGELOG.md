@@ -48,8 +48,10 @@ All notable changes to github-hooks. The format follows
     repository's open issues through the REST API, leaving out the pull
     requests GitHub lists with them, and saves them as deliveries would.
   - **Repairs:** each issue still held open that GitHub didn't list is read
-    on its own. It's saved as it now is, or becomes a `transferred` or
-    `deleted` tombstone.
+    on its own, when the listing was complete. It's saved as it now is, or
+    becomes a `transferred` tombstone (answered under a new number) or a
+    `deleted` one. An answer under the same number from a renamed repository
+    is left alone.
   - **Failures:** renamed and vanished repositories are skipped with a
     warning, as the pull request sync does.
 - Phase 4, slice 5, step 1 (#48): issue facts for issue response.

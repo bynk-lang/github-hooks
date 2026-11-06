@@ -105,9 +105,17 @@ at 04:53 UTC, repairs both. It runs six minutes after the release sync.
 2. **Repairs:** each issue the table still holds open that GitHub didn't list
    is read on its own and saved as it now is. The oldest go first, at most 50
    a repository per run.
-   - **Transferred:** after a transfer, GitHub answers the old address with
-     the issue where it now is. One answered from another repository becomes
-     a `transferred` tombstone.
+   - **Complete listings only:** repairs run only when the listing ended with a
+     short page. Past 500 open issues and pull requests, the rest are unread,
+     not closed, so repairs are skipped with a warning rather than re-reading
+     the same open issues every day.
+   - **Transferred:** GitHub follows an old address to where the issue now is.
+     A transfer gives the issue a new number, so one answered under another
+     number becomes a `transferred` tombstone.
+   - **Renamed:** a rename keeps the number, so an answer under the same
+     number from a differently named repository is a rename. It's left alone
+     for the new name's own sync. This covers a renamed repository with
+     nothing open, whose empty listing names no repository.
    - **Deleted:** one GitHub answers `404` or `410` for becomes a `deleted`
      tombstone.
 

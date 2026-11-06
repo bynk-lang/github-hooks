@@ -60,6 +60,15 @@ type IssuePayload = {
 	repository_url: Option[String],
 }
 
+---
+A repository's open issues as the REST API listed them, and whether that was
+all of them (the last page read was short).
+---
+type IssueListing = {
+	issues: List[IssuePayload],
+	complete: Bool,
+}
+
 --- `comment` as an `issue_comment` delivery carries it.
 type CommentPayload = {
 	id: Int,

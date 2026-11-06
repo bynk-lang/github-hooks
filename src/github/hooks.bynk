@@ -211,10 +211,11 @@ capability GitHubApi {
 	---
 	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]]
 	---
-	A repository's open issues, every page (at most `MAX_ISSUE_PAGES`). GitHub
-	lists open pull requests among them, with `pull_request` set.
+	A repository's open issues, every page (at most `MAX_ISSUE_PAGES`), and
+	whether that was all of them. GitHub lists open pull requests among them,
+	with `pull_request` set.
 	---
-	fn openIssues(installation: Int, repo: String) -> Effect[Result[List[IssuePayload], ApiFailure]]
+	fn openIssues(installation: Int, repo: String) -> Effect[Result[IssueListing, ApiFailure]]
 	--- One issue, whatever its state; after a transfer, the issue where it now is.
 	fn issue(
 		installation: Int,
@@ -228,10 +229,7 @@ provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 		openPullsFrom(installation, repo, 1, [])
 	}
 
-	fn openIssues(
-		installation: Int,
-		repo: String
-	) -> Effect[Result[List[IssuePayload], ApiFailure]] {
+	fn openIssues(installation: Int, repo: String) -> Effect[Result[IssueListing, ApiFailure]] {
 		openIssuesFrom(installation, repo, 1, [])
 	}
 
@@ -381,14 +379,15 @@ fn openPullsFrom(
 }
 
 // One page of open issues after another, until a short page says it was the
-// last, or `MAX_ISSUE_PAGES` have been read. GitHub lists open pull requests
-// here too (with `pull_request` set); the caller leaves them out.
+// last (the listing is complete), or `MAX_ISSUE_PAGES` have been read (it may
+// not be). GitHub lists open pull requests here too (with `pull_request`
+// set); the caller leaves them out.
 fn openIssuesFrom(
 	installation: Int,
 	repo: String,
 	page: Int,
 	sofar: List[IssuePayload]
-) -> Effect[Result[List[IssuePayload], ApiFailure]] given AppAuth, GitHubHttp {
+) -> Effect[Result[IssueListing, ApiFailure]] given AppAuth, GitHubHttp {
 	let url = "https://api.github.com/repos/\(repo)/issues?state=open&per_page=\(ISSUE_PAGE)&page=\(page)"
 	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
 		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
@@ -406,8 +405,9 @@ fn openIssuesFrom(
 		})),
 	}
 	let all = sofar.concat(issues)
-	if issues.length() < ISSUE_PAGE || page >= MAX_ISSUE_PAGES {
-		Effect.pure(Ok(all))
+	let last = issues.length() < ISSUE_PAGE
+	if last || page >= MAX_ISSUE_PAGES {
+		Effect.pure(Ok(IssueListing { issues: all, complete: last }))
 	} else {
 		openIssuesFrom(installation, repo, page + 1, all)
 	}
@@ -3546,13 +3546,14 @@ fn syncIssues(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Log
 	let Some(installation) = t.installation else {
 		syncSkipped("\(t.repo): no installation has delivered for it; issues skipped")
 	}
-	let Ok(listed) <- GitHubApi.openIssues(installation, t.repo) else match {
+	let Ok(listing) <- GitHubApi.openIssues(installation, t.repo) else match {
 		Err(f) => if isGone(f) {
 			syncSkipped("\(t.repo): GitHub no longer has it; issues skipped (\(f.message))")
 		} else {
 			syncFailed("\(t.repo): \(f.message)")
 		},
 	}
+	let listed = listing.issues
 	// GitHub redirects a renamed repository's old name. Its issues belong to
 	// the new name, which syncs under its own `repositories` row.
 	let current = listed.first().andThen((i) => repoOfIssue(i)).getOrElse(t.repo)
@@ -3579,7 +3580,19 @@ fn syncIssues(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Log
 	let Ok(heldOpen) = Json.decodeSql[List[PullNumber]](held) else match {
 		Err(e) => syncFailed("\(t.repo): the issues held open did not decode: \(jsonError(e))"),
 	}
-	let gone = heldOpen.filter((h) => !open.any((i) => i.number == h.number)).take(MAX_REPAIRS)
+	// An issue the listing didn't include is only known to have left `open`
+	// when the listing was complete: past `MAX_ISSUE_PAGES`, the rest are
+	// simply unread, and repairing them would re-read the same open issues
+	// every day.
+	let unlisted = heldOpen.filter((h) => !open.any((i) => i.number == h.number))
+	let gone: List[PullNumber] = if listing.complete { unlisted.take(MAX_REPAIRS) } else { [] }
+	let _ <- if listing.complete {
+		Effect.pure(())
+	} else {
+		Logger.warn(
+			"\(t.repo): more open issues and pull requests than the sync reads (\(ISSUE_PAGE * MAX_ISSUE_PAGES)); repairs skipped"
+		)
+	}
 	// Each is saved under the name its row has, so a difference in case can't
 	// make a second row.
 	let repairs <- gone.traverseAll((h) => repairIssue(installation, h.repo, h.number))
@@ -3594,9 +3607,13 @@ fn syncIssues(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Log
 
 // An issue held open here that GitHub no longer lists as open: read it on its
 // own and save it as it now is. `true` when that moved it out of `open`.
-// GitHub answers for a transferred issue with the issue where it now is, so
-// one in another repository becomes a `transferred` tombstone; one GitHub
-// no longer has at all (404 or 410: deleted) becomes a `deleted` one.
+// GitHub follows an old address to where the issue now is. A transfer gives
+// the issue a new number in its new repository, so an answer under another
+// number makes it a `transferred` tombstone; a rename keeps the number, so an
+// answer under the same number from a differently named repository is a
+// rename, left for the new name's own sync (a renamed repository with nothing
+// open gets this far, as its empty listing names no repository). One GitHub
+// no longer has at all (404 or 410: deleted) becomes a `deleted` tombstone.
 fn repairIssue(
 	installation: Int,
 	repo: String,
@@ -3609,10 +3626,9 @@ fn repairIssue(
 			Effect.pure(Err(f.message))
 		},
 	}
+	let true = i.number == number else { removeIssue(repo, number, "transferred") }
 	let now = repoOfIssue(i).getOrElse(repo)
-	let true = now.toLower() == repo.toLower() && i.number == number else {
-		removeIssue(repo, number, "transferred")
-	}
+	let true = now.toLower() == repo.toLower() else { Effect.pure(Ok(false)) }
 	let Ok(fact) = issueFact(repo, "sync", None, None, i) else match {
 		Err(why) => Effect.pure(Err("\(repo) issue #\(number): \(why)")),
 	}

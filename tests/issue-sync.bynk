@@ -274,3 +274,34 @@ case "an issue GitHub still has open, though the listing missed it, is saved but
 	expect all == Ok(Some("{\"rows\":\"5:open:bug\"}"))
 	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 0 repaired"
 }
+
+case "a renamed repository with nothing open leaves its held-open issues alone, rather than marking them transferred" {
+	// The empty listing names no repository, so the rename shows only when an
+	// issue is read: GitHub follows the old name to the new one, and a rename
+	// keeps the issue's number (a transfer gives it a new one).
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([])), ok(issueIn("bynk-lang/bynk-lang", 5, "closed", "2026-11-04T12:00:05Z", "\"2026-11-04T12:00:00Z\"", [], false))]
+	let seeded <- Deliveries.batch(repositories().concat(heldOpen(5, "2026-11-03T09:00:00.000Z")))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let all <- Deliveries.first(rows(), [])
+	expect all == Ok(Some("{\"rows\":\"5:open:stale-label\"}"))
+	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 0 repaired"
+}
+
+case "a listing cut short at its last page repairs nothing, as the issues it didn't reach may still be open" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing(many(100)))
+	let seeded <- Deliveries.batch(repositories().concat(
+		heldOpen(1000, "2026-11-03T09:00:00.000Z")
+	))
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	// Five full pages, and no single reads.
+	expect GitHubHttp.get called 5 times
+	expect Logger.warn called once with msg == "bynk-lang/bynk: more open issues and pull requests than the sync reads (500); repairs skipped"
+	let held <- Deliveries.first("SELECT state FROM issues WHERE number = 1000", [])
+	expect held == Ok(Some("{\"state\":\"open\"}"))
+}
