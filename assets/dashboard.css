@@ -202,6 +202,26 @@ td.pr small { display: block; font-weight: 400; color: var(--ink-muted); }
 details.in-flight { margin-top: 12px; color: var(--ink-2); font-size: 0.9rem; }
 details.in-flight ul { margin: 8px 0 0; padding-left: 20px; }
 
+/* Runner wait (#42): its own block in each repository, under the workflows. */
+.runners { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.runners h3 { margin-top: 0; }
+.runners .aside { margin: 0 0 8px; }
+td.waiting { white-space: nowrap; }
+ol.longest { margin: 8px 0 0; padding-left: 24px; }
+ol.longest li { margin: 2px 0; }
+/* Median to 95th percentile: a 4px range on a shared track, the median an 8px
+   point ringed in the surface, so it reads where it overlaps the range. */
+.range { position: relative; width: 100%; min-width: 120px; height: 12px; }
+.range::before { content: ""; position: absolute; left: 0; right: 0; top: 5.5px; height: 1px; background: var(--rule); }
+.range-span { position: absolute; top: 4px; height: 4px; min-width: 2px; border-radius: 2px; background: var(--passed); opacity: 0.55; }
+.range-dot { position: absolute; top: 2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--passed); box-shadow: 0 0 0 2px var(--surface); }
+/* A workflow's slowest jobs, in its trend panel. */
+.slowest { margin-top: 12px; }
+.slowest h4 { font-size: 0.88rem; margin: 0 0 4px; color: var(--ink-2); }
+table.compact { max-width: 640px; font-size: 0.88rem; }
+table.compact th, table.compact td { padding: 4px 6px; }
+table.compact tbody th { font-weight: 600; }
+
 footer { color: var(--ink-muted); font-size: 0.85rem; margin-top: 32px; }
 
 /* Narrow screens: each workflow becomes a card of labelled figures, so nothing
@@ -225,6 +245,9 @@ footer { color: var(--ink-muted); font-size: 0.85rem; margin-top: 32px; }
   details.trend-table td, details.trend-table th { display: revert; width: auto; }
   details.trend-table thead { position: static; width: auto; height: auto; overflow: visible; clip: auto; }
   details.trend-table td, details.trend-table th { border-top: 1px solid var(--rule); padding: 4px 6px; }
+  td.waiting { white-space: normal; }
+  td.bar-cell .range { flex: 0 1 60%; align-self: center; }
+  table.compact tbody th { display: block; border: 0; padding: 2px 0; }
 }
 .empty { color: var(--ink-2); }
 
@@ -235,4 +258,5 @@ footer { color: var(--ink-muted); font-size: 0.85rem; margin-top: 32px; }
   .run.failed { background: CanvasText; }
   .chart .mark, .chart .point { fill: CanvasText; }
   .chart .line { stroke: CanvasText; }
+  .range-span, .range-dot, .range::before { forced-color-adjust: none; background: CanvasText; box-shadow: none; }
 }
