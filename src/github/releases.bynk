@@ -27,6 +27,7 @@ type ReleasePayload = {
 	created_at: String,
 	published_at: Option[String],
 	author: Option[UserRef],
+	html_url: Option[String],
 }
 
 ---
@@ -90,6 +91,11 @@ them: the other final release published latest before it. The commits between
 its tag and `r`'s are what `r` shipped. `None` for a repository's first.
 ---
 fn previousFinal(r: ReleaseFact, listed: List[ReleasePayload]) -> Option[String] {
+	previousFinalAt(r, listed).map((o) => o.tag)
+}
+
+--- The same, with when it was published.
+fn previousFinalAt(r: ReleaseFact, listed: List[ReleasePayload]) -> Option[ReleaseAt] {
 	let Some(at) = r.publishedAt else { None }
 	let none: Option[ReleaseAt] = None
 	let latest = listed
@@ -103,22 +109,46 @@ fn previousFinal(r: ReleaseFact, listed: List[ReleasePayload]) -> Option[String]
 			None => Some(o),
 			Some(b) => if o.at > b.at { Some(o) } else { best },
 		})
-	latest.map((o) => o.tag)
+	latest
 }
 
 ---
 The release before a new one, as far as the pages read show: `complete` when
-every release was seen, so `tag` being `None` means there is none.
+every release was seen, so `previous` being `None` means there is none.
 ---
 type PreviousRelease = {
-	tag: Option[String],
+	previous: Option[ReleaseAt],
 	searched: Int,
 	complete: Bool,
 }
 
+--- A release's tag, and when it was published.
 type ReleaseAt = {
 	tag: String,
 	at: String,
+}
+
+---
+A repository's releases as the sync read them, newest first: `complete` when
+every release was read (the last page was short), so one missing from them is
+gone.
+---
+type ReleaseListing = {
+	releases: List[ReleasePayload],
+	complete: Bool,
+}
+
+---
+The repository a release's page belongs to, from its `html_url`
+(`https://github.com/<owner>/<name>/releases/tag/<tag>`): GitHub's current
+name, which differs from the one asked for when the repository was renamed.
+---
+fn repoOfRelease(r: ReleasePayload) -> Option[String] {
+	let Some(url) = r.html_url else { None }
+	let parts = url.split("/")
+	let Some(owner) = parts.get(3) else { None }
+	let Some(name) = parts.get(4) else { None }
+	Some("\(owner)/\(name)")
 }
 
 ---

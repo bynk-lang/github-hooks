@@ -62,6 +62,7 @@ fn listed(tag: String, draft: Bool, prerelease: Bool, at: Option[String]) -> Rel
 		created_at: "2026-11-01T00:00:00Z",
 		published_at: at,
 		author: None,
+		html_url: None,
 	}
 }
 

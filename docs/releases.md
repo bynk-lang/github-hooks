@@ -4,8 +4,8 @@ The third slice of the public dashboard
 ([#36](https://github.com/bynk-lang/github-hooks/issues/36)): how often each
 repository releases, how long a merged pull request waits for a release to
 ship it, and what is merged but not yet released. This page covers what is
-recorded and how a release is matched to the pull requests it shipped. The
-daily sync, the public routes and the page at `/releases` follow in later
+recorded, how a release is matched to the pull requests it shipped, and the
+daily sync. The public routes and the page at `/releases` follow in later
 steps.
 
 ## Before it records anything
@@ -59,7 +59,12 @@ As the installation that delivered it, the Worker:
    merge (a revert of one ends with the revert's own number), or
    `Merge pull request #123 from …` for a merge commit. A PR already shipped
    by an earlier release keeps it.
-4. Sets the release's `previous_tag`, and `shipped` to how many PRs it shipped.
+4. Sets the release's `previous_tag`, and `shipped` to how many PRs it
+   shipped, but only when the previous final release was published after pull
+   requests began to be recorded (the first moment in `pull_request_events`).
+   Before that, some of what the release shipped was never recorded, so a
+   count would be short. Its PRs are still marked, for their lead times, and
+   `shipped` stays null.
 
 The match is by commit, not by time, so a release tagged on an older commit
 ships only what it contains. What it can't match stays unknown rather than
@@ -75,3 +80,32 @@ wrong:
 | More than 500 commits between tags | The first 500 are matched, with a warning |
 
 A redelivery matches the same pull requests again and changes nothing.
+
+## The daily sync
+
+Deliveries alone miss releases published before the service saw them, and a
+`released` or `deleted` delivery that never arrived. The `releaseSync` cron
+service, daily at 04:47 UTC (six minutes after the pull request sync, so its
+merges are in), repairs both. For each public repository not in
+`DASHBOARD_EXCLUDE`, as the installation that last delivered for it, it:
+
+1. Lists the repository's releases, 30 a page, up to 3 pages (90 releases),
+   and records every one in one D1 batch. So release history (and cadence) is
+   there from the first run, not just from the deploy.
+2. When the listing was complete (its last page was short), marks deleted any
+   release the table has that GitHub no longer lists. GitHub lists drafts only
+   to those who can push, which the App can't, so drafts are left alone.
+3. Matches each final release not yet matched (no `previous_tag`) that was
+   published since pull requests began to be recorded, oldest first, at most
+   10 a run, against the previous final release in the listing, exactly as a
+   `released` delivery would. A release with no earlier final release in the
+   listing (a repository's first, or one whose previous is past 90) stays
+   unmatched. Before any pull request is recorded, nothing is matched.
+4. Logs one line per repository, such as
+   `release sync: bynk-lang/bynk has 22 releases, 1 matched`.
+
+As the pull request sync does, it skips with a warning a repository no
+installation has delivered for, one GitHub no longer has (`404` or `410`), and
+one GitHub now calls by another name (its releases sync under the new name's
+own row). Any other refusal fails the run for that repository, after the others
+have synced, and names it.

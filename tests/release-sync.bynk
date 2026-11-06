@@ -1,0 +1,222 @@
+// Phase 4, slice 3, step 2 (#36): the daily release sync, against an
+// in-memory D1 with the migrations applied. GitHub is stubbed at the wire
+// (`AppAuth`, `GitHubHttp`) with recorded responses: `bynk`'s releases list
+// (v0.510.2 and v0.508.4, one short page) and the comparison between them.
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+fixture listing = "fixtures/github/releases.list.json"
+
+fixture compared = "fixtures/github/compare.json"
+
+--- A response from GitHub.
+fn ok(body: String) -> Result[Response, String] {
+	Ok(Response { status: 200, headers: Map.empty(), body: body })
+}
+
+---
+`bynk-lang/bynk` is public, and installation 42 delivered for it. A private
+repository and an excluded one have deliveries too, and must never be asked
+about.
+---
+fn repositories() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES
+				  ('d-bynk', 'push', 'bynk-lang/bynk', 42, 1, '2026-11-05T00:00:00.000Z'),
+				  ('d-secret', 'push', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z'),
+				  ('d-sandbox', 'push', 'bynk-lang/sandbox', 42, 1, '2026-11-05T00:00:00.000Z')
+			""",
+			params: [],
+		},
+	]
+}
+
+---
+Pull requests began to be recorded on 4 November, before v0.508.4. #2776 and
+#2941 are among the commits v0.510.2 shipped; #2942 was shipped by v0.508.4.
+---
+fn recorded() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO pull_request_events (delivery, repo, number, action, reason, at) VALUES ('first', 'bynk-lang/bynk', 1, 'closed', NULL, '2026-11-04T09:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+				                           opened_at, merged_at, updated_at, merge_commit_sha, released_in, released_at)
+				VALUES
+				  ('bynk-lang/bynk', 2776, 'A', 'a-contributor', 0, 'main', 'a', 0, 'merged', '2026-11-05T09:00:00.000Z',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '703b659d9385bfa1589b3aeff9837afb441db0a4', NULL, NULL),
+				  ('bynk-lang/bynk', 2941, 'B', 'a-contributor', 0, 'main', 'b', 0, 'merged', '2026-11-05T09:00:00.000Z',
+				   '2026-11-05T10:05:00.000Z', '2026-11-05T10:05:00.000Z', NULL, NULL, NULL)
+			""",
+			params: [],
+		},
+	]
+}
+
+--- Each release as `tag:previous:shipped:deleted`, in order.
+fn releases() -> String {
+	"SELECT group_concat(tag || ':' || coalesce(previous_tag, '-') || ':' || coalesce(shipped, '-') || ':' || CASE WHEN deleted_at IS NULL THEN 'kept' ELSE 'deleted' END, ' ') AS rows FROM (SELECT * FROM releases ORDER BY tag)"
+}
+
+---
+A full page of `n` pre-releases, as GitHub lists them: enough to leave the
+listing incomplete after `MAX_RELEASE_PAGES`.
+---
+fn prereleases(n: Int) -> List[ReleasePayload] {
+	let one = [
+		ReleasePayload {
+			id: n,
+			tag_name: "v0.510.2-rc\(n)",
+			name: None,
+			draft: false,
+			prerelease: true,
+			created_at: "2026-11-05T12:00:00Z",
+			published_at: Some("2026-11-05T12:00:00Z"),
+			author: None,
+			html_url: Some("https://github.com/bynk-lang/bynk/releases/tag/v0.510.2-rc\(n)"),
+		},
+	]
+	if n <= 1 { one } else { one.concat(prereleases(n - 1)) }
+}
+
+case "every listed release is recorded, and each unmatched one since recording began is matched" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared)]
+	let seeded <- Deliveries.batch(repositories().concat(recorded()))
+	expect seeded is Ok(_)
+	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect AppAuth.token called with installation == 42
+	// One listing (a short page, so complete) and one comparison: v0.508.4 has
+	// no earlier release in the listing, so there's nothing to compare it with.
+	expect GitHubHttp.get called 2 times
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/releases?per_page=30&page=1"
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/compare/v0.508.4...v0.510.2?per_page=100&page=1"
+	let rows <- Deliveries.first(releases(), [])
+	expect rows == Ok(Some("{\"rows\":\"v0.508.4:-:-:kept v0.510.2:v0.508.4:2:kept\"}"))
+	let row <- Deliveries.first(
+		"SELECT release_id, name, draft, prerelease, created_at, published_at, author_is_bot FROM releases WHERE tag = 'v0.510.2'",
+		[]
+	)
+	expect row == Ok(Some("{\"release_id\":435386663,\"name\":\"v0.510.2\",\"draft\":0,\"prerelease\":0,\"created_at\":\"2026-11-05T13:53:38.000Z\",\"published_at\":\"2026-11-05T15:33:58.000Z\",\"author_is_bot\":1}"))
+	let shipped <- Deliveries.first(
+		"SELECT group_concat(number || ':' || released_in, ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY number)",
+		[]
+	)
+	expect shipped == Ok(Some("{\"rows\":\"2776:v0.510.2 2941:v0.510.2\"}"))
+	expect Logger.info called once with msg == "release sync: bynk-lang/bynk has 2 releases, 1 matched"
+}
+
+case "a release already matched isn't compared again" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared), ok(listing)]
+	let seeded <- Deliveries.batch(repositories().concat(recorded()))
+	expect seeded is Ok(_)
+	let _ <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	let again <- releaseSync.schedule("47 4 * * *", 1793966400000)
+	expect again == Ok(())
+	expect GitHubHttp.get called 3 times
+	expect Logger.info called with msg == "release sync: bynk-lang/bynk has 2 releases, 0 matched"
+}
+
+case "before any pull request is recorded, releases are recorded but none is matched" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing)
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called once
+	let rows <- Deliveries.first(releases(), [])
+	expect rows == Ok(Some("{\"rows\":\"v0.508.4:-:-:kept v0.510.2:-:-:kept\"}"))
+	expect Logger.info called once with msg == "release sync: bynk-lang/bynk has 2 releases, none to match before pull requests are recorded"
+}
+
+case "a release a complete listing no longer has is marked deleted; a draft isn't, nor one listed again" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing)
+	let seeded <- Deliveries.batch(
+		repositories().concat(
+			[
+				SqlStatement {
+					sql: """
+						INSERT INTO releases (repo, tag, release_id, draft, prerelease, created_at, published_at, author_is_bot, deleted_at)
+						VALUES
+						  ('bynk-lang/bynk', 'v0.400.0', 1, 0, 0, '2026-10-24T19:00:00.000Z', '2026-10-24T19:10:00.000Z', 1, NULL),
+						  ('bynk-lang/bynk', 'v0.600.0', 2, 1, 0, '2026-11-06T00:00:00.000Z', NULL, 1, NULL),
+						  ('bynk-lang/bynk', 'v0.508.4', 3, 0, 0, '2026-11-04T20:00:00.000Z', '2026-11-04T21:16:39.000Z', 1, '2026-11-05T00:00:00.000Z')
+					""",
+					params: [],
+				},
+			]
+		)
+	)
+	expect seeded is Ok(_)
+	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let rows <- Deliveries.first(releases(), [])
+	expect rows == Ok(Some("{\"rows\":\"v0.400.0:-:-:deleted v0.508.4:-:-:kept v0.510.2:-:-:kept v0.600.0:-:-:kept\"}"))
+}
+
+case "an incomplete listing marks nothing deleted" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(Json.encode(prereleases(30)))
+	let seeded <- Deliveries.batch(
+		repositories().concat(
+			[
+				SqlStatement {
+					sql: "INSERT INTO releases (repo, tag, release_id, draft, prerelease, created_at, published_at, author_is_bot) VALUES ('bynk-lang/bynk', 'v0.400.0', 1, 0, 0, '2026-10-24T19:00:00.000Z', '2026-10-24T19:10:00.000Z', 1)",
+					params: [],
+				},
+			]
+		)
+	)
+	expect seeded is Ok(_)
+	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called 3 times
+	let kept <- Deliveries.first("SELECT deleted_at FROM releases WHERE tag = 'v0.400.0'", [])
+	expect kept == Ok(Some("{\"deleted_at\":null}"))
+	let count <- Deliveries.first("SELECT count(*) AS n FROM releases", [])
+	expect count == Ok(Some("{\"n\":31}"))
+}
+
+case "a renamed repository's releases are skipped: they sync under the new name" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(listing.replace("https://github.com/bynk-lang/bynk/releases/tag/", "https://github.com/bynk-lang/bynk-renamed/releases/tag/"))
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect Logger.warn called once with msg == "bynk-lang/bynk: GitHub now calls it bynk-lang/bynk-renamed; releases skipped"
+	let count <- Deliveries.first("SELECT count(*) AS n FROM releases", [])
+	expect count == Ok(Some("{\"n\":0}"))
+}
+
+case "a repository GitHub no longer has is skipped; one it refuses fails the run" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let gone <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect gone == Ok(())
+	expect Logger.warn called once with msg == "bynk-lang/bynk: GitHub no longer has it; releases skipped (GitHub refused bynk-lang/bynk's releases: 404 Not Found)"
+	let refused <- releaseSync.schedule("47 4 * * *", 1793966400000)
+	expect refused == Err("bynk-lang/bynk: GitHub refused bynk-lang/bynk's releases: 500 Server Error")
+	expect Logger.error called once with msg == "bynk-lang/bynk: GitHub refused bynk-lang/bynk's releases: 500 Server Error"
+}
