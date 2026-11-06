@@ -3,6 +3,7 @@ commons github.releases
 uses github.events
 uses github.runs
 uses github.pulls
+uses github.metrics
 
 ---
 The parts of a `release` delivery the releases dashboard needs (#36).
@@ -234,4 +235,23 @@ fn tagOf(body: Bytes) -> Option[TagPush] {
 	let Ok(p) = Json.decode[PushDelivery](text) else { None }
 	let true = p.ref.startsWith("refs/tags/") && !p.deleted.getOrElse(false) else { None }
 	Some(TagPush { repo: p.repository.full_name, tag: p.ref.slice(10, p.ref.length()) })
+}
+
+---
+The live-feed event for a release that changed (#36): `status` is the
+delivery's action, and `conclusion` the release's tag.
+---
+fn releaseEventOf(r: ReleaseFact) -> LiveEvent {
+	LiveEvent {
+		refetch_ms: 0,
+		kind: "release",
+		repo: r.repo,
+		number: 0,
+		path: "",
+		workflow: "",
+		run_id: 0,
+		attempt: 0,
+		status: r.action,
+		conclusion: r.tag,
+	}
 }

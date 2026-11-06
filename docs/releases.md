@@ -5,8 +5,7 @@ The third slice of the public dashboard
 repository releases, how long a merged pull request waits for a release to
 ship it, and what is merged but not yet released. This page covers what is
 recorded, how a release is matched to the pull requests it shipped, the
-daily sync, and the public routes that read it. The page at `/releases`
-follows in a later step.
+daily sync, the public routes that read it, and the page at `/releases`.
 
 ## Before it records anything
 
@@ -182,3 +181,56 @@ the window's runs through `workflow_runs_by_completed`, each run's ref looked up
 in `tags` and `releases` by primary key. `releases` itself is read whole for the shown repositories.
 That's at most 90 releases each, as the sync keeps them, and the interval
 needs each repository's earlier releases anyway.
+
+## The page
+
+`/releases` is linked to and from the CI health page at `/` and the PR flow
+page at `/prs`. It shares their stylesheet, the 7/30/90-day window choice and
+the freshness line. For each repository with a release it shows:
+
+- **Tiles:**
+  - releases in the window, with the pre-releases and the median interval;
+  - the time since the last release;
+  - merge to release, with the 95th percentile, how many pull requests it
+    counts, and when recording began if that's within the window;
+  - what's waiting to ship, and how long the oldest has waited;
+  - the release workflow's median time, with its runs and failures.
+- **A chart:** pull requests by people that each recent final release
+  shipped, oldest on the left. It's a single-series bar chart in the CI
+  page's blue, with a hover target per release. A release whose count isn't
+  known has no bar and says so on hover, and the chart isn't drawn when no
+  count is known.
+- **Recent releases:** the latest 10, each linked to GitHub, with when it was
+  published, what it shipped (by people, with bots' added), and the release
+  it followed. Pre-releases are marked. The rest of the 20 the route returns
+  are folded under "earlier releases". On a narrow screen, rows become cards.
+
+Everything from GitHub (repository names, tags, release names) is set as text,
+never as markup. The page keeps which lists are open, and keyboard focus,
+across redraws.
+
+## Live feed
+
+Releases share the live feed with runs and pull requests. A release delivery
+is pushed as `kind: "release"`, with the repository, the delivery's action as
+`status`, and the tag as `conclusion`:
+
+```json
+{"refetch_ms": 3000, "kind": "release", "repo": "bynk-lang/bynk", "number": 0, "path": "",
+ "workflow": "", "run_id": 0, "attempt": 0, "status": "released", "conclusion": "v0.510.2"}
+```
+
+It's sent when what the pages show has settled:
+- for a final release, on `released`, after its matching, so a refetch sees
+  what it shipped. GitHub's `created` and `published` for it arrive in the
+  same second, before the matching has finished, and aren't sent, which also
+  saves their purges;
+- for a pre-release, which ships nothing, on `prereleased`;
+- for any release, on `deleted`.
+
+And only on the delivery's first arrival, not a redelivery, never for a
+draft, and only for a repository the public pages may show. The
+releases page acts on `release` events and on a `pull` event whose pull
+request merged, since that changes what's waiting to ship. The CI and PR pages
+ignore `release` events. The refetch timing (`refetch_ms`, the purge and its
+follow-up) is the PR page's ([pr-flow.md](pr-flow.md#live-feed)).
