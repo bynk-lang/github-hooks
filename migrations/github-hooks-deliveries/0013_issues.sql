@@ -34,11 +34,25 @@ CREATE INDEX issues_by_closed ON issues (closed_at) WHERE closed_at IS NOT NULL;
 -- The open backlog: a few dozen rows at any moment.
 CREATE INDEX issues_open ON issues (repo) WHERE state = 'open';
 
--- Each issue's current labels, replaced whenever its row is refreshed, for
--- the figures by label.
+-- Each issue's current labels, for the figures by label: the whole set is
+-- replaced by a delivery newer than the row, and `labeled` and `unlabeled`
+-- add or remove the one label they name (same-second deliveries combine).
 CREATE TABLE issue_labels (
   repo   TEXT    NOT NULL,
   number INTEGER NOT NULL,
   label  TEXT    NOT NULL,
   PRIMARY KEY (repo, number, label)
+);
+
+-- Whether a login belongs to an organisation, as GitHub's API answered (the
+-- App's Members read permission), for a commenter whose author association
+-- doesn't already say they're a maintainer: GitHub reports a member whose
+-- membership is private as a `CONTRIBUTOR`. An answer is reused for a day.
+-- Logins are stored in lower case, as GitHub matches them.
+CREATE TABLE org_members (
+  org        TEXT    NOT NULL,
+  login      TEXT    NOT NULL,
+  member     INTEGER NOT NULL,
+  checked_at TEXT    NOT NULL,
+  PRIMARY KEY (org, login)
 );

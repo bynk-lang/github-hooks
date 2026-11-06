@@ -21,7 +21,7 @@ closed, time to close by label, the open backlog, and stale issues.
 
 The App already receives `issues` and `issue_comment` deliveries (phase 3's
 welcome reads them), so nothing new needs subscribing. Migration `0013` adds
-two tables, filled as deliveries arrive and kept indefinitely (retention
+three tables, filled as deliveries arrive and kept indefinitely (retention
 prunes `deliveries`, not these).
 
 - **`issues`**: one row per issue, from any `issues` or `issue_comment`
@@ -37,10 +37,21 @@ prunes `deliveries`, not these).
     `MEMBER`, `COLLABORATOR`) from everyone else.
   - **First response:** `first_response_at` and `first_responder` come from
     the first comment by a maintainer who isn't the issue's author and isn't
-    a bot (a bot never counts, even one GitHub reports as a member). A
-    maintainer is an `OWNER`, `MEMBER` or `COLLABORATOR` by GitHub's
-    association, or a login named in `MAINTAINERS` (see Settings). The
-    response only moves earlier, so a comment delivered late still counts. A deleted comment
+    a bot (a bot never counts, even one GitHub reports as a member). The
+    response only moves earlier, so a comment delivered late still counts.
+  - **Who is a maintainer:** an `OWNER`, `MEMBER` or `COLLABORATOR` by
+    GitHub's author association, or a member of the organisation by GitHub's
+    API.
+    - **Why ask:** GitHub reports a member whose membership is **private** as
+      a `CONTRIBUTOR` (or `NONE`), so for any other commenter the service asks
+      `GET /orgs/{org}/members/{login}`, through the installation that sent
+      the delivery. That needs the App's **Members: Read-only** permission
+      ([setup](github-app.md)).
+    - **Caching:** the answer is kept in `org_members` and reused for a day.
+    - **Failures:** if GitHub can't say (a missing permission, an outage), the
+      comment isn't counted, and a warning says why.
+    - **Cost:** today every commenter is a public member or a bot, so the API
+      isn't called at all. A deleted comment
     isn't a response, and deleting the first response doesn't clear it.
   - **Deleted and transferred issues:** these become tombstones (`state`
     `deleted` or `transferred`) with no labels. Nothing later changes them,
@@ -59,18 +70,16 @@ prunes `deliveries`, not these).
   - **Stale deliveries:** a delivery the row has moved past never brings back
     an old set.
 
+- **`org_members`**: GitHub's answers on organisation membership, by
+  organisation and lower-case login, each reused for a day (see **Who is a
+  maintainer** above).
+
 **Comments on pull requests** also arrive as `issue_comment`, with
 `issue.pull_request` set. They record nothing here; PR flow keeps its own
 facts.
 
 **Volume:** about 100 `issues` and 45 `issue_comment` deliveries a day across
 the organisation. Each costs a few D1 writes: the row, plus one per label.
-
-## Settings
-
-| Setting | Meaning |
-|---|---|
-| `MAINTAINERS` | optional. Comma-separated GitHub logins, matched without regard to case, who count as maintainers when they comment, in addition to GitHub's `OWNER`, `MEMBER` and `COLLABORATOR`. GitHub reports an organisation member whose membership is **private** as a `CONTRIBUTOR`, so their responses wouldn't count without it. A change applies to comments that arrive after it. |
 
 ## History
 

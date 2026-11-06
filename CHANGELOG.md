@@ -51,11 +51,13 @@ All notable changes to github-hooks. The format follows
     name. The whole set is replaced only by a strictly newer delivery, so
     labels added in the same second combine whatever order they arrive in.
   - **First response:** the first comment by a maintainer who isn't the
-    author and isn't a bot is recorded, and only moves earlier. A maintainer
-    is one by GitHub's association, or named in the new optional
-    `MAINTAINERS` setting (GitHub reports private org members as
-    contributors). It's recorded, not shown, until issues from outside the
-    org arrive.
+    author and isn't a bot is recorded, and only moves earlier. It's
+    recorded, not shown, until issues from outside the org arrive.
+  - **Maintainers:** a maintainer is one by GitHub's author association,
+    or, as GitHub reports a member with private membership as a
+    contributor, a member of the organisation by GitHub's API. That uses
+    the App's new **Members: Read-only** permission, and each answer is
+    kept for a day in `org_members`.
   - **Edge cases:** comments on pull requests are ignored. Deleted and
     transferred issues become tombstones that a late delivery can't revive.
 - Phase 4, slice 4, step 3 (#42): runner wait on the CI health page.

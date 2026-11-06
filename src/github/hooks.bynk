@@ -205,11 +205,33 @@ capability GitHubApi {
 		base: String,
 		head: String
 	) -> Effect[Result[Comparison, ApiFailure]]
+	---
+	Whether `login` belongs to `org` (the App's Members read permission): GitHub
+	answers 204 for a member, private or public, and 404 for anyone else.
+	---
+	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]]
 }
 
 provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
 	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]] {
 		openPullsFrom(installation, repo, 1, [])
+	}
+
+	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]] {
+		let url = "https://api.github.com/orgs/\(org)/members/\(login)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		if res.status == 204 {
+			Effect.pure(Ok(true))
+		} else if res.status == 404 {
+			Effect.pure(Ok(false))
+		} else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused whether \(login) belongs to \(org): \(refusal(res.status, res.body))",
+			}))
+		}
 	}
 
 	fn pull(
@@ -659,19 +681,24 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 
 // Records an issue from an `issues` or `issue_comment` delivery (#48). Both
 // carry the whole issue, so either refreshes its row and labels (see
-// `issueStatements` for the ordering rules); a comment that is a maintainer's
-// response (by association, or named in `MAINTAINERS`) may also set the
-// issue's first response. Comments on pull
-// requests are ignored. Open pages aren't told yet: the issues page and its
-// live events come in a later step.
-fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, Secrets {
-	let maintainers <- Secrets.get("MAINTAINERS")
-	let Ok(read) = issueOf(body, maintainers) else match {
+// `issueStatements` for the ordering rules). A comment by someone other than
+// the author, and not a bot, may also set the issue's first response, if
+// they're a maintainer: by GitHub's author association, or else by asking
+// GitHub whether they belong to the organisation (see `confirmed`). Comments
+// on pull requests are ignored. Open pages aren't told yet: the issues page
+// and its live events come in a later step.
+fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, GitHubApi, Clock {
+	let Ok(read) = issueOf(body) else match {
 		Err(why) => Logger.error("could not read issue from \(d.id): \(why)"),
 	}
 	let Some(news) = read else { Effect.pure(()) }
 	let i = news.issue
-	let responded: List[SqlStatement] = match news.response {
+	let nobody: Option[IssueResponse] = None
+	let response <- match news.response {
+		Some(r) => confirmed(d, i.repo, r),
+		None => Effect.pure(nobody),
+	}
+	let responded: List[SqlStatement] = match response {
 		Some(r) => [
 			SqlStatement {
 				sql: """
@@ -687,6 +714,76 @@ fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger,
 		Err(e) => Logger.error("could not record \(i.repo) issue #\(i.number): \(sqlError(e))"),
 	}
 	Effect.pure(())
+}
+
+// The response a comment is, if its author is a maintainer. GitHub's author
+// association settles it when it says `OWNER`, `MEMBER` or `COLLABORATOR`;
+// otherwise the organisation is asked (GitHub reports a member whose
+// membership is private as a `CONTRIBUTOR`), through the installation that
+// sent the delivery. If GitHub can't say, the comment isn't counted, and the
+// log says why.
+fn confirmed(
+	d: Delivery,
+	repo: String,
+	r: IssueResponse
+) -> Effect[Option[IssueResponse]] given Deliveries, Logger, GitHubApi, Clock {
+	let nobody: Option[IssueResponse] = None
+	let false = r.maintainer else { Effect.pure(Some(r)) }
+	let Some(installation) = d.installation else { Effect.pure(nobody) }
+	let org = repo.split("/").first().getOrElse(repo)
+	let Ok(member) <- orgMember(installation, org, r.by) else match {
+		Err(why) => {
+			let _ <- Logger.warn(
+				"could not tell whether \(r.by) belongs to \(org), so their comment on \(repo) isn't counted as a response: \(why)"
+			)
+			Effect.pure(nobody)
+		},
+	}
+	Effect.pure(if member { Some(r) } else { nobody })
+}
+
+// Whether `login` belongs to `org`, from an answer GitHub gave in the last
+// `MEMBER_RECHECK`, or else from GitHub (and then kept).
+fn orgMember(
+	installation: Int,
+	org: String,
+	login: String
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let who = login.toLower()
+	let now <- Clock.now()
+	let cached <- Deliveries.first(
+		"SELECT member FROM org_members WHERE org = ?1 AND login = ?2 AND checked_at >= ?3",
+		[Text(org), Text(who), Text((now - MEMBER_RECHECK).toIso())]
+	)
+	let known: Option[Bool] = match cached {
+		Ok(Some(row)) => match Json.decode[CachedMember](row) {
+			Ok(m) => Some(m.member == 1),
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let None = known else { Effect.pure(Ok(known == Some(true))) }
+	let Ok(member) <- GitHubApi.isMember(installation, org, login) else match {
+		Err(f) => Effect.pure(Err(f.message)),
+	}
+	// Keeping the answer is a saving, not a fact: if it can't be kept, the
+	// next comment asks again.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO org_members (org, login, member, checked_at) VALUES (?1, ?2, ?3, ?4)
+		ON CONFLICT (org, login) DO UPDATE SET member = excluded.member, checked_at = excluded.checked_at
+		""",
+		[Text(org), Text(who), Boolean(member), Text(now.toIso())]
+	)
+	Effect.pure(Ok(member))
+}
+
+// How long GitHub's answer on organisation membership is reused.
+const MEMBER_RECHECK: Duration = 1.days
+
+--- A cached membership answer.
+type CachedMember = {
+	member: Int,
 }
 
 // The statements that save an issue, so a run can save many in one batch.
