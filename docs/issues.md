@@ -62,6 +62,7 @@ prunes `deliveries`, not these).
     - **Not the "check membership" endpoint:** `GET /orgs/{org}/members/{login}`
       answers `404` both for a non-member and when it won't show the asker a
       private membership, so it once read private members as outsiders.
+      Migration `0016` forgot those answers.
     - **Caching:** the answer is kept in `org_members` and reused for a day.
     - **Failures:** if GitHub can't say (a missing permission, an outage), the
       comment isn't counted, and a warning says why.
