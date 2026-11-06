@@ -1,0 +1,106 @@
+// Phase 4, slice 3 (#36): the pure parts of matching a release to what it
+// shipped. Which pull request a commit on the default branch landed, from its
+// first line, and which release came before a new one.
+suite github.releases
+
+case "a squash merge names its pull request at the end of its first line" {
+	expect pullNumberOf(
+		"Crate hygiene A1: drop bynk's unused bynk-render dependency (#2943)"
+	) == Some(2943)
+	expect pullNumberOf(
+		"CI: record nextest JUnit per-test durations (C4a, #2940) (#2942)"
+	) == Some(2942)
+	expect pullNumberOf(
+		"Sync open pull requests daily (#28)\n\nA pullSync cron service (#26) lists…"
+	) == Some(28)
+}
+
+case "a revert names the reverting pull request, and a merge commit its own" {
+	expect pullNumberOf("Revert \"Drop the old flag (#12)\" (#15)") == Some(15)
+	expect pullNumberOf(
+		"Merge pull request #34 from bynk-lang/canary/bynk-v0.510.2\n\nMove to Bynk 0.510.2"
+	) == Some(34)
+}
+
+case "a commit that names no pull request is none" {
+	expect pullNumberOf("chore(stamp): assign version + ADR number(s) on merge") == None
+	expect pullNumberOf("Fix the thing (see #12)") == None
+	expect pullNumberOf("Bump (#x)") == None
+	expect pullNumberOf("") == None
+}
+
+case "what a comparison shipped: every SHA, and the pull requests its commits name" {
+	let shipped = shippedBy([
+		ComparedCommit {
+			sha: "aaa",
+			commit: CommitMessage { message: "One (#1)" },
+		},
+		ComparedCommit {
+			sha: "bbb",
+			commit: CommitMessage { message: "chore(stamp): assign version" },
+		},
+		ComparedCommit {
+			sha: "ccc",
+			commit: CommitMessage { message: "Two (#2)\n\nbody" },
+		},
+	])
+	expect shipped.shas == ["aaa", "bbb", "ccc"]
+	expect shipped.numbers == [1, 2]
+}
+
+---
+A release as GitHub lists it: its tag, whether it is a draft or a
+pre-release, and when it was published.
+---
+fn listed(tag: String, draft: Bool, prerelease: Bool, at: Option[String]) -> ReleasePayload {
+	ReleasePayload {
+		id: 1,
+		tag_name: tag,
+		name: Some(tag),
+		draft: draft,
+		prerelease: prerelease,
+		created_at: "2026-11-01T00:00:00Z",
+		published_at: at,
+		author: None,
+	}
+}
+
+--- v0.510.2, published at 15:33:58 on 5 November.
+fn current() -> ReleaseFact {
+	ReleaseFact {
+		repo: "bynk-lang/bynk",
+		action: "published",
+		releaseId: 1,
+		tag: "v0.510.2",
+		name: None,
+		draft: false,
+		prerelease: false,
+		createdAt: "2026-11-05T13:53:38.000Z",
+		publishedAt: Some("2026-11-05T15:33:58.000Z"),
+		authorIsBot: true,
+	}
+}
+
+case "the release before is the latest other final release published earlier, in any order" {
+	let releases = [
+		listed("v0.504.3", false, false, Some("2026-11-04T07:10:00Z")),
+		listed("v0.510.2", false, false, Some("2026-11-05T15:33:58Z")),
+		listed("v0.511.0-rc1", false, true, Some("2026-11-05T12:00:00Z")),
+		listed("v0.512.0", true, false, None),
+		listed("v0.508.4", false, false, Some("2026-11-04T21:16:39Z")),
+		listed("v0.520.0", false, false, Some("2026-11-06T09:00:00Z")),
+	]
+	expect previousFinal(current(), releases) == Some("v0.508.4")
+}
+
+case "a release with no earlier final release has none before it" {
+	expect previousFinal(
+		current(),
+		[listed("v0.510.2", false, false, Some("2026-11-05T15:33:58Z"))]
+	) == None
+	expect previousFinal(
+		current(),
+		[listed("v0.509.0-rc1", false, true, Some("2026-11-05T10:00:00Z"))]
+	) == None
+	expect previousFinal(current(), []) == None
+}

@@ -56,6 +56,7 @@ fn prIn(
 		updated_at: updated,
 		closed_at: ended,
 		merged_at: ended,
+		merge_commit_sha: None,
 		commits: None,
 		additions: None,
 		deletions: None,
