@@ -1,0 +1,99 @@
+commons github.jobs
+
+uses github.events
+uses github.runs
+
+---
+The parts of a `workflow_job` delivery the runner-wait figures need (#42).
+GitHub's payload carries the job's steps and much more; everything else is
+ignored.
+---
+type JobDelivery = {
+	workflow_job: JobPayload,
+	repository: RepoRef,
+}
+
+---
+`workflow_job` as GitHub sends it. `labels` names the runner it asked for
+(`ubuntu-latest`, `self-hosted`, …); `runner_id` and `runner_group_name` are
+known once a runner takes it. `conclusion` and `completed_at` arrive with
+`completed`. `started_at` only means a runner started it when a runner took
+it: a `queued` delivery carries `created_at` there, and so does a job
+cancelled before any runner took it (null or 0 `runner_id`). `waiting` is a
+job held for a protected environment's approval.
+---
+type JobPayload = {
+	id: Int,
+	run_id: Int,
+	run_attempt: Int,
+	workflow_name: Option[String],
+	name: String,
+	labels: List[String],
+	runner_group_name: Option[String],
+	runner_id: Option[Int],
+	status: String,
+	conclusion: Option[String],
+	created_at: String,
+	started_at: Option[String],
+	completed_at: Option[String],
+}
+
+---
+One job attempt, as `workflow_jobs` stores it, with times in the
+`received_at` format. `runner` is the first label it asked for (`unknown`
+when it asked for none). `startedAt` is set only once a runner has taken the
+job, and `completedAt` once it has completed. `approval` when this delivery
+says the job is waiting for a protected environment's approval.
+---
+type JobFact = {
+	jobId: Int,
+	repo: String,
+	runId: Int,
+	attempt: Int,
+	workflow: String,
+	name: String,
+	runner: String,
+	runnerGroup: Option[String],
+	status: String,
+	approval: Bool,
+	conclusion: Option[String],
+	createdAt: String,
+	startedAt: Option[String],
+	completedAt: Option[String],
+}
+
+---
+The job a `workflow_job` delivery describes, or why it couldn't be read.
+---
+fn jobOf(body: Bytes) -> Result[JobFact, String] {
+	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
+	let Ok(p) = Json.decode[JobDelivery](text) else match {
+		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
+	}
+	let j = p.workflow_job
+	let Some(created) = isoTime(j.created_at) else {
+		Err("created_at is not a time: \(j.created_at)")
+	}
+	let ranOnARunner = j.runner_id.getOrElse(0) > 0
+	let started = ranOnARunner && (j.status == "in_progress" || j.status == "completed")
+	Ok(JobFact {
+		jobId: j.id,
+		repo: p.repository.full_name,
+		runId: j.run_id,
+		attempt: j.run_attempt,
+		workflow: j.workflow_name.getOrElse(""),
+		name: j.name,
+		runner: j.labels.first().getOrElse("unknown"),
+		runnerGroup: j.runner_group_name.filter((g) => g != ""),
+		status: j.status,
+		approval: j.status == "waiting",
+		conclusion: j.conclusion,
+		createdAt: created,
+		startedAt: if started { j.started_at.andThen((t) => isoTime(t)) } else { None },
+		completedAt: if j.status == "completed" {
+			j.completed_at.andThen((t) => isoTime(t))
+		} else {
+			None
+		},
+	})
+}

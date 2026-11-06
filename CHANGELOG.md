@@ -43,6 +43,21 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 4, step 1 (#42): job facts for runner wait.
+  - **Recording:** `workflow_job` deliveries become `workflow_jobs` rows
+    (migration `0011`), one per job attempt, moving only forward. Each row
+    holds the runner label it asked for, its runner group, and when it was
+    queued, started and completed. `started_at` is kept only once a runner
+    has taken the job, so neither a queued job nor one cancelled before a
+    runner took it reads as a zero wait. A job held for a protected
+    environment's approval is marked (`approval`), and its wait isn't
+    counted as a wait for a runner.
+  - **Retention:** job deliveries are kept 7 days. Job rows are kept 90 days;
+    then each day is rolled up into `workflow_job_days` (jobs, failures,
+    approval-gated jobs, and the sums, medians and 95th percentiles of waits
+    and durations) and pruned,
+    one day a run.
+  - **Setup:** the App must be subscribed to **Workflow job** events.
 - Phase 4, slice 3, step 4 (#36): the releases page at `/releases`, linked to
   and from `/` and `/prs`. For each repository with a release:
   - tiles for releases, the time since the last, merge to release, what's
