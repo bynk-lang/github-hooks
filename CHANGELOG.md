@@ -43,24 +43,29 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
-- Phase 4, slice 6, step 1 (#53): maintainer sign-in.
-  - **Sign-in:** maintainers sign in through Cloudflare Access as an OIDC
-    provider (GitHub its only login method). The page uses PKCE, and the
-    Worker exchanges the code at Access (`POST /maintainers/token`), as
-    Access's token endpoint refuses browsers.
-  - **The actor:** a `Maintainer` actor (Bynk's `Oidc`, with `trustFrom =
-    "MAINTAINER_OIDC"`) verifies Access's ID token.
-  - **`GET /maintainers/me`:** answers with the person's GitHub login, from
-    the token's `login` claim only, once GitHub confirms they belong to the
-    organisation. A membership answer kept from the last day is used first;
-    otherwise the installation to ask with is found per repository, through
-    the repository index.
+- Phase 4, slice 6, step 1 (#53): maintainer sign-in with GitHub.
+  - **Sign-in:** maintainers sign in through the GitHub App's user
+    authorisation, with PKCE. The Worker exchanges the code with the App's
+    client secret (`POST /maintainers/token`), reads the login from GitHub's
+    `GET /user`, and issues its own token once GitHub confirms they belong to
+    the organisation. GitHub's user token is never kept.
+  - **The actor:** a `Maintainer` actor (Bynk's `Bearer`, signed with the new
+    `MAINTAINER_TOKEN_SECRET`) verifies that token, whose subject is the
+    GitHub login. `bynk token Maintainer` mints one for testing.
+  - **`GET /maintainers/me`:** answers with the person's GitHub login, once
+    GitHub confirms they still belong. A membership answer kept from the last
+    day is used first; otherwise the installation to ask with is found per
+    repository, through the repository index.
   - **The code exchange:** the redirect URI must be the callback on the
     origin the request came to.
   - **The pages:** every dashboard gains a sign-in link, and
     `/maintainers/callback` finishes the sign-in.
-  - **Testing:** `scripts/oidc.mjs` checks the token handling end to end
-    against a fake issuer, in CI's smoke job.
+  - **Settings:** `APP_CLIENT_SECRET` and `MAINTAINER_TOKEN_SECRET`, alongside
+    the existing `APP_CLIENT_ID`.
+  - **Testing:** CI's smoke job checks the token handling end to end, with
+    tokens from `bynk token Maintainer`.
+  - **Cloudflare Access, dropped:** the first version signed in through
+    Access, whose GitHub login method never passes on the GitHub login.
 - Phase 4, slice 5, step 4 (#48): the issues page at `/issues`, a fourth
   dashboard tab linked from the others.
   - **Each repository:** headline tiles (opened, closed by reason, time to

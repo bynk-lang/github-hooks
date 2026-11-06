@@ -1,39 +1,30 @@
 commons github.maintainers
 
+uses github.app
+
 ---
 The maintainers view (#53): who is signed in, and the sign-in settings the
-pages and the Worker share. Maintainers sign in through Cloudflare Access as
-an OIDC provider (GitHub its only login method), and the `Maintainer` actor
-verifies the ID token Access issues.
+pages and the Worker share. Maintainers sign in with GitHub, through the
+GitHub App's user authorisation. The Worker reads their login from GitHub,
+checks they belong to the organisation, and issues its own short-lived token,
+which the `Maintainer` actor verifies. A maintainer's identity is their GitHub
+login.
 ---
 type MaintainerId = String where NonEmpty
 
 ---
-Where the maintainer token's trust comes from, as the `MAINTAINER_OIDC`
-setting holds it (Bynk's `trustFrom`): the Access application's issuer, its
-JWKS, and its client id as the audience.
----
-type OidcTrust = {
-	issuer: String,
-	jwks: String,
-	audience: Option[String],
-}
-
----
 `GET /maintainers/config`: what the page needs to start a sign-in, all
-public. `authorization_endpoint` is where it sends the browser,
-`client_id` names the Access application, and `logout_url` signs out of
-Access too.
+public. `authorization_endpoint` is where it sends the browser, and
+`client_id` is the GitHub App's client ID.
 ---
 type SignInConfig = {
 	authorization_endpoint: String,
 	client_id: String,
-	logout_url: String,
 }
 
 ---
-`POST /maintainers/token`'s body: the code Access sent back, the PKCE verifier
-the page kept, and the redirect URI the sign-in used.
+`POST /maintainers/token`'s body: the code GitHub sent back, the PKCE
+verifier the page kept, and the redirect URI the sign-in used.
 ---
 type TokenRequest = {
 	code: String,
@@ -41,60 +32,50 @@ type TokenRequest = {
 	redirect_uri: String,
 }
 
---- `POST /maintainers/token`'s answer: the ID token, and how long it lasts.
+---
+`POST /maintainers/token`'s answer: this service's token for the maintainer,
+how many seconds it lasts, and whose it is.
+---
 type SignedIn = {
-	id_token: String,
-	expires_in: Option[Int],
+	token: String,
+	expires_in: Int,
+	login: String,
 }
 
---- Access's token endpoint's answer, success or error.
-type AccessTokenReply = {
-	id_token: Option[String],
-	expires_in: Option[Int],
+---
+GitHub's answer when a sign-in code is exchanged: a user access token, or an
+error. GitHub answers `200` either way.
+---
+type GitHubTokenReply = {
+	access_token: Option[String],
 	error: Option[String],
 	error_description: Option[String],
 }
 
----
-`GET /maintainers/me`: who is signed in. `login` is their GitHub login, from
-the token's `login` claim; `claims` names which of `reportedClaims` were
-present, so a missing login can be diagnosed.
----
-type Me = {
-	sub: String,
+--- The signed-in user, as GitHub's `GET /user` describes them.
+type GitHubUser = {
 	login: String,
-	email: Option[String],
-	name: Option[String],
-	claims: List[String],
 }
 
----
-The bynk-lang Access application's trust, declared on the actor and used
-when `MAINTAINER_OIDC` is unset. Public identifiers, not secrets.
----
-const ACCESS_ISSUER: String = "https://bynk-lang.cloudflareaccess.com/cdn-cgi/access/sso/oidc/fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a"
-
-const ACCESS_CLIENT_ID: String = "fba9900eff8cefeca28cc95d364cae191a747ead0d670a9d11c0c88451869d0a"
+--- `GET /maintainers/me`: who is signed in, by GitHub login.
+type Me = {
+	login: String,
+}
 
 --- The organisation whose members are maintainers.
 const MAINTAINER_ORG: String = "bynk-lang"
 
----
-The claim a maintainer's GitHub login must arrive in: the custom claim the
-Access application maps from the GitHub login method's login attribute
-(docs/maintainers.md). Only this one authorises. Generic claims such as
-`preferred_username` or `nickname` depend on Access's configuration and could
-carry something the user controls, which would let one member act as another.
----
-const LOGIN_CLAIM: String = "login"
+--- Where the page sends the browser to sign in with GitHub.
+const GITHUB_AUTHORIZE: String = "https://github.com/login/oauth/authorize"
+
+--- Where the Worker exchanges a sign-in code.
+const GITHUB_TOKEN_URL: String = "https://github.com/login/oauth/access_token"
 
 ---
-The claims `/maintainers/me` names when it refuses a token without a login,
-so the first sign-in shows what Access sent. Only `LOGIN_CLAIM` is trusted.
+How long a maintainer's token lasts: a working day. Membership is checked
+again on each request, so leaving the organisation ends access sooner.
 ---
-fn reportedClaims() -> List[String] {
-	["login", "github_login", "preferred_username", "nickname", "email", "name"]
-}
+const SESSION_SECONDS: Int = 28800
 
 ---
 Whether `uri` is this service's sign-in callback, on the origin the request
@@ -108,40 +89,13 @@ fn isOwnCallback(uri: String, host: String) -> Bool {
 }
 
 ---
-The trust in force: `MAINTAINER_OIDC` when it is set and reads as `OidcTrust`,
-else the declared Access application.
+The form GitHub's token endpoint takes for a code: the App's client ID and
+secret, the code, and the PKCE verifier and redirect URI it was issued for.
 ---
-fn trustOf(setting: Option[String]) -> OidcTrust {
-	let declared = OidcTrust {
-		issuer: ACCESS_ISSUER,
-		jwks: "\(ACCESS_ISSUER)/jwks",
-		audience: Some(ACCESS_CLIENT_ID),
-	}
-	let Some(text) = setting else { declared }
-	match Json.decode[OidcTrust](text) {
-		Ok(t) => t,
-		Err(_) => declared,
-	}
-}
-
----
-The page's sign-in settings, from the trust: Access names each endpoint under
-the issuer, and signs out at its team domain's `/cdn-cgi/access/logout`.
----
-fn signInConfigOf(t: OidcTrust) -> SignInConfig {
-	let team = t.issuer.split("/cdn-cgi/").first().getOrElse(t.issuer)
-	SignInConfig {
-		authorization_endpoint: "\(t.issuer)/authorization",
-		client_id: t.audience.getOrElse(ACCESS_CLIENT_ID),
-		logout_url: "\(team)/cdn-cgi/access/logout",
-	}
-}
-
---- The form Access's token endpoint takes for a PKCE code, with no secret.
-fn tokenForm(clientId: String, r: TokenRequest) -> String {
+fn tokenForm(clientId: String, clientSecret: String, r: TokenRequest) -> String {
 	let pairs = [
-		["grant_type", "authorization_code"],
 		["client_id", clientId],
+		["client_secret", clientSecret],
 		["code", r.code],
 		["code_verifier", r.code_verifier],
 		["redirect_uri", r.redirect_uri],
@@ -151,4 +105,28 @@ fn tokenForm(clientId: String, r: TokenRequest) -> String {
 			(p) => "\(p.first().getOrElse("").percentEncode())=\(p.get(1).getOrElse("").percentEncode())"
 		)
 		.fold("", (all, part) => if all == "" { part } else { "\(all)&\(part)" })
+}
+
+--- A maintainer token's claims: whose it is, and when it was issued and ends.
+type SessionClaims = {
+	sub: String,
+	iat: Int,
+	exp: Int,
+}
+
+const SESSION_HEADER: String = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"
+
+---
+The part of a maintainer token that is signed: an HS256 JWT's header and
+claims, for `login`, issued at `now` and lasting `SESSION_SECONDS`. The
+`Maintainer` actor (Bynk's `Bearer`) verifies the signature, `exp` and `nbf`.
+---
+fn sessionSigningInput(login: String, now: Instant) -> String {
+	let seconds = now.toEpochMillis() / 1000
+	let claims = SessionClaims {
+		sub: login,
+		iat: seconds,
+		exp: seconds + SESSION_SECONDS,
+	}
+	"\(base64Url(SESSION_HEADER)).\(base64Url(Json.encode(claims)))"
 }

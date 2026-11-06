@@ -40,9 +40,8 @@ jobs:
           version-file: ${{ !inputs.version && 'BYNK_VERSION' || '' }}
       - name: Serve the Worker
         run: |
-          # The maintainer sign-in trusts a fake issuer that scripts/oidc.mjs serves.
           bynk dev -- --var APP_WEBHOOK_SECRET:ci-secret --var API_TOKEN_SECRET:ci-api \
-            --var 'MAINTAINER_OIDC:{"issuer":"http://localhost:9999/oidc/test-client","jwks":"http://localhost:9999/oidc/test-client/jwks","audience":"test-client"}' \
+            --var MAINTAINER_TOKEN_SECRET:ci-maintainer \
             > dev.log 2>&1 &
           for _ in $(seq 1 90); do
             curl -sf -o /dev/null http://localhost:8787/ && exit 0
@@ -55,7 +54,7 @@ jobs:
           APP_WEBHOOK_SECRET: ci-secret
           API_TOKEN_SECRET: ci-api
           SMOKE_LIVE: "1"
-          SMOKE_OIDC: "1"
+          MAINTAINER_TOKEN_SECRET: ci-maintainer
       - name: Worker log
         if: always()
         run: cat dev.log

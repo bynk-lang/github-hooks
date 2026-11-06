@@ -3,13 +3,14 @@
 # answers. Each is signed exactly as GitHub signs one: HMAC-SHA256 of the raw
 # body under the webhook secret, sent as `X-Hub-Signature-256: sha256=<hex>`.
 #
-#   [APP_WEBHOOK_SECRET=…] [API_TOKEN_SECRET=…] scripts/smoke.sh [base-url]
+#   [APP_WEBHOOK_SECRET=…] [API_TOKEN_SECRET=…] [MAINTAINER_TOKEN_SECRET=…] scripts/smoke.sh [base-url]
 #
 # The secrets come from the environment, under the names the Worker uses, so
 # they never appear in a process's arguments. APP_WEBHOOK_SECRET defaults to
 # `dev-secret`, to suit `bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret`. With
 # API_TOKEN_SECRET set, it also checks the read API's token handling, minting
-# tokens with `bynk token Reader`.
+# tokens with `bynk token Reader`; with MAINTAINER_TOKEN_SECRET set, the
+# maintainer routes', with `bynk token Maintainer`.
 set -eu
 
 BASE=${1:-http://localhost:8787}
@@ -120,10 +121,26 @@ if [ "${SMOKE_LIVE:-}" = 1 ]; then
   APP_WEBHOOK_SECRET=$APP_WEBHOOK_SECRET node "$(dirname "$0")/live.mjs" "$BASE" || failed=1
 fi
 
-# The maintainer sign-in's token check, against a fake issuer: the Worker must
-# have been started trusting it (see scripts/oidc.mjs).
-if [ "${SMOKE_OIDC:-}" = 1 ]; then
-  WORKER_URL=$BASE node "$(dirname "$0")/oidc.mjs" || failed=1
+# The maintainer sign-in (#53). A foreign callback is refused before anything
+# else. With MAINTAINER_TOKEN_SECRET set (as the Worker has it),
+# `bynk token Maintainer` mints tokens to check the token handling: a valid one
+# gets past the check to the membership question, which a local Worker can't
+# answer (no App key), so it is unavailable rather than refused.
+foreign=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
+  -d '{"code":"x","code_verifier":"y","redirect_uri":"https://evil.example/maintainers/callback"}' \
+  "$BASE/maintainers/token") || foreign=000
+check 400 "$foreign" "a sign-in code for another site's callback is refused"
+if [ -n "${MAINTAINER_TOKEN_SECRET:-}" ]; then
+  MTOKEN=$(bynk token Maintainer --sub smoke-maintainer --lifetime 5m --input "$PROJECT")
+  MWRONG=$(MAINTAINER_TOKEN_SECRET=not-the-secret bynk token Maintainer --sub smoke-maintainer --input "$PROJECT")
+  MEXPIRED=$(bynk token Maintainer --sub smoke-maintainer --expired --input "$PROJECT")
+  # A reader's token is signed with another secret, so it is no maintainer's.
+  RTOKEN=$(API_TOKEN_SECRET=${API_TOKEN_SECRET:-dev-api} bynk token Reader --sub smoke --lifetime 5m --input "$PROJECT")
+  get 401 "asking who is signed in without a token is refused" /maintainers/me
+  get 401 "a maintainer token signed with the wrong secret is refused" /maintainers/me "$MWRONG"
+  get 401 "an expired maintainer token is refused" /maintainers/me "$MEXPIRED"
+  get 401 "a reader's token is not a maintainer's" /maintainers/me "$RTOKEN"
+  get 503 "a valid maintainer token reaches the membership check" /maintainers/me "$MTOKEN"
 fi
 
 exit $failed
