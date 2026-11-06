@@ -176,10 +176,10 @@ each public repository it shows:
   stage (ready, in the queue, draft), how long it has waited, and a stale flag.
 
 Like the CI page it polls (open pull requests every 30 seconds, the window's
-figures every minute) and listens on the live feed, refetching both 31 seconds
-after a pull request changes, once any copy cached before the change has
-expired (the same rule as the CI page; see
-[ci-metrics.md](ci-metrics.md#live-feed)).
+figures every minute) and listens on the live feed, refetching both when the
+event's `refetch_ms` says: 3 seconds after a change the Worker purged from the
+edge cache, or 31 seconds when the purge was throttled (the same rule as the
+CI page; see [ci-metrics.md](ci-metrics.md#live-feed)).
 
 ## Live feed
 
@@ -189,8 +189,8 @@ Pull requests share the CI page's live feed (`/live?board=ci`; see
 and its state as `conclusion`:
 
 ```json
-{"kind": "pull", "repo": "bynk-lang/bynk", "number": 2961, "path": "", "workflow": "",
- "run_id": 0, "attempt": 0, "status": "ready_for_review", "conclusion": "open"}
+{"refetch_ms": 3000, "kind": "pull", "repo": "bynk-lang/bynk", "number": 2961, "path": "",
+ "workflow": "", "run_id": 0, "attempt": 0, "status": "ready_for_review", "conclusion": "open"}
 ```
 
 It is sent for a delivery's first arrival only (a redelivery tells nothing

@@ -153,8 +153,14 @@ Something that changed, pushed to every open page so it refreshes at once.
 `status` is the delivery's action and `conclusion` the PR's state; the run
 fields are empty). Frames are Bynk's JSON, where an `Option` would be tagged,
 so plain values keep the pages simple.
+
+`refetch_ms` is how long a page should wait before refetching to be sure of
+seeing the change: a few seconds when the metrics routes' edge cache was
+purged for it, or until any copy cached before it has expired when the purge
+was throttled or refused.
 ---
 type LiveEvent = {
+	refetch_ms: Int,
 	kind: String,
 	repo: String,
 	number: Int,

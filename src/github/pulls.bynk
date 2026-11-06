@@ -232,6 +232,7 @@ The live-feed event for a pull request that changed.
 ---
 fn pullEventOf(p: PullFact) -> LiveEvent {
 	LiveEvent {
+		refetch_ms: 0,
 		kind: "pull",
 		repo: p.repo,
 		number: p.number,

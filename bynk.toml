@@ -9,6 +9,8 @@ include = ["src", "tests"]
 
 # Phase 3 signs the GitHub App's JWT with RS256 through `bynk.crypto`, which is
 # experimental (still so in Bynk v0.508.4). The public metrics routes are
-# rate-limited per address with `bynk.cloudflare.RateLimit`, also experimental.
+# rate-limited per address with `bynk.cloudflare.RateLimit`, and cached at
+# Cloudflare's edge, purged on each change, with `bynk.cloudflare.EdgeCache`:
+# both also experimental.
 [unstable]
-allow = ["bynk.crypto", "bynk.cloudflare.RateLimit", "bynk.cloudflare.RateLimit.allow"]
+allow = ["bynk.crypto", "bynk.cloudflare.RateLimit", "bynk.cloudflare.RateLimit.allow", "bynk.cloudflare.EdgeCache", "bynk.cloudflare.EdgeCache.purge"]
