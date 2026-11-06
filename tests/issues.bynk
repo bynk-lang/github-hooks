@@ -458,6 +458,71 @@ case "a transferred issue becomes a tombstone in the repository it left" {
 	expect none == Ok(Some("{\"n\":0}"))
 }
 
+case "an issue's author whom GitHub reports as a contributor is a maintainer if the org says they belong to it" {
+	// GitHub reports a member whose membership is private as a CONTRIBUTOR.
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 204, headers: Map.empty(), body: "" })
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "private-author"),
+		Bytes.fromUtf8(closedIssue.replace(
+			"\"author_association\": \"MEMBER\"",
+			"\"author_association\": \"CONTRIBUTOR\""
+		))
+	) by GitHub
+	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
+	let issue <- Deliveries.first("SELECT author_association, author_maintainer FROM issues", [])
+	expect issue == Ok(Some("{\"author_association\":\"CONTRIBUTOR\",\"author_maintainer\":1}"))
+}
+
+case "an issue's author outside the org isn't a maintainer; a member by association isn't looked up" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "outsider"),
+		Bytes.fromUtf8(closedIssue.replace(
+			"\"author_association\": \"MEMBER\"",
+			"\"author_association\": \"NONE\""
+		))
+	) by GitHub
+	let outside <- Deliveries.first("SELECT author_maintainer FROM issues", [])
+	expect outside == Ok(Some("{\"author_maintainer\":0}"))
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "member"),
+		Bytes.fromUtf8(closedIssue.replace("\"number\": 2982", "\"number\": 2983"))
+	) by GitHub
+	expect GitHubHttp.get called once
+	let member <- Deliveries.first("SELECT author_maintainer FROM issues WHERE number = 2983", [])
+	expect member == Ok(Some("{\"author_maintainer\":1}"))
+}
+
+case "if the org can't say whether an author belongs to it, the issue is recorded, keeping what was known, and the log says why" {
+	stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 204, headers: Map.empty(), body: "" }), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })]
+	let contributor = closedIssue.replace(
+		"\"author_association\": \"MEMBER\"",
+		"\"author_association\": \"CONTRIBUTOR\""
+	)
+	let _ <- api.POST("/github", headers("issues", "known"), Bytes.fromUtf8(contributor)) by GitHub
+	// The answer is older than a day now, and GitHub fails.
+	let aged <- Deliveries.run("UPDATE org_members SET checked_at = '2026-01-01T00:00:00.000Z'", [])
+	expect aged is Ok(_)
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "later"),
+		Bytes.fromUtf8(contributor.replace(
+			"\"updated_at\": \"2026-11-06T08:51:18Z\"",
+			"\"updated_at\": \"2026-11-06T10:00:00Z\""
+		))
+	) by GitHub
+	expect Logger.warn called once
+	let issue <- Deliveries.first("SELECT updated_at, author_maintainer FROM issues", [])
+	expect issue == Ok(Some("{\"updated_at\":\"2026-11-06T10:00:00.000Z\",\"author_maintainer\":1}"))
+}
+
 case "an issue opened by a bot is marked as a bot's" {
 	let _ <- api.POST(
 		"/github",
@@ -469,8 +534,10 @@ case "an issue opened by a bot is marked as a bot's" {
 			)
 		)
 	) by GitHub
-	let issue <- Deliveries.first("SELECT author, author_is_bot FROM issues", [])
-	expect issue == Ok(Some("{\"author\":\"github-actions[bot]\",\"author_is_bot\":1}"))
+	// A bot is never a maintainer, so the org isn't asked.
+	expect GitHubHttp.get never called
+	let issue <- Deliveries.first("SELECT author, author_is_bot, author_maintainer FROM issues", [])
+	expect issue == Ok(Some("{\"author\":\"github-actions[bot]\",\"author_is_bot\":1,\"author_maintainer\":0}"))
 }
 
 case "a redelivered issue changes nothing" {

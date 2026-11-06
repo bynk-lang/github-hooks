@@ -83,6 +83,9 @@ get 200 "the releases page is public" /releases
 get 200 "runner waits are public" "/metrics/runners?days=30"
 get 200 "jobs waiting now are public" /metrics/runners/now
 get 400 "a runners window other than 7, 30 or 90 days is refused" "/metrics/runners?days=14"
+get 200 "issue flow is public" "/metrics/issues?days=30"
+get 200 "the open issue backlog is public" /metrics/issues/open
+get 400 "an issues window other than 7, 30 or 90 days is refused" "/metrics/issues?days=14"
 get 400 "a releases window other than 7, 30 or 90 days is refused" "/metrics/releases?days=14"
 get 400 "a CI window longer than 90 days is refused" "/metrics/ci?days=91"
 get 400 "a CI window other than 7, 30 or 90 days is refused" "/metrics/ci?days=14"

@@ -1,0 +1,355 @@
+// Phase 4, slice 5, step 3 (#48): the issue-response routes, against an
+// in-memory D1 with the migrations applied and a hand-built set of issues
+// whose figures are worked out below. The clock is 2026-11-05T12:00:00Z, so
+// the 7-day window opens at 2026-10-29T12:00:00Z; "a day ago" is
+// 2026-11-04T12:00, "a week ago" 2026-10-29T12:00, "a month ago" (30 days)
+// 2026-10-06T12:00, and an issue is stale if not updated since 2026-10-22T12:00.
+suite github.hooks
+
+env {
+	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
+}
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+--- A viewer's request headers: one address, well within the limit.
+fn viewer() -> RequestHeaders {
+	RequestHeaders.of(["CF-Connecting-IP: 203.0.113.7"])
+}
+
+---
+`bynk-lang/bynk`'s issues, all by the maintainer (`MEMBER`) unless noted.
+
+In the week: #1 closed as completed after 6 h (labelled `bug`), #2 after a day
+(`bug`, `accepted`), #3 after an hour (no label); #4 and #16 closed as not
+planned and #5 as a duplicate; #6, opened before the week, closed in it after 13 days
+(`track`); #12, by an outsider (`NONE`), answered by a maintainer after 2 h
+and closed as completed after a day (`bug`). So 5 completed, taking 3,600,
+21,600, 86,400, 86,400 and 1,123,200 s: p50 86,400, p90 1,123,200. Opened in
+the week by people: #1, #2, #3, #4, #5, #7, #9, #12, #13, #14, #16 and #18
+(12). #17, a bot's, opened before the week and closed in it, counts nowhere.
+
+Outsiders: #12 (answered), #13 (`NONE`, open, unanswered) and #16 (closed
+unanswered, so not waiting). #14's author is a
+`CONTRIBUTOR` whom GitHub confirmed as an org member when the issue was
+recorded (`author_maintainer`), so not an outsider.
+
+Open now, by people: #7 (opened 26 h ago), #8 (opened 1 Oct, last updated 10
+Oct: stale; `proposal`, `enhancement`), #9 (6 h ago), #10 (opened 15 Oct,
+updated 1 Nov), #13, #14 and #18 (reopened: open, with no close time). #11 is
+a bot's (open), #15 a deleted tombstone; the private and excluded
+repositories have issues too, never shown.
+---
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state, state_reason,
+				                    opened_at, closed_at, updated_at, comments, first_response_at, first_responder) VALUES
+				  ('bynk-lang/bynk', 1, 'One', 'accuser', 0, 'MEMBER', 'closed', 'completed',
+				   '2026-11-01T00:00:00.000Z', '2026-11-01T06:00:00.000Z', '2026-11-01T06:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 2, 'Two', 'accuser', 0, 'MEMBER', 'closed', 'completed',
+				   '2026-11-02T00:00:00.000Z', '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 3, 'Three', 'accuser', 0, 'MEMBER', 'closed', 'completed',
+				   '2026-11-03T00:00:00.000Z', '2026-11-03T01:00:00.000Z', '2026-11-03T01:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 4, 'Four', 'accuser', 0, 'MEMBER', 'closed', 'not_planned',
+				   '2026-11-03T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 5, 'Five', 'accuser', 0, 'MEMBER', 'closed', 'duplicate',
+				   '2026-11-04T00:00:00.000Z', '2026-11-04T02:00:00.000Z', '2026-11-04T02:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 6, 'Six', 'accuser', 0, 'MEMBER', 'closed', 'completed',
+				   '2026-10-20T00:00:00.000Z', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 7, 'Seven', 'accuser', 0, 'MEMBER', 'open', NULL,
+				   '2026-11-04T10:00:00.000Z', NULL, '2026-11-04T10:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 8, 'Eight', 'accuser', 0, 'MEMBER', 'open', NULL,
+				   '2026-10-01T00:00:00.000Z', NULL, '2026-10-10T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 9, 'Nine', 'accuser', 0, 'MEMBER', 'open', NULL,
+				   '2026-11-05T06:00:00.000Z', NULL, '2026-11-05T06:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 10, 'Ten', 'accuser', 0, 'MEMBER', 'open', NULL,
+				   '2026-10-15T00:00:00.000Z', NULL, '2026-11-01T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 11, 'Eleven', 'github-actions[bot]', 1, 'NONE', 'open', NULL,
+				   '2026-11-02T00:00:00.000Z', NULL, '2026-11-02T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 12, 'Twelve', 'a-reader', 0, 'NONE', 'closed', 'completed',
+				   '2026-11-02T00:00:00.000Z', '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', 1,
+				   '2026-11-02T02:00:00.000Z', 'accuser'),
+				  ('bynk-lang/bynk', 13, 'Thirteen', 'another-reader', 0, 'NONE', 'open', NULL,
+				   '2026-11-04T00:00:00.000Z', NULL, '2026-11-04T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 14, 'Fourteen', 'Private-Maint', 0, 'CONTRIBUTOR', 'open', NULL,
+				   '2026-11-04T00:00:00.000Z', NULL, '2026-11-04T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 15, 'Fifteen', 'accuser', 0, 'MEMBER', 'deleted', NULL,
+				   '2026-11-03T00:00:00.000Z', NULL, '2026-11-03T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 16, 'Sixteen', 'third-reader', 0, 'NONE', 'closed', 'not_planned',
+				   '2026-11-03T06:00:00.000Z', '2026-11-04T06:00:00.000Z', '2026-11-04T06:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 17, 'Seventeen', 'github-actions[bot]', 1, 'NONE', 'closed', 'completed',
+				   '2026-10-25T00:00:00.000Z', '2026-11-04T08:00:00.000Z', '2026-11-04T08:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/bynk', 18, 'Eighteen', 'accuser', 0, 'MEMBER', 'open', 'reopened',
+				   '2026-11-01T00:00:00.000Z', NULL, '2026-11-02T00:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/secret', 1, 'Secret', 'accuser', 0, 'MEMBER', 'closed', 'completed',
+				   '2026-11-01T00:00:00.000Z', '2026-11-01T01:00:00.000Z', '2026-11-01T01:00:00.000Z', 0, NULL, NULL),
+				  ('bynk-lang/sandbox', 1, 'Sandbox', 'accuser', 0, 'MEMBER', 'open', NULL,
+				   '2026-09-01T00:00:00.000Z', NULL, '2026-09-01T00:00:00.000Z', 0, NULL, NULL)
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: "UPDATE issues SET author_maintainer = 1 WHERE repo = 'bynk-lang/bynk' AND number = 14",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO issue_labels (repo, number, label) VALUES
+				  ('bynk-lang/bynk', 1, 'bug'), ('bynk-lang/bynk', 2, 'bug'), ('bynk-lang/bynk', 2, 'accepted'),
+				  ('bynk-lang/bynk', 6, 'track'), ('bynk-lang/bynk', 12, 'bug'),
+				  ('bynk-lang/bynk', 8, 'proposal'), ('bynk-lang/bynk', 8, 'enhancement')
+			""",
+			params: [],
+		},
+	]
+}
+
+case "a week of issues: opened, closed by reason, time to close, and outsiders' responses" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues", IssueQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.since == "2026-10-29T12:00:00.000Z"
+	expect m.until == "2026-11-05T12:00:00.000Z"
+	expect m.data_since == Some("2026-11-01T01:00:00.000Z")
+	expect m.repos == [
+		IssueFlow {
+			repo: "bynk-lang/bynk",
+			opened: 12,
+			completed: 5,
+			not_planned: 2,
+			duplicate: 1,
+			close_p50_seconds: Some(86400),
+			close_p90_seconds: Some(1123200),
+			outside_opened: 3,
+			outside_responded: 1,
+			outside_waiting: 1,
+			response_p50_seconds: Some(7200),
+			response_p90_seconds: Some(7200),
+			bots_opened: 1,
+		},
+	]
+}
+
+case "time to close by label, with unlabelled issues as no label, busiest first" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues", IssueQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.labels.map(
+		(l) => "\(l.label.getOrElse("(none)")) \(l.completed) \(l.p50_seconds.getOrElse(0)) \(l.p90_seconds.getOrElse(0))"
+	) == [
+		"bug 3 86400 86400",
+		"accepted 1 86400 86400",
+		"track 1 1123200 1123200",
+		"(none) 1 3600 3600",
+	]
+}
+
+case "percentiles are nearest rank: of ten closes, the median is the fifth and the 90th the ninth" {
+	// Ten issues opened in the week, each closed after its number of hours.
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/bynk', 1, 'main')",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					WITH RECURSIVE n (k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM n WHERE k < 10)
+					INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state, state_reason,
+					                    opened_at, closed_at, updated_at, comments)
+					SELECT 'bynk-lang/bynk', k, 'Issue', 'accuser', 0, 'MEMBER', 'closed', 'completed',
+					       '2026-11-01T00:00:00.000Z',
+					       strftime('%Y-%m-%dT%H:%M:%fZ', '2026-11-01T00:00:00.000Z', '+' || k || ' hours'),
+					       '2026-11-02T00:00:00.000Z', 0
+					FROM n
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues", IssueQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.repos.map(
+		(f) => "\(f.completed) \(f.close_p50_seconds.getOrElse(0)) \(f.close_p90_seconds.getOrElse(0))"
+	) == ["10 18000 32400"]
+}
+
+case "issues by people opened and closed on each UTC day" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues", IssueQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.daily.map(
+		(d) => "\(d.day) \(d.opened)/\(d.closed)"
+	) == ["2026-11-01 2/1", "2026-11-02 2/1", "2026-11-03 3/3", "2026-11-04 4/3", "2026-11-05 1/0"]
+}
+
+case "a repository filter narrows the figures; private and excluded repositories are never shown" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let other <- api.GET(
+		"/metrics/issues",
+		IssueQuery {
+			repo: Some("bynk-lang/shop"),
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(o) = other else {
+		expect false
+	}
+	expect o.repos.length() == 0
+	expect o.labels.length() == 0
+	expect o.daily.length() == 0
+	let sandbox <- api.GET(
+		"/metrics/issues/open",
+		NowQuery { repo: Some("bynk-lang/sandbox") },
+		viewer()
+	) by Visitor
+	let Ok(s) = sandbox else {
+		expect false
+	}
+	expect s.backlog.length() == 0
+	expect s.stale.length() == 0
+	let all <- api.GET(
+		"/metrics/issues",
+		IssueQuery {
+			repo: Some("Bynk-Lang/Bynk"),
+			days: 30,
+		},
+		viewer()
+	) by Visitor
+	let Ok(a) = all else {
+		expect false
+	}
+	expect a.repos.map((f) => f.repo) == ["bynk-lang/bynk"]
+}
+
+case "the open backlog by age, and the stale issues with their labels" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(o) = r else {
+		expect false
+	}
+	expect o.backlog == [
+		IssueBacklog {
+			repo: "bynk-lang/bynk",
+			open: 7,
+			under_day: 1,
+			under_week: 4,
+			under_month: 1,
+			older: 1,
+			oldest_opened_at: Some("2026-10-01T00:00:00.000Z"),
+			stale: 1,
+			bots_open: 1,
+		},
+	]
+	expect o.stale == [
+		StaleIssue {
+			repo: "bynk-lang/bynk",
+			number: 8,
+			title: "Eight",
+			author: "accuser",
+			labels: ["enhancement", "proposal"],
+			opened_at: "2026-10-01T00:00:00.000Z",
+			updated_at: "2026-10-10T00:00:00.000Z",
+			url: "https://github.com/bynk-lang/bynk/issues/8",
+		},
+	]
+}
+
+case "each repository lists at most 20 stale issues, least recently updated first; its count says how many in all" {
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/shop', 1, 'main')",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					WITH RECURSIVE n (k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM n WHERE k < 25)
+					INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+					                    opened_at, updated_at, comments)
+					SELECT 'bynk-lang/bynk', k, 'Old', 'accuser', 0, 'MEMBER', 'open', '2026-09-01T00:00:00.000Z',
+					       strftime('%Y-%m-%dT%H:%M:%fZ', '2026-09-01T00:00:00.000Z', '+' || k || ' days'), 0
+					FROM n
+				""",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+					                    opened_at, updated_at, comments)
+					VALUES ('bynk-lang/shop', 7, 'Quiet', 'accuser', 0, 'MEMBER', 'open',
+					        '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 0)
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(o) = r else {
+		expect false
+	}
+	expect o.backlog.map((b) => "\(b.repo) \(b.stale)") == ["bynk-lang/bynk 25", "bynk-lang/shop 1"]
+	expect o.stale
+		.filter((i) => i.repo == "bynk-lang/bynk")
+		.map(
+			(i) => i.number
+		) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+	expect o.stale.filter((i) => i.repo == "bynk-lang/shop").map((i) => i.number) == [7]
+}
+
+case "with no issues, the figures are empty lists, not an error" {
+	let r <- api.GET("/metrics/issues", IssueQuery { repo: None, days: 90 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.data_since == None
+	expect m.repos.length() == 0
+	let o <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(open) = o else {
+		expect false
+	}
+	expect open.backlog.length() == 0
+	expect open.stale.length() == 0
+}
+
+case "an issues window other than 7, 30 or 90 days is refused, and the limit applies to both issue routes" {
+	stub MetricsLimit.allow(_) returns each [true, false, false]
+	let bad <- api.GET("/metrics/issues", IssueQuery { repo: None, days: 14 }, viewer()) by Visitor
+	expect bad is BadRequest("days must be 7, 30 or 90")
+	let limited <- api.GET(
+		"/metrics/issues",
+		IssueQuery {
+			repo: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	expect limited is TooManyRequests(_)
+	let open <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
+	expect open is TooManyRequests(_)
+}
