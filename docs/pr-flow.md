@@ -176,9 +176,10 @@ each public repository it shows:
   stage (ready, in the queue, draft), how long it has waited, and a stale flag.
 
 Like the CI page it polls (open pull requests every 30 seconds, the window's
-figures every minute) and listens on the live feed, refetching both 3 seconds
-after a pull request changes, or once their cached copies expire if they were
-fetched less than 30 seconds before (as the CI page does).
+figures every minute) and listens on the live feed, refetching both 31 seconds
+after a pull request changes, once any copy cached before the change has
+expired (the same rule as the CI page; see
+[ci-metrics.md](ci-metrics.md#live-feed)).
 
 ## Live feed
 

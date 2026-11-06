@@ -181,13 +181,14 @@ an event whenever a public run's facts change:
 `conclusion` is `""` until the run completes. Pull requests share the feed as
 `kind: "pull"` events ([pr-flow.md](pr-flow.md#live-feed)), which this page
 ignores. The page treats an event as a
-nudge: 3 seconds after the last one it refetches `/metrics/ci/now`, and
+nudge: 31 seconds after it, the page refetches `/metrics/ci/now`, and
 `/metrics/ci` and `/metrics/ci/history` too if any run completed meanwhile
 (nothing else moves them), so what it shows always follows the routes' definitions.
-If those were fetched less than 30 seconds earlier, it waits until their
-cached copies expire (the routes are cached 30 seconds per URL, at the edge
-and in the browser), so the refetch gets the change rather than the same
-answer. While
+The wait is the routes' cache: they are cached 30 seconds per URL at the edge,
+shared by every viewer, so a copy made just before the event (by any viewer)
+may be served until 30 seconds after it. Events during the wait don't postpone
+the refetch, so a steady stream of runs still refreshes the page; one more
+refetch follows 31 seconds after the latest of them. While
 the feed is connected it polls only every 2 minutes, as a safety net; if the
 feed drops it reconnects with backoff (5 seconds, doubling to a minute) and
 polls every 30 seconds meanwhile.
