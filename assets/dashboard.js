@@ -569,17 +569,29 @@
   // purge clears every earlier change's stale copies too. Events during a
   // wait never postpone the refetch, so a steady stream still refreshes, and
   // refetches are at least `LIVE_GAP_MS` apart.
+  //
+  // After a purge, every open page is told the same moment, so each waits a
+  // little more at random (`LIVE_JITTER_MS`): the first request at each edge
+  // location refills the cache for the rest, rather than all of them missing
+  // together. And a purged event is followed by one more refetch once the
+  // cache's 30 seconds have passed: a request that read D1 just before the
+  // change can refill the cache just after the purge, and that copy is gone
+  // by then.
   const LIVE_DELAY_MS = CACHE_MS + 1_000;
   const PURGED_MAX_MS = 5_000;
   const LIVE_GAP_MS = 10_000;
+  const LIVE_JITTER_MS = 4_000;
   let liveTimer = null;
   let timerDue = 0;
   let latestDue = 0;
   let lastRefetch = 0;
   function onLiveEvent(refetchMs, refetch) {
+    const now = Date.now();
     const wait = Number.isFinite(refetchMs) && refetchMs > 0 ? refetchMs : LIVE_DELAY_MS;
-    const due = Date.now() + wait;
-    latestDue = wait <= PURGED_MAX_MS ? due : Math.max(latestDue, due);
+    const purged = wait <= PURGED_MAX_MS;
+    const due = now + wait + (purged ? Math.random() * LIVE_JITTER_MS : 0);
+    // A purge covers every earlier change; its follow-up covers the purge.
+    latestDue = purged ? now + LIVE_DELAY_MS : Math.max(latestDue, due);
     scheduleLive(due, refetch);
   }
   function scheduleLive(due, refetch) {

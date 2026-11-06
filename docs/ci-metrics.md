@@ -200,6 +200,11 @@ completed meanwhile (nothing else moves them), so what it shows always follows
 the routes' definitions. A purge clears every earlier change's stale copies
 too; events during a wait never postpone the refetch, so a steady stream of
 runs still refreshes the page; and refetches are at least 10 seconds apart.
+Every open page hears of a purge at once, so each adds up to 4 seconds at
+random, letting the first request at each edge location refill the cache for
+the rest. A purged event is also followed by one more refetch 31 seconds
+later: a request that read D1 just before the change can refill the cache just
+after the purge, and that copy has expired by then.
 The page always asks the edge (`cache: "no-cache"`), never its browser's own
 copy, which a purge wouldn't reach. While
 the feed is connected it polls only every 2 minutes, as a safety net; if the
