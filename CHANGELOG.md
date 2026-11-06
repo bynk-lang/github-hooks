@@ -16,6 +16,13 @@ All notable changes to github-hooks. The format follows
   the smoke and live-feed checks, and a deploy dry run against each new Bynk
   release, keeps a `canary` issue open while they fail, and proposes moving
   `BYNK_VERSION` once one passes.
+- Built and tested with Bynk v0.510.2, moved by the canary's first bump
+  (#34). The open-PR sync tests build typed `PullPayload` values again, now
+  that a suite helper may name a commons type (bynk-lang/bynk#2947); each case
+  encodes them, as `Json.encode` in a helper still fails (bynk-lang/bynk#2990).
+  `Json.encode` writes `Option` tagged, not as GitHub does (bynk-lang/bynk#2991),
+  so a new case sends GitHub's own REST JSON (plain values, `null`s, a deleted
+  fork's `null` repository) to pin the wire format.
 - Built and tested with Bynk v0.508.4 (was v0.492.1). `Bot.react` now takes
   the `Delivery` itself instead of reading it again from its parts, now that a
   capability may take a commons type (bynk-lang/bynk#2886). The read API's
