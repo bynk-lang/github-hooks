@@ -5,8 +5,8 @@ The fifth slice of the public dashboard
 are closed as fast as they're opened, how long they take to close, and what
 is open and gone quiet. Later, once people outside the org file issues, it
 also covers how long they wait for a maintainer to respond. This page covers
-what is recorded, the daily sync that keeps it right, and the public routes
-that read it. The page at `/issues` follows in a later step.
+what is recorded, the daily sync that keeps it right, the public routes that
+read it, and the page at `/issues`.
 
 ## What the data says about the design
 
@@ -261,4 +261,67 @@ history.
 
 **Cost:** against a year of `bynk`'s volume (6,500 issues, each with about
 one and a half labels) in SQLite, each query takes 1–2 ms.
+
+## The page
+
+`/issues` is the fourth dashboard tab, linked to and from the others. It
+shares their stylesheet, the 7/30/90-day window choice, and the freshness
+line. A coverage line says how much of the window closed-issue figures cover,
+as there's no backfill. For each repository with issues it shows:
+
+- **Headline tiles:** issues opened; closed, split into completed, not
+  planned and duplicates; time to close (median, with the 90th percentile);
+  open now, with the oldest one's age; and how many are stale.
+- **Opened and closed per day:** two single-series charts side by side on the
+  same scale, with the daily figures in a table under them.
+- **Time to close by label:** the 8 busiest labels, with "No label" among
+  them, and the rest folded away.
+- **Open by age:** under a day, 1–7 days, 7–30 days, and over 30.
+- **Stale:** each stale issue with its labels, how long it has been quiet,
+  and how long ago it was opened, linking to GitHub. That's up to 20 a
+  repository; the heading says how many there are in all.
+- **Outsiders:** a line on issues from outside the organisation (answered,
+  how fast, still waiting) appears only once there are any, as decided on
+  #48. Bots' issues get a line of their own.
+
+Everything from GitHub is set as text, never markup. The page polls every 30
+seconds (the backlog) and every minute (the window), and slows to a safety net
+while the live feed is up.
+
+## Live feed
+
+Issues share the live feed with runs, pull requests and releases. Each
+`issues` or `issue_comment` delivery for an issue (not a pull request) is
+pushed as `kind: "issue"`, with the repository and `number`, the delivery's
+action as `status`, and the issue's state as `conclusion`:
+
+```json
+{"refetch_ms": 3000, "kind": "issue", "repo": "bynk-lang/bynk", "number": 2982, "path": "",
+ "workflow": "", "run_id": 0, "attempt": 0, "status": "closed", "conclusion": "closed"}
+```
+
+**When it's sent:** only for an action that changes what the issues page
+shows.
+- **Issues:** opened, edited (the title), closed, reopened, labelled,
+  unlabelled, deleted or transferred.
+- **Comments:** a new comment, which makes an issue no longer quiet.
+- **Not sent:** assignments, milestones, pins, locks and comment edits. These
+  change nothing the page shows.
+
+It's sent on the delivery's first arrival only, and only for a repository the
+public pages may show. The issues page acts on `issue` events, and the others
+ignore them.
+
+**Purging:**
+- **Prefix:** unlike the other kinds, an issue event purges only
+  `/metrics/issues`. So a burst of comments doesn't empty the CI, PR and
+  release routes' cache.
+- **Throttle:** it has its own slot (`edge_purge_slots`, migration `0015`), so
+  it never spends the slot runs, pull requests and releases share.
+- **Rate:** that slot allows one purge a minute (`ISSUE_PURGE_GAP`). With the
+  shared slot's 4, that keeps the Worker within Cloudflare's 5 a minute. An
+  issue event inside the minute is told to wait for the cache to expire.
+
+Otherwise the refetch timing (`refetch_ms`, the purge and its follow-up) is
+the PR page's ([pr-flow.md](pr-flow.md#live-feed)).
 

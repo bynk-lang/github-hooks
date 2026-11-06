@@ -215,6 +215,10 @@ ol.longest li { margin: 2px 0; }
 .range::before { content: ""; position: absolute; left: 0; right: 0; top: 5.5px; height: 1px; background: var(--rule); }
 .range-span { position: absolute; top: 4px; height: 4px; min-width: 2px; border-radius: 2px; background: var(--passed); opacity: 0.55; }
 .range-dot { position: absolute; top: 2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--passed); box-shadow: 0 0 0 2px var(--surface); }
+/* Issues (#48): an issue's labels as chips, and the backlog's ages as small tiles. */
+.labels { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.tiles.ages { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); max-width: 640px; }
+.tiles.ages .value { font-size: 1.1rem; }
 /* A workflow's slowest jobs, in its trend panel. */
 .slowest { margin-top: 12px; }
 .slowest h4 { font-size: 0.88rem; margin: 0 0 4px; color: var(--ink-2); }

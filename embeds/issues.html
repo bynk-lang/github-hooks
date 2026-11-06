@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bynk-lang issues</title>
+<meta name="description" content="Live issue flow for the bynk-lang organisation's public repositories.">
+<link rel="stylesheet" href="{css}">
+<script src="{js}" defer></script>
+</head>
+<body>
+<nav class="pages" aria-label="Dashboards">
+  <a href="/">CI health</a>
+  <a href="/prs">PR flow</a>
+  <a href="/releases">Releases</a>
+  <a href="/issues" aria-current="page">Issues</a>
+</nav>
+<header class="masthead">
+  <div>
+    <h1>Issues</h1>
+    <p class="subtitle">Issues opened by people in <a href="https://github.com/bynk-lang">bynk-lang</a>'s public repositories, from the GitHub App's webhook deliveries.</p>
+  </div>
+  <div class="controls">
+    <fieldset class="window" aria-label="Window">
+      <legend class="visually-hidden">Window</legend>
+      <label><input type="radio" name="days" value="7" checked> 7 days</label>
+      <label><input type="radio" name="days" value="30"> 30 days</label>
+      <label><input type="radio" name="days" value="90"> 90 days</label>
+    </fieldset>
+    <p class="freshness" id="freshness" aria-live="polite">Loading…</p>
+  </div>
+</header>
+<main>
+  <p class="coverage" id="coverage"></p>
+  <div id="repos"></div>
+  <noscript><p>This page needs JavaScript. The same numbers are at <a href="/metrics/issues">/metrics/issues</a> and <a href="/metrics/issues/open">/metrics/issues/open</a>.</p></noscript>
+</main>
+<footer>
+  <p>Closed counts issues closed in the window, as completed, not planned or a duplicate. Time to close runs from when an issue was opened to when it was closed as completed: the median, with the 90th percentile alongside, overall and for each label (an issue counts once for each label it carries). The backlog is the issues open now, by how long ago they were opened. An open issue is stale when it hasn't been updated for 14 days. Bots' issues are counted apart. Once people outside the organisation open issues, the page also shows how long they waited for a maintainer's first reply. Data: <a href="/metrics/issues">/metrics/issues</a>, <a href="/metrics/issues/open">/metrics/issues/open</a>. Source: <a href="https://github.com/bynk-lang/github-hooks">bynk-lang/github-hooks</a>, written in Bynk.</p>
+</footer>
+</body>
+</html>

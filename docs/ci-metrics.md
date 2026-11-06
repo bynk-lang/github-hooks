@@ -182,9 +182,10 @@ an event whenever a public run's facts change:
  "status": "completed", "conclusion": "success"}
 ```
 
-`conclusion` is `""` until the run completes. Pull requests and releases share
-the feed as `kind: "pull"` and `kind: "release"` events
-([pr-flow.md](pr-flow.md#live-feed), [releases.md](releases.md#live-feed)),
+`conclusion` is `""` until the run completes. Pull requests, releases and
+issues share the feed as `kind: "pull"`, `kind: "release"` and
+`kind: "issue"` events ([pr-flow.md](pr-flow.md#live-feed),
+[releases.md](releases.md#live-feed), [issues.md](issues.md#live-feed)),
 which this page ignores.
 
 **Purging, and when to refetch.** Before an event is sent, the Worker purges
@@ -193,7 +194,9 @@ Cloudflare allows a Worker 5 purges a minute, so a purge first claims a row in
 D1 (`edge_purges`, migration `0008`) that allows one per 15 seconds across
 every isolate. `refetch_ms` tells the page how long to wait: 3 seconds when the
 purge went through, or 31 seconds (until any copy cached before the change has
-expired) when it was throttled or Cloudflare refused it.
+expired) when it was throttled or Cloudflare refused it. Issue events are the
+exception: they purge only `/metrics/issues`, on their own slot
+([issues.md](issues.md#live-feed)).
 
 The page treats an event as a nudge: after `refetch_ms` it refetches
 `/metrics/ci/now`, and `/metrics/ci` and `/metrics/ci/history` too if any run
