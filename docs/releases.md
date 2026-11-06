@@ -60,22 +60,25 @@ As the installation that delivered it, the Worker:
    `Merge pull request #123 from …` for a merge commit. A PR already shipped
    by an earlier release keeps it.
 4. Sets the release's `previous_tag`, and `shipped` to how many PRs it
-   shipped, but only when the previous final release was published after pull
-   requests began to be recorded (the first moment in `pull_request_events`).
+   shipped, but only when the previous final release was published after the
+   repository's pull requests began to be recorded (its first moment in
+   `pull_request_events`; each repository starts when the App can see it).
    Before that, some of what the release shipped was never recorded, so a
    count would be short. Its PRs are still marked, for their lead times, and
    `shipped` stays null.
 
 The match is by commit, not by time, so a release tagged on an older commit
 ships only what it contains. What it can't match stays unknown rather than
-wrong:
+wrong. `previous_tag` says how far it got: null until a release is tried, `''`
+when it has no previous final release to compare with, else the previous tag.
 
 | Case | What happens |
 |---|---|
-| A repository's first release | Nothing to compare against: `previous_tag` and `shipped` stay null, logged at `info` |
-| No final release among the latest 90 | Not taken for a first release: `shipped` stays null, logged as a warning |
+| A repository's first release | Nothing to compare against: `previous_tag` is `''` and `shipped` null, logged at `info` |
+| No final release among the latest 90 | Not taken for a first release: `previous_tag` is `''` and `shipped` null, logged as a warning |
 | A pre-release or a draft | Recorded; GitHub isn't asked anything |
-| GitHub refuses the list or the compare | Logged as an error; `shipped` stays null |
+| GitHub no longer has the comparison (`404`/`410`, a tag deleted from git) | `previous_tag` is recorded and `shipped` stays null, logged as a warning; it isn't tried again |
+| GitHub refuses the list or the compare otherwise | Logged as an error; `previous_tag` and `shipped` stay null, so the sync tries again |
 | A delivery with no installation | Logged as a warning; `shipped` stays null |
 | More than 500 commits between tags | The first 500 are matched, with a warning |
 
@@ -95,12 +98,14 @@ merges are in), repairs both. For each public repository not in
 2. When the listing was complete (its last page was short), marks deleted any
    release the table has that GitHub no longer lists. GitHub lists drafts only
    to those who can push, which the App can't, so drafts are left alone.
-3. Matches each final release not yet matched (no `previous_tag`) that was
-   published since pull requests began to be recorded, oldest first, at most
-   10 a run, against the previous final release in the listing, exactly as a
-   `released` delivery would. A release with no earlier final release in the
-   listing (a repository's first, or one whose previous is past 90) stays
-   unmatched. Before any pull request is recorded, nothing is matched.
+3. Matches each final release not yet tried (`previous_tag` null) that was
+   published since the repository's pull requests began to be recorded, oldest
+   first, at most 10 a run, against the previous final release in the
+   listing, exactly as a `released` delivery would. One with no earlier final
+   release in the listing (a repository's first, or one whose previous is past
+   90) is recorded as tried (`''`), as is one whose comparison GitHub no longer
+   has, so none of them holds a slot in later runs. Before any of the
+   repository's pull requests is recorded, nothing is matched.
 4. Logs one line per repository, such as
    `release sync: bynk-lang/bynk has 22 releases, 1 matched`.
 

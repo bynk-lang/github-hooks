@@ -692,9 +692,26 @@ fn shipRelease(
 				"\(r.repo) \(r.tag): no earlier final release among its latest \(found.searched) releases; its pull requests are left unknown"
 			)
 		}
-		Effect.pure(Ok(()))
+		markNoPrevious(r.repo, r.tag)
 	}
-	matchRelease(installation, r, previous)
+	let Ok(_) <- matchRelease(installation, r, previous) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	Effect.pure(Ok(()))
+}
+
+// Records that a release was tried and has no previous final release to
+// compare with (a repository's first, or one whose previous is past what was
+// listed): `previous_tag` is then `''`, not null, so the sync doesn't try it
+// again and it can't hold one of its repair slots.
+fn markNoPrevious(repo: String, tag: String) -> Effect[Result[(), String]] given Deliveries {
+	let Ok(_) <- Deliveries.run(
+		"UPDATE releases SET previous_tag = '' WHERE repo = ?1 AND tag = ?2 AND previous_tag IS NULL",
+		[Text(repo), Text(tag)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not record that \(repo) \(tag) has no previous release: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(()))
 }
 
 // Creates or refreshes a release's row, from a delivery or the sync. A release
@@ -734,9 +751,9 @@ fn matchRelease(
 	installation: Int,
 	r: ReleaseFact,
 	previous: ReleaseAt
-) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi {
 	let Ok(c) <- GitHubApi.compare(installation, r.repo, previous.tag, r.tag) else match {
-		Err(f) => Effect.pure(Err(f.message)),
+		Err(f) => if isGone(f) { compareGone(r, previous, f) } else { Effect.pure(Err(f.message)) },
 	}
 	let _ <- if c.commits.length() < c.total_commits {
 		Logger.warn(
@@ -745,7 +762,7 @@ fn matchRelease(
 	} else {
 		Effect.pure(())
 	}
-	let Ok(since) <- recordingSince() else match {
+	let Ok(since) <- recordingSince(r.repo) else match {
 		Err(why) => Effect.pure(Err(why)),
 	}
 	let counted = since.map((s) => previous.at >= s).getOrElse(false)
@@ -783,13 +800,38 @@ fn matchRelease(
 	) else match {
 		Err(e) => Effect.pure(Err(sqlError(e))),
 	}
-	Effect.pure(Ok(()))
+	Effect.pure(Ok(true))
 }
 
-// When pull requests began to be recorded: the first moment kept (#26), or
-// `None` before any was.
-fn recordingSince() -> Effect[Result[Option[String], String]] given Deliveries {
-	let Ok(row) <- Deliveries.first("SELECT min(at) AS since FROM pull_request_events", []) else match {
+// A comparison GitHub no longer has (a tag deleted from git while its release
+// remains) will never succeed: record the previous release, leave `shipped`
+// unknown, and warn, so the release stops being retried.
+fn compareGone(
+	r: ReleaseFact,
+	previous: ReleaseAt,
+	f: ApiFailure
+) -> Effect[Result[Bool, String]] given Deliveries, Logger {
+	let _ <- Logger.warn(
+		"\(r.repo) \(r.tag): GitHub can no longer compare it with \(previous.tag); its pull requests are left unknown (\(f.message))"
+	)
+	let Ok(_) <- Deliveries.run(
+		"UPDATE releases SET previous_tag = ?3 WHERE repo = ?1 AND tag = ?2",
+		[Text(r.repo), Text(r.tag), Text(previous.tag)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not record \(r.repo) \(r.tag)'s previous release: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(false))
+}
+
+// When a repository's pull requests began to be recorded: its first moment
+// kept (#26), or `None` before any was. Per repository, since each starts when
+// the App can see it. Its name as deliveries give it, so the
+// `pull_request_events_by_pr` index answers.
+fn recordingSince(repo: String) -> Effect[Result[Option[String], String]] given Deliveries {
+	let Ok(row) <- Deliveries.first(
+		"SELECT min(at) AS since FROM pull_request_events WHERE repo = ?1",
+		[Text(repo)]
+	) else match {
 		Err(e) => Effect.pure(Err("could not read when pull requests began to be recorded: \(sqlError(e))")),
 	}
 	let Some(json) = row else { Effect.pure(Ok(None)) }
@@ -2140,7 +2182,7 @@ fn syncReleases(
 	let Ok(_) <- Deliveries.batch(saves.concat(deletions)) else match {
 		Err(e) => syncFailed("\(t.repo): could not save its releases: \(sqlError(e))"),
 	}
-	let Ok(since) <- recordingSince() else match {
+	let Ok(since) <- recordingSince(t.repo) else match {
 		Err(why) => syncFailed("\(t.repo): \(why)"),
 	}
 	let Some(start) = since else {
@@ -2170,6 +2212,7 @@ fn syncReleases(
 	})
 	let matches <- unmatched.traverseAll((u) => matchUnmatched(
 		installation,
+		t.repo,
 		u.tag,
 		readable,
 		listing.releases
@@ -2184,20 +2227,29 @@ fn syncReleases(
 }
 
 // Matches one release the sync found unmatched, from the releases it listed.
-// `false` when there is nothing to match it against: a first release, or one
-// whose previous final release is past the listing (or that wasn't listed).
+// `false` when there is nothing to match it against (a first release, or one
+// whose previous final release is past the listing, or that wasn't listed),
+// which is recorded so it isn't tried again.
 fn matchUnmatched(
 	installation: Int,
+	repo: String,
 	tag: String,
 	readable: List[ReleaseFact],
 	listed: List[ReleasePayload]
 ) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi {
-	let Some(r) = readable.filter((f) => f.tag == tag).first() else { Effect.pure(Ok(false)) }
-	let Some(previous) = previousFinalAt(r, listed) else { Effect.pure(Ok(false)) }
-	let Ok(_) <- matchRelease(installation, r, previous) else match {
+	let Some(r) = readable.filter((f) => f.tag == tag).first() else { noPrevious(repo, tag) }
+	let Some(previous) = previousFinalAt(r, listed) else { noPrevious(repo, tag) }
+	let Ok(matched) <- matchRelease(installation, r, previous) else match {
 		Err(why) => Effect.pure(Err("\(tag): \(why)")),
 	}
-	Effect.pure(Ok(true))
+	Effect.pure(Ok(matched))
+}
+
+fn noPrevious(repo: String, tag: String) -> Effect[Result[Bool, String]] given Deliveries {
+	let Ok(_) <- markNoPrevious(repo, tag) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	Effect.pure(Ok(false))
 }
 
 // A repository's releases, a page at a time, until a short page says every

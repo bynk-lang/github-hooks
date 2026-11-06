@@ -108,7 +108,7 @@ case "every listed release is recorded, and each unmatched one since recording b
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/releases?per_page=30&page=1"
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/compare/v0.508.4...v0.510.2?per_page=100&page=1"
 	let rows <- Deliveries.first(releases(), [])
-	expect rows == Ok(Some("{\"rows\":\"v0.508.4:-:-:kept v0.510.2:v0.508.4:2:kept\"}"))
+	expect rows == Ok(Some("{\"rows\":\"v0.508.4::-:kept v0.510.2:v0.508.4:2:kept\"}"))
 	let row <- Deliveries.first(
 		"SELECT release_id, name, draft, prerelease, created_at, published_at, author_is_bot FROM releases WHERE tag = 'v0.510.2'",
 		[]
@@ -219,4 +219,68 @@ case "a repository GitHub no longer has is skipped; one it refuses fails the run
 	let refused <- releaseSync.schedule("47 4 * * *", 1793966400000)
 	expect refused == Err("bynk-lang/bynk: GitHub refused bynk-lang/bynk's releases: 500 Server Error")
 	expect Logger.error called once with msg == "bynk-lang/bynk: GitHub refused bynk-lang/bynk's releases: 500 Server Error"
+}
+
+---
+Final releases v0.500.0 to v0.500.9, published a minute apart from 10:00 on
+4 November (after recording began), then v0.508.4 and v0.510.2, newest first
+as GitHub lists them.
+---
+fn finals() -> List[ReleasePayload] {
+	let earlier = [9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map((n) => ReleasePayload {
+		id: n,
+		tag_name: "v0.500.\(n)",
+		name: None,
+		draft: false,
+		prerelease: false,
+		created_at: "2026-11-04T10:00:00Z",
+		published_at: Some("2026-11-04T10:0\(n):00Z"),
+		author: None,
+		html_url: Some("https://github.com/bynk-lang/bynk/releases/tag/v0.500.\(n)"),
+	})
+	[
+		ReleasePayload {
+			id: 435386663,
+			tag_name: "v0.510.2",
+			name: None,
+			draft: false,
+			prerelease: false,
+			created_at: "2026-11-05T13:53:38Z",
+			published_at: Some("2026-11-05T15:33:58Z"),
+			author: None,
+			html_url: Some("https://github.com/bynk-lang/bynk/releases/tag/v0.510.2"),
+		},
+		ReleasePayload {
+			id: 1,
+			tag_name: "v0.508.4",
+			name: None,
+			draft: false,
+			prerelease: false,
+			created_at: "2026-11-04T20:00:00Z",
+			published_at: Some("2026-11-04T21:16:39Z"),
+			author: None,
+			html_url: Some("https://github.com/bynk-lang/bynk/releases/tag/v0.508.4"),
+		},
+	].concat(earlier)
+}
+
+case "releases that can't be matched are recorded as tried, so they never hold the repair slots" {
+	// The first run's ten slots go to the oldest: v0.500.0, a first release,
+	// and nine whose comparisons GitHub no longer has. The next run reaches
+	// v0.508.4 and v0.510.2.
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(Json.encode(finals())), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" }), ok(Json.encode(finals())), ok(compared), ok(compared)]
+	let seeded <- Deliveries.batch(repositories().concat(recorded()))
+	expect seeded is Ok(_)
+	let first <- releaseSync.schedule("47 4 * * *", 1793880000000)
+	expect first == Ok(())
+	expect Logger.info called with msg == "release sync: bynk-lang/bynk has 12 releases, 0 matched"
+	let tried <- Deliveries.first(
+		"SELECT sum(previous_tag = '') AS first, sum(previous_tag LIKE 'v0.500.%') AS gone, sum(previous_tag IS NULL) AS untried FROM releases",
+		[]
+	)
+	expect tried == Ok(Some("{\"first\":1,\"gone\":9,\"untried\":2}"))
+	let second <- releaseSync.schedule("47 4 * * *", 1793966400000)
+	expect second == Ok(())
+	expect Logger.info called with msg == "release sync: bynk-lang/bynk has 12 releases, 2 matched"
 }

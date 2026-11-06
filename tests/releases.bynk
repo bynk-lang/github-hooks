@@ -184,19 +184,19 @@ case "a repository's first release has nothing to compare, and ships nothing cou
 	expect GitHubHttp.get called once
 	expect Logger.info called with msg == "bynk-lang/bynk v0.510.2 is its first release: nothing to compare it with"
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
-	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
+	expect row == Ok(Some("{\"previous_tag\":\"\",\"shipped\":null}"))
 	let rows <- Deliveries.first(releasedIn(), [])
 	expect rows == Ok(Some(untouched()))
 }
 
 case "a comparison GitHub refuses is logged, and leaves the release's PRs unknown" {
 	stub AppAuth.token(_) returns Ok("ghs_test")
-	stub GitHubHttp.get(_, _) returns each [ok(listing), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })]
+	stub GitHubHttp.get(_, _) returns each [ok(listing), Ok(Response { status: 500, headers: Map.empty(), body: "{\"message\": \"Server Error\"}" })]
 	let seeded <- Deliveries.batch([pulls(), recordingBegan("2026-11-04T09:00:00.000Z")])
 	expect seeded is Ok(_)
 	let r <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
 	expect r is Accepted(_)
-	expect Logger.error called once with msg == "could not match bynk-lang/bynk v0.510.2 to pull requests: GitHub refused to compare bynk-lang/bynk v0.508.4...v0.510.2: 404 Not Found"
+	expect Logger.error called once with msg == "could not match bynk-lang/bynk v0.510.2 to pull requests: GitHub refused to compare bynk-lang/bynk v0.508.4...v0.510.2: 500 Server Error"
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
 	let rows <- Deliveries.first(releasedIn(), [])
@@ -277,7 +277,7 @@ case "no final release within the pages read is a warning, not a first release" 
 	expect GitHubHttp.get called 3 times
 	expect Logger.warn called once with msg == "bynk-lang/bynk v0.510.2: no earlier final release among its latest 90 releases; its pull requests are left unknown"
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
-	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
+	expect row == Ok(Some("{\"previous_tag\":\"\",\"shipped\":null}"))
 	let rows <- Deliveries.first(releasedIn(), [])
 	expect rows == Ok(Some(untouched()))
 }
@@ -294,4 +294,39 @@ case "a release whose previous one came before PRs were recorded marks its PRs, 
 	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":null}"))
 	let rows <- Deliveries.first(releasedIn(), [])
 	expect rows == Ok(Some("{\"rows\":\"bynk-lang/bynk#2776:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2900:-:- bynk-lang/bynk#2941:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2942:v0.508.4:2026-11-04T21:16:39.000Z bynk-lang/bynk#2943:-:- bynk-lang/other#2948:-:-\"}"))
+}
+
+case "a comparison GitHub no longer has is a warning, and the release isn't tried again" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })]
+	let seeded <- Deliveries.batch([pulls(), recordingBegan("2026-11-04T09:00:00.000Z")])
+	expect seeded is Ok(_)
+	let r <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	expect r is Accepted(_)
+	expect Logger.warn called once with msg == "bynk-lang/bynk v0.510.2: GitHub can no longer compare it with v0.508.4; its pull requests are left unknown (GitHub refused to compare bynk-lang/bynk v0.508.4...v0.510.2: 404 Not Found)"
+	expect Logger.error never called
+	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":null}"))
+	let rows <- Deliveries.first(releasedIn(), [])
+	expect rows == Ok(Some(untouched()))
+}
+
+case "only the release's own repository says when its recording began" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing), ok(compared)]
+	// Another repository was recorded from before v0.508.4; this one wasn't
+	// recorded at all, so nothing it shipped can be counted.
+	let seeded <- Deliveries.batch(
+		[
+			pulls(),
+			SqlStatement {
+				sql: "INSERT INTO pull_request_events (delivery, repo, number, action, reason, at) VALUES ('elsewhere', 'bynk-lang/other', 1, 'closed', NULL, '2026-11-01T00:00:00.000Z')",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
+	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
+	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":null}"))
 }
