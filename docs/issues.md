@@ -35,6 +35,17 @@ prunes `deliveries`, not these).
   - **Author:** the login, whether it's a bot (`user.type = 'Bot'`), and
     GitHub's `author_association`, which tells a maintainer (`OWNER`,
     `MEMBER`, `COLLABORATOR`) from everyone else.
+  - **`author_maintainer`** (migration `0014`): whether the author is a
+    maintainer. It's settled when the issue is recorded, by a delivery or the
+    daily sync.
+    - **Known at once:** a bot isn't one, and an owner, member or
+      collaborator by association is.
+    - **Asked:** for anyone else, the organisation is asked with the same
+      cached lookup as for commenters (below). GitHub reports a member whose
+      membership is private as a `CONTRIBUTOR`, and maintainers open most
+      issues.
+    - **Unknown:** `NULL` until the organisation answers. A failed lookup
+      leaves the row's last answer as it was, with a warning.
   - **First response:** `first_response_at` and `first_responder` come from
     the first comment by a maintainer who isn't the issue's author and isn't
     a bot (a bot never counts, even one GitHub reports as a member). The
@@ -193,7 +204,8 @@ The window is 7 days (the default), 30 or 90; any other `days` is a 400.
   for each label it carries. `null` is issues with none. Busiest first.
 - **`outside_*`, `response_*`:** for issues opened in the window by people
   outside the org. That's not an owner, member or collaborator by GitHub's
-  association, nor a member confirmed through the API (`org_members`).
+  association, nor confirmed as a member when the issue was recorded
+  (`author_maintainer`).
   - **Figures:** `outside_responded` had a maintainer's first response, and
     `response_*` is how long it took. `outside_waiting` are still open with
     none.
@@ -230,8 +242,9 @@ The window is 7 days (the default), 30 or 90; any other `days` is a 400.
   day to a week, a week to 30 days, and older. It also gives the oldest one's
   opening, and how many are `stale`.
 - **`stale`:** issues open with no update for **14 days** (`ISSUE_STALE`),
-  least recently updated first, each with its labels and a link. At most 100
-  (`MAX_STALE_ISSUES`) in all.
+  least recently updated first, each with its labels and a link. At most 20
+  a repository (`MAX_STALE_ISSUES`), so one repository's long tail can't
+  crowd out the others; its `backlog` row counts them all.
 
 The daily sync keeps the backlog right from the first run, so these need no
 history.
@@ -243,9 +256,8 @@ history.
   and `issues_by_closed` (an `OR` of the two ranges).
 - **Labels:** each issue's labels by `issue_labels`' primary key.
 - **The open backlog and stale list:** through the partial `issues_open`.
-- **Outsiders:** whether an author is a confirmed member uses
-  `org_members_by_login` (migration `0014`); without it, each check scanned
-  `org_members`.
+- **Outsiders:** decided from the issue's own row (`author_association` and
+  `author_maintainer`), with no lookup at read time.
 
 **Cost:** against a year of `bynk`'s volume (6,500 issues, each with about
 one and a half labels) in SQLite, each query takes 1–2 ms.

@@ -49,9 +49,12 @@ All notable changes to github-hooks. The format follows
     duplicate. It gives time to close (p50 and p90) overall and by label,
     issues by UTC day, and response figures for issues from outside the org.
   - **`GET /metrics/issues/open`:** each repository's open backlog by age,
-    and the stale issues (no update for 14 days) with their labels.
-  - **Index:** migration `0014` indexes confirmed members by login, for the
-    outsider check.
+    and up to 20 of its stale issues (no update for 14 days) with their
+    labels.
+  - **Outsiders:** whether an issue's author is a maintainer is now
+    recorded with the issue (`author_maintainer`, migration `0014`). It
+    comes from the association, or else the cached org-membership lookup,
+    as GitHub reports private members as contributors.
 - Phase 4, slice 5, step 2 (#48): the daily open-issue sync.
   - **What it does:** the `issueSync` cron (04:53 UTC) lists each public
     repository's open issues through the REST API, leaving out the pull

@@ -31,7 +31,8 @@ the week by people: #1, #2, #3, #4, #5, #7, #9, #12, #13, #14, #16 and #18
 
 Outsiders: #12 (answered), #13 (`NONE`, open, unanswered) and #16 (closed
 unanswered, so not waiting). #14's author is a
-`CONTRIBUTOR` whom GitHub confirmed as an org member, so not an outsider.
+`CONTRIBUTOR` whom GitHub confirmed as an org member when the issue was
+recorded (`author_maintainer`), so not an outsider.
 
 Open now, by people: #7 (opened 26 h ago), #8 (opened 1 Oct, last updated 10
 Oct: stale; `proposal`, `enhancement`), #9 (6 h ago), #10 (opened 15 Oct,
@@ -46,10 +47,6 @@ fn seed() -> List[SqlStatement] {
 				INSERT INTO repositories (repo, public, default_branch) VALUES
 				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/sandbox', 1, 'main')
 			""",
-			params: [],
-		},
-		SqlStatement {
-			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'private-maint', 1, '2026-11-05T00:00:00.000Z')",
 			params: [],
 		},
 		SqlStatement {
@@ -98,6 +95,10 @@ fn seed() -> List[SqlStatement] {
 				  ('bynk-lang/sandbox', 1, 'Sandbox', 'accuser', 0, 'MEMBER', 'open', NULL,
 				   '2026-09-01T00:00:00.000Z', NULL, '2026-09-01T00:00:00.000Z', 0, NULL, NULL)
 			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: "UPDATE issues SET author_maintainer = 1 WHERE repo = 'bynk-lang/bynk' AND number = 14",
 			params: [],
 		},
 		SqlStatement {
@@ -276,6 +277,49 @@ case "the open backlog by age, and the stale issues with their labels" {
 			url: "https://github.com/bynk-lang/bynk/issues/8",
 		},
 	]
+}
+
+case "each repository lists at most 20 stale issues, least recently updated first; its count says how many in all" {
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/shop', 1, 'main')",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					WITH RECURSIVE n (k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM n WHERE k < 25)
+					INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+					                    opened_at, updated_at, comments)
+					SELECT 'bynk-lang/bynk', k, 'Old', 'accuser', 0, 'MEMBER', 'open', '2026-09-01T00:00:00.000Z',
+					       strftime('%Y-%m-%dT%H:%M:%fZ', '2026-09-01T00:00:00.000Z', '+' || k || ' days'), 0
+					FROM n
+				""",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
+					                    opened_at, updated_at, comments)
+					VALUES ('bynk-lang/shop', 7, 'Quiet', 'accuser', 0, 'MEMBER', 'open',
+					        '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 0)
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let r <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
+	let Ok(o) = r else {
+		expect false
+	}
+	expect o.backlog.map((b) => "\(b.repo) \(b.stale)") == ["bynk-lang/bynk 25", "bynk-lang/shop 1"]
+	expect o.stale
+		.filter((i) => i.repo == "bynk-lang/bynk")
+		.map(
+			(i) => i.number
+		) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+	expect o.stale.filter((i) => i.repo == "bynk-lang/shop").map((i) => i.number) == [7]
 }
 
 case "with no issues, the figures are empty lists, not an error" {

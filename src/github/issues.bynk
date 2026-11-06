@@ -80,7 +80,10 @@ type CommentPayload = {
 ---
 One issue, as `issues` stores it, with times in the `received_at` format.
 `state` is GitHub's, or `deleted` or `transferred` for a delivery that
-removes the issue from its repository. `labels` is the whole set when the
+removes the issue from its repository. `authorMaintainer` says whether the
+author is a maintainer: known at once for a bot (no) or an owner, member or
+collaborator (yes), otherwise `None` until the organisation is asked, since
+GitHub reports a member whose membership is private as a `CONTRIBUTOR`. `labels` is the whole set when the
 delivery was sent; `label` is the one a `labeled` or `unlabeled` delivery
 added or removed.
 ---
@@ -92,6 +95,7 @@ type IssueFact = {
 	author: String,
 	authorIsBot: Bool,
 	authorAssociation: String,
+	authorMaintainer: Option[Bool],
 	state: String,
 	stateReason: Option[String],
 	openedAt: String,
@@ -203,6 +207,9 @@ fn issueFact(
 		author: i.user.login,
 		authorIsBot: i.user.type == "Bot",
 		authorAssociation: i.author_association,
+		authorMaintainer: if i.user.type == "Bot" {
+			Some(false)
+		} else if isMaintainer(i.author_association) { Some(true) } else { None },
 		state: removed.getOrElse(i.state),
 		stateReason: i.state_reason,
 		openedAt: opened,

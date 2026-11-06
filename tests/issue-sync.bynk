@@ -305,3 +305,15 @@ case "a listing cut short at its last page repairs nothing, as the issues it did
 	let held <- Deliveries.first("SELECT state FROM issues WHERE number = 1000", [])
 	expect held == Ok(Some("{\"state\":\"open\"}"))
 }
+
+case "an open issue by an author GitHub reports as a contributor is looked up, as a delivery's would be" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns each [ok(listing([listed(12, "2026-11-05T08:30:00Z", []).replace("\"author_association\": \"MEMBER\"", "\"author_association\": \"CONTRIBUTOR\"")])), answer(204, "")]
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
+	expect r == Ok(())
+	expect GitHubHttp.get called with url == "https://api.github.com/orgs/bynk-lang/members/accuser"
+	let issue <- Deliveries.first("SELECT author_maintainer FROM issues", [])
+	expect issue == Ok(Some("{\"author_maintainer\":1}"))
+}

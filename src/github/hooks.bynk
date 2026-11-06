@@ -773,7 +773,9 @@ fn recordIssue(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger,
 		Err(why) => Logger.error("could not read issue from \(d.id): \(why)"),
 	}
 	let Some(news) = read else { Effect.pure(()) }
-	let i = news.issue
+	let Ok(i) <- confirmAuthor(d.installation, news.issue) else match {
+		Err(why) => Logger.error(why),
+	}
 	let nobody: Option[IssueResponse] = None
 	let response <- match news.response {
 		Some(r) => confirmed(d, i.repo, r),
@@ -884,13 +886,14 @@ fn issueStatements(i: IssueFact) -> List[SqlStatement] {
 	let row = SqlStatement {
 		sql: """
 			INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state,
-			                    state_reason, opened_at, closed_at, updated_at, comments)
-			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+			                    state_reason, opened_at, closed_at, updated_at, comments, author_maintainer)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
 			ON CONFLICT (repo, number) DO UPDATE SET
 			  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
 			  author_association = excluded.author_association, state = excluded.state,
 			  state_reason = excluded.state_reason, opened_at = excluded.opened_at,
-			  closed_at = excluded.closed_at, updated_at = excluded.updated_at, comments = excluded.comments
+			  closed_at = excluded.closed_at, updated_at = excluded.updated_at, comments = excluded.comments,
+			  author_maintainer = coalesce(excluded.author_maintainer, issues.author_maintainer)
 			WHERE issues.state NOT IN ('deleted', 'transferred')
 			  AND (excluded.updated_at >= issues.updated_at OR excluded.state IN ('deleted', 'transferred'))
 		""",
@@ -907,6 +910,10 @@ fn issueStatements(i: IssueFact) -> List[SqlStatement] {
 			text(i.closedAt),
 			Text(i.updatedAt),
 			Integer(i.comments),
+			match i.authorMaintainer {
+				Some(m) => Boolean(m),
+				None => Null,
+			},
 		],
 	}
 	if gone {
@@ -976,6 +983,31 @@ fn labelChange(i: IssueFact) -> List[SqlStatement] {
 	} else {
 		[]
 	}
+}
+
+// The fact, with whether its author is a maintainer settled where GitHub's
+// association can't say (a person who isn't an owner, member or
+// collaborator by it may still belong to the organisation, privately): the
+// organisation is asked through `installation`, as for a commenter, and the
+// answer kept a day. If GitHub can't say, it stays unknown, and the row keeps
+// whatever it knew; the log says why. Always `Ok`: a `Result` only so a
+// list of facts can be settled with `traverseAll`.
+fn confirmAuthor(
+	installation: Option[Int],
+	f: IssueFact
+) -> Effect[Result[IssueFact, String]] given Deliveries, Logger, GitHubApi, Clock {
+	let None = f.authorMaintainer else { Effect.pure(Ok(f)) }
+	let Some(id) = installation else { Effect.pure(Ok(f)) }
+	let org = f.repo.split("/").first().getOrElse(f.repo)
+	let Ok(member) <- orgMember(id, org, f.author) else match {
+		Err(why) => {
+			let _ <- Logger.warn(
+				"could not tell whether \(f.author) belongs to \(org), so \(f.repo) issue #\(f.number) is recorded without knowing: \(why)"
+			)
+			Effect.pure(Ok(f))
+		},
+	}
+	Effect.pure(Ok(IssueFact { ...f, authorMaintainer: Some(member) }))
 }
 
 // Records a job from a `workflow_job` delivery (#42). The row only moves
@@ -2418,7 +2450,7 @@ service api from http {
 					    (i.state = 'closed' AND i.closed_at >= ?1 AND i.closed_at < ?2) AS closed_in,
 					    coalesce(i.state_reason, 'completed') AS reason,
 					    (i.author_is_bot = 0 AND i.author_association NOT IN ('OWNER', 'MEMBER', 'COLLABORATOR')
-					      AND NOT EXISTS (SELECT 1 FROM org_members m WHERE m.login = lower(i.author) AND m.member = 1)) AS outside
+					      AND coalesce(i.author_maintainer, 0) = 0) AS outside
 					  FROM issues i JOIN shown s ON s.repo = i.repo
 					  WHERE i.state IN ('open', 'closed')
 					    AND ((i.opened_at >= ?1 AND i.opened_at < ?2) OR (i.closed_at >= ?1 AND i.closed_at < ?2))
@@ -2576,8 +2608,8 @@ service api from http {
 	// The open issues of public repositories less `DASHBOARD_EXCLUDE` (#48):
 	// each repository's backlog by age, read through `issues_open`, and the
 	// stale issues (by people, with no update for `ISSUE_STALE`), least
-	// recently updated first, at most `MAX_STALE_ISSUES`. The two reads run
-	// concurrently.
+	// recently updated first, at most `MAX_STALE_ISSUES` a repository. The two
+	// reads run concurrently.
 	@cache(maxAge: 30.seconds, scope: public)
 	on GET("/metrics/issues/open") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[IssuesOpen]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
 		let allowed <- withinMetricsLimit(headers)
@@ -2628,16 +2660,15 @@ service api from http {
 					stale AS (
 					  SELECT i.repo, i.number, i.title, i.author, i.opened_at, i.updated_at,
 					    (SELECT coalesce(json_group_array(label), '[]')
-					     FROM (SELECT l.label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY l.label)) AS labels
+					     FROM (SELECT l.label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY l.label)) AS labels,
+					    row_number() OVER (PARTITION BY i.repo ORDER BY i.updated_at, i.number) AS place
 					  FROM issues i JOIN shown s ON s.repo = i.repo
 					  WHERE i.state = 'open' AND i.author_is_bot = 0 AND i.updated_at < ?2
-					  ORDER BY i.updated_at, i.repo, i.number
-					  LIMIT ?3
 					)
 					SELECT coalesce(json_group_array(json_object('repo', repo, 'number', number, 'title', title,
 					    'author', author, 'labels', json(labels), 'opened_at', opened_at, 'updated_at', updated_at,
 					    'url', 'https://github.com/' || repo || '/issues/' || number)), '[]') AS items
-					FROM stale
+					FROM (SELECT * FROM stale WHERE place <= ?3 ORDER BY repo, updated_at, number)
 					""",
 					[repo, staleBefore, Integer(MAX_STALE_ISSUES), Text(excludedNames(excluded))]
 				),
@@ -3300,7 +3331,7 @@ after the release sync.
 service issueSync from cron {
 	on schedule("53 4 * * *") (
 		at: Int
-	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, GitHubApi {
+	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, GitHubApi, Clock {
 		let Ok(targets) <- syncTargets() else match {
 			Err(why) => syncFailed(why),
 		}
@@ -3727,8 +3758,9 @@ fn listReleases(
 // An open issue with no update for this long is stale (#48).
 const ISSUE_STALE: Duration = 14.days
 
-// How many stale issues `/metrics/issues/open` lists, across repositories.
-const MAX_STALE_ISSUES: Int = 100
+// How many stale issues `/metrics/issues/open` lists for each repository,
+// least recently updated first; its backlog row counts them all.
+const MAX_STALE_ISSUES: Int = 20
 
 --- The stale issues, as one JSON list.
 type StaleList = {
@@ -3843,7 +3875,9 @@ fn markGone(repo: String, number: Int) -> Effect[Result[Bool, String]] given Del
 // follows the same rules as a delivery (`issueStatements`): a listing older
 // than the row changes nothing. A repository that can't be synced for good is
 // skipped with a warning, as the pull request sync does.
-fn syncIssues(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+fn syncIssues(
+	t: SyncTarget
+) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi, Clock {
 	let Some(installation) = t.installation else {
 		syncSkipped("\(t.repo): no installation has delivered for it; issues skipped")
 	}
@@ -3863,8 +3897,14 @@ fn syncIssues(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Log
 	}
 	let open = listed.filter((i) => i.pull_request.isNone())
 	let facts = open.map((i) => issueFact(t.repo, "sync", None, None, i))
+	let noFacts: List[IssueFact] = []
+	let readable = facts.fold(noFacts, (all, f) => match f {
+		Ok(i) => all.append(i),
+		Err(_) => all,
+	})
+	let settled <- readable.traverseAll((f) => confirmAuthor(Some(installation), f))
 	let none: List[SqlStatement] = []
-	let statements = facts.fold(none, (all, f) => match f {
+	let statements = settled.fold(none, (all, r) => match r {
 		Ok(i) => all.concat(issueStatements(i)),
 		Err(_) => all,
 	})
@@ -3919,7 +3959,7 @@ fn repairIssue(
 	installation: Int,
 	repo: String,
 	number: Int
-) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi {
+) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi, Clock {
 	let Ok(i) <- GitHubApi.issue(installation, repo, number) else match {
 		Err(f) => if isGone(f) {
 			removeIssue(repo, number, "deleted")
@@ -3930,8 +3970,11 @@ fn repairIssue(
 	let true = i.number == number else { removeIssue(repo, number, "transferred") }
 	let now = repoOfIssue(i).getOrElse(repo)
 	let true = now.toLower() == repo.toLower() else { Effect.pure(Ok(false)) }
-	let Ok(fact) = issueFact(repo, "sync", None, None, i) else match {
+	let Ok(read) = issueFact(repo, "sync", None, None, i) else match {
 		Err(why) => Effect.pure(Err("\(repo) issue #\(number): \(why)")),
+	}
+	let Ok(fact) <- confirmAuthor(Some(installation), read) else match {
+		Err(why) => Effect.pure(Err(why)),
 	}
 	let Ok(_) <- Deliveries.batch(issueStatements(fact)) else match {
 		Err(e) => Effect.pure(Err("could not record \(repo) issue #\(number): \(sqlError(e))")),
