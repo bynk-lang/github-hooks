@@ -37,17 +37,27 @@ prunes `deliveries`, not these).
     `MEMBER`, `COLLABORATOR`) from everyone else.
   - **First response:** `first_response_at` and `first_responder` come from
     the first comment by a maintainer who isn't the issue's author and isn't
-    a bot (a bot never counts, even one GitHub reports as a member). They only
-    move earlier, so a comment delivered late still counts. A deleted comment
+    a bot (a bot never counts, even one GitHub reports as a member). A
+    maintainer is an `OWNER`, `MEMBER` or `COLLABORATOR` by GitHub's
+    association, or a login named in `MAINTAINERS` (see Settings). The
+    response only moves earlier, so a comment delivered late still counts. A deleted comment
     isn't a response, and deleting the first response doesn't clear it.
   - **Deleted and transferred issues:** these become tombstones (`state`
     `deleted` or `transferred`) with no labels. Nothing later changes them,
     so a late delivery can't bring one back. They're counted nowhere. A
     transferred issue reappears under its new repository from that
     repository's own deliveries.
-- **`issue_labels`**: each issue's current labels, replaced together with
-  its row. A delivery the row has moved past leaves them alone, so a stale
-  delivery never brings back an old set.
+- **`issue_labels`**: each issue's current labels.
+  - **Ties:** adding several labels at once sends one `labeled` delivery per
+    label, usually in the same second. Each carries the set at that moment,
+    and they arrive in no guaranteed order.
+  - **Whole set:** so the set is replaced only by a delivery strictly newer
+    than the row.
+  - **One label:** `labeled` and `unlabeled` then add or remove the one label
+    they name, so same-second deliveries combine rather than overwrite one
+    another, whatever order they arrive in.
+  - **Stale deliveries:** a delivery the row has moved past never brings back
+    an old set.
 
 **Comments on pull requests** also arrive as `issue_comment`, with
 `issue.pull_request` set. They record nothing here; PR flow keeps its own
@@ -55,6 +65,12 @@ facts.
 
 **Volume:** about 100 `issues` and 45 `issue_comment` deliveries a day across
 the organisation. Each costs a few D1 writes: the row, plus one per label.
+
+## Settings
+
+| Setting | Meaning |
+|---|---|
+| `MAINTAINERS` | optional. Comma-separated GitHub logins, matched without regard to case, who count as maintainers when they comment, in addition to GitHub's `OWNER`, `MEMBER` and `COLLABORATOR`. GitHub reports an organisation member whose membership is **private** as a `CONTRIBUTOR`, so their responses wouldn't count without it. A change applies to comments that arrive after it. |
 
 ## History
 

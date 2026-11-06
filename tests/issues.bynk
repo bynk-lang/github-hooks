@@ -5,6 +5,10 @@
 // the webhook delivers them (the bodies cut short); each case varies them.
 suite github.hooks
 
+env {
+	MAINTAINERS = "Private-Maint, another"
+}
+
 fixture closedIssue = "fixtures/github/issues.closed.json"
 
 fixture commented = "fixtures/github/issue_comment.created.json"
@@ -50,6 +54,23 @@ fn issueAt(
 --- Issue #2982 open, at `updated`, with `labels`, after `action`.
 fn openIssue(action: String, updated: String, labels: List[String]) -> Bytes {
 	issueAt(action, "open", "null", updated, "null", labels)
+}
+
+---
+Issue #2982 open, after a `labeled` or `unlabeled` delivery naming `label`,
+at `updated`, with the set `labels` it carried. The `label` field goes in
+beside `action`, which `issueAt` sets (the trailing `"x"` absorbs the closing
+quote it adds).
+---
+fn labelEvent(action: String, label: String, updated: String, labels: List[String]) -> Bytes {
+	issueAt(
+		"\(action)\",\n  \"label\": {\"name\": \"\(label)\", \"color\": \"ededed\", \"default\": false}, \"x\": \"",
+		"open",
+		"null",
+		updated,
+		"null",
+		labels
+	)
 }
 
 ---
@@ -160,6 +181,77 @@ case "removing a label replaces the set; removing the last leaves none" {
 	expect none == Ok(Some("{\"n\":0}"))
 }
 
+case "labels added in the same second combine, whatever order their deliveries arrive in" {
+	// Two labels added at once: GitHub sends `labeled` for `proposal` (the set
+	// then `[proposal]`) and for `accepted` (`[proposal, accepted]`), both
+	// stamped 21:50:00. Issue #2982 gets them in that order, and #2983 in the
+	// other.
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "a-opened"),
+		openIssue("opened", "2026-11-05T21:46:31Z", [])
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "a-proposal"),
+		labelEvent("labeled", "proposal", "2026-11-05T21:50:00Z", ["proposal"])
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "a-accepted"),
+		labelEvent("labeled", "accepted", "2026-11-05T21:50:00Z", ["proposal", "accepted"])
+	) by GitHub
+	let other = (b: Bytes) => Bytes.fromUtf8(b
+		.decodeUtf8()
+		.getOrElse("")
+		.replace("\"number\": 2982", "\"number\": 2983"))
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "b-opened"),
+		other(openIssue("opened", "2026-11-05T21:46:31Z", []))
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "b-accepted"),
+		other(labelEvent("labeled", "accepted", "2026-11-05T21:50:00Z", ["proposal", "accepted"]))
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("issues", "b-proposal"),
+		other(labelEvent("labeled", "proposal", "2026-11-05T21:50:00Z", ["proposal"]))
+	) by GitHub
+	let names <- Deliveries.first(
+		"SELECT group_concat(number || ':' || label, ',') AS labels FROM (SELECT number, label FROM issue_labels ORDER BY number, label)",
+		[]
+	)
+	expect names == Ok(Some("{\"labels\":\"2982:accepted,2982:proposal,2983:accepted,2983:proposal\"}"))
+}
+
+case "a label removed in the same second as another is added stays removed, whatever the order" {
+	// `proposal` swapped for `accepted` at once: GitHub sends `labeled` for
+	// `accepted` (its set `[proposal, accepted]`) and `unlabeled` for
+	// `proposal` (`[accepted]`), both stamped 21:50:00. Issue #2982 gets them
+	// in that order, and #2983 in the other.
+	let other = (b: Bytes) => Bytes.fromUtf8(b
+		.decodeUtf8()
+		.getOrElse("")
+		.replace("\"number\": 2982", "\"number\": 2983"))
+	let added = labelEvent("labeled", "accepted", "2026-11-05T21:50:00Z", ["proposal", "accepted"])
+	let removed = labelEvent("unlabeled", "proposal", "2026-11-05T21:50:00Z", ["accepted"])
+	let opened = openIssue("opened", "2026-11-05T21:46:31Z", ["proposal"])
+	let _ <- api.POST("/github", headers("issues", "a-opened"), opened) by GitHub
+	let _ <- api.POST("/github", headers("issues", "a-added"), added) by GitHub
+	let _ <- api.POST("/github", headers("issues", "a-removed"), removed) by GitHub
+	let _ <- api.POST("/github", headers("issues", "b-opened"), other(opened)) by GitHub
+	let _ <- api.POST("/github", headers("issues", "b-removed"), other(removed)) by GitHub
+	let _ <- api.POST("/github", headers("issues", "b-added"), other(added)) by GitHub
+	let names <- Deliveries.first(
+		"SELECT group_concat(number || ':' || label, ',') AS labels FROM (SELECT number, label FROM issue_labels ORDER BY number, label)",
+		[]
+	)
+	expect names == Ok(Some("{\"labels\":\"2982:accepted,2983:accepted\"}"))
+}
+
 case "a reopened issue is open again, with no close time" {
 	let _ <- api.POST("/github", headers("issues", "closed"), Bytes.fromUtf8(closedIssue)) by GitHub
 	let _ <- api.POST(
@@ -233,6 +325,18 @@ case "the author's own comment, bots' and an outsider's aren't responses, and a 
 	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
 }
 
+case "a maintainer whose membership is private counts when named in MAINTAINERS" {
+	// GitHub reports a private member as a CONTRIBUTOR; `MAINTAINERS` names
+	// them, matched without regard to case.
+	let _ <- api.POST(
+		"/github",
+		headers("issue_comment", "private"),
+		commentBy("created", "private-maint", "User", "CONTRIBUTOR", "2026-11-06T07:40:00Z")
+	) by GitHub
+	let first <- Deliveries.first("SELECT first_responder FROM issues", [])
+	expect first == Ok(Some("{\"first_responder\":\"private-maint\"}"))
+}
+
 case "a deleted comment leaves the issue, and doesn't count as a response" {
 	let _ <- api.POST(
 		"/github",
@@ -276,7 +380,7 @@ case "a deleted issue becomes a tombstone with no labels, which a late delivery 
 	let _ <- api.POST(
 		"/github",
 		headers("issues", "late"),
-		openIssue("labeled", "2026-11-06T10:00:00Z", ["bug"])
+		labelEvent("labeled", "bug", "2026-11-06T10:00:00Z", ["bug"])
 	) by GitHub
 	let issue <- Deliveries.first("SELECT state FROM issues", [])
 	expect issue == Ok(Some("{\"state\":\"deleted\"}"))

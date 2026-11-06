@@ -2,16 +2,19 @@ commons github.issues
 
 uses github.events
 uses github.runs
+uses github.welcome
 
 ---
 The parts of an `issues` or `issue_comment` delivery the issue-response
 figures need (#48). Both carry the whole issue; `issue_comment` also carries
-the comment. GitHub sends comments on pull requests as `issue_comment` too,
-with `issue.pull_request` set.
+the comment, and `labeled` and `unlabeled` name the one label that changed.
+GitHub sends comments on pull requests as `issue_comment` too, with
+`issue.pull_request` set.
 ---
 type IssueDelivery = {
 	action: String,
 	issue: IssuePayload,
+	label: Option[LabelRef],
 	comment: Option[CommentPayload],
 	repository: RepoRef,
 }
@@ -67,7 +70,9 @@ type CommentPayload = {
 ---
 One issue, as `issues` stores it, with times in the `received_at` format.
 `state` is GitHub's, or `deleted` or `transferred` for a delivery that
-removes the issue from its repository.
+removes the issue from its repository. `labels` is the whole set when the
+delivery was sent; `label` is the one a `labeled` or `unlabeled` delivery
+added or removed.
 ---
 type IssueFact = {
 	repo: String,
@@ -84,6 +89,7 @@ type IssueFact = {
 	updatedAt: String,
 	comments: Int,
 	labels: List[String],
+	label: Option[String],
 }
 
 --- A maintainer's response to an issue: when, and by whom.
@@ -111,17 +117,22 @@ fn isMaintainer(association: String) -> Bool {
 
 ---
 Whether a comment is a maintainer's response to an issue: by a maintainer, not
-a bot, and not the issue's own author (who can't respond to themselves).
+a bot, and not the issue's own author (who can't respond to themselves). A
+maintainer is one by GitHub's author association, or one of `maintainers`
+(the `MAINTAINERS` setting, comma-separated logins): GitHub reports a member
+whose organisation membership is private as a `CONTRIBUTOR`.
 ---
-fn isResponse(c: CommentPayload, issueAuthor: String) -> Bool {
-	isMaintainer(c.author_association) && c.user.type != "Bot" && c.user.login != issueAuthor
+fn isResponse(c: CommentPayload, issueAuthor: String, maintainers: Option[String]) -> Bool {
+	let maintainer = isMaintainer(c.author_association) || allows(maintainers, c.user.login)
+	maintainer && c.user.type != "Bot" && c.user.login.toLower() != issueAuthor.toLower()
 }
 
 ---
 The issue an `issues` or `issue_comment` delivery describes, `None` for one
 about a pull request (a comment on a PR), or why it couldn't be read.
+`maintainers` is the `MAINTAINERS` setting (see `isResponse`).
 ---
-fn issueOf(body: Bytes) -> Result[Option[IssueNews], String] {
+fn issueOf(body: Bytes, maintainers: Option[String]) -> Result[Option[IssueNews], String] {
 	let Some(text) = body.decodeUtf8() else { Err("the payload is not UTF-8") }
 	let Ok(p) = Json.decode[IssueDelivery](text) else match {
 		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
@@ -136,7 +147,7 @@ fn issueOf(body: Bytes) -> Result[Option[IssueNews], String] {
 	}
 	let removed = p.action == "deleted" || p.action == "transferred"
 	let response: Option[IssueResponse] = match p.comment {
-		Some(c) => if p.action != "deleted" && isResponse(c, i.user.login) {
+		Some(c) => if p.action != "deleted" && isResponse(c, i.user.login, maintainers) {
 			isoTime(c.created_at).map((at) => IssueResponse { at: at, by: c.user.login })
 		} else {
 			None
@@ -161,6 +172,7 @@ fn issueOf(body: Bytes) -> Result[Option[IssueNews], String] {
 			updatedAt: updated,
 			comments: i.comments,
 			labels: i.labels.map((l) => l.name),
+			label: p.label.map((l) => l.name),
 		},
 		response: response,
 	}))
