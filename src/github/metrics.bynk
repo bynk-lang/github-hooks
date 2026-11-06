@@ -415,3 +415,86 @@ type RecentRelease = {
 type ReleasesRecent = {
 	releases: List[RecentRelease],
 }
+
+---
+`GET /metrics/runners`'s query: a repository (optional) and a window of 7 (the
+default), 30 or 90 days.
+---
+type RunnerQuery = {
+	repo: Option[RepoName],
+	days: WindowDays = 7,
+}
+
+---
+How long one repository's jobs waited for one kind of runner (#42): the
+runner label they asked for, how many started in the window, and the
+nearest-rank median and 95th percentile of `started_at - created_at`, in
+seconds, with the longest. Jobs held for a protected environment's approval,
+cancelled before a runner took them, or skipped, aren't counted.
+---
+type RunnerWait = {
+	repo: String,
+	runner: String,
+	jobs: Int,
+	p50_seconds: Option[Int],
+	p95_seconds: Option[Int],
+	longest_seconds: Option[Int],
+}
+
+--- One of a repository's longest waits for a runner in the window, linking to its job.
+type LongWait = {
+	repo: String,
+	workflow: String,
+	name: String,
+	runner: String,
+	wait_seconds: Int,
+	queued_at: String,
+	url: String,
+}
+
+---
+One of a repository's slowest jobs in the window, by its median duration
+(`completed_at - started_at`) over successful runs, with the 95th percentile.
+---
+type JobTime = {
+	repo: String,
+	workflow: String,
+	name: String,
+	runs: Int,
+	p50_seconds: Option[Int],
+	p95_seconds: Option[Int],
+}
+
+---
+`GET /metrics/runners`: the window, and each repository's waits by runner,
+longest waits and slowest jobs. The figures are computed hourly
+(`computed_at`; `None` before the first time), so the window ends then, not
+now. `data_since` is when the first job was recorded.
+---
+type RunnerMetrics = {
+	since: Option[String],
+	until: Option[String],
+	computed_at: Option[String],
+	data_since: Option[String],
+	runners: List[RunnerWait],
+	longest: List[LongWait],
+	slowest: List[JobTime],
+}
+
+---
+What one repository's jobs are waiting for now, by runner label: how many
+are queued for a runner, and since when the oldest; and how many are held
+for a protected environment's approval.
+---
+type WaitingNow = {
+	repo: String,
+	runner: String,
+	queued: Int,
+	oldest_queued_at: Option[String],
+	awaiting_approval: Int,
+}
+
+--- `GET /metrics/runners/now`.
+type RunnersNow = {
+	waiting: List[WaitingNow],
+}

@@ -43,6 +43,14 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 4, step 2 (#42): the runner-wait routes.
+  - **`GET /metrics/runners`:** over 7, 30 or 90 days, each public
+    repository's waits for a runner by label (p50, p95, longest), its 10
+    longest waits, and its 10 slowest jobs. The figures are computed hourly by
+    the `runnerFigures` cron into `runner_windows` (migration `0012`), about
+    1.3 million rows read an hour, rather than per request.
+  - **`GET /metrics/runners/now`:** jobs queued for a runner and held for an
+    approval now, by runner label, read live from the waiting index.
 - Phase 4, slice 4, step 1 (#42): job facts for runner wait.
   - **Recording:** `workflow_job` deliveries become `workflow_jobs` rows
     (migration `0011`), one per job attempt, moving only forward. Each row
