@@ -498,3 +498,117 @@ type WaitingNow = {
 type RunnersNow = {
 	waiting: List[WaitingNow],
 }
+
+---
+`GET /metrics/issues`'s query: a repository (optional) and a window of 7 (the
+default), 30 or 90 days.
+---
+type IssueQuery = {
+	repo: Option[RepoName],
+	days: WindowDays = 7,
+}
+
+---
+One repository's issues over the window (#48). Figures are for issues opened
+by people; bots' are the `bots_` fields. Times are nearest-rank percentiles,
+in seconds.
+
+- `opened`: issues opened in the window.
+- `completed`, `not_planned`, `duplicate`: issues closed in the window, by
+  GitHub's reason (an old close with none counts as completed).
+- `close_p50_seconds`, `close_p90_seconds`: `closed_at - opened_at`, over
+  the `completed` ones.
+- `outside_*`: issues opened in the window by people outside the org (not an
+  owner, member or collaborator by GitHub's author association, nor a member
+  confirmed through the API). `outside_responded` had a maintainer's first
+  response, and `response_*` is how long it took (`first_response_at -
+  opened_at`); `outside_waiting` are still open with none.
+---
+type IssueFlow = {
+	repo: String,
+	opened: Int,
+	completed: Int,
+	not_planned: Int,
+	duplicate: Int,
+	close_p50_seconds: Option[Int],
+	close_p90_seconds: Option[Int],
+	outside_opened: Int,
+	outside_responded: Int,
+	outside_waiting: Int,
+	response_p50_seconds: Option[Int],
+	response_p90_seconds: Option[Int],
+	bots_opened: Int,
+}
+
+---
+Time to close for one label: over issues by people closed as completed in the
+window that carry it. `label` is `None` for issues with no label.
+---
+type LabelClose = {
+	repo: String,
+	label: Option[String],
+	completed: Int,
+	p50_seconds: Option[Int],
+	p90_seconds: Option[Int],
+}
+
+--- Issues by people opened, and closed (for any reason), on one UTC day.
+type IssueDay = {
+	repo: String,
+	day: String,
+	opened: Int,
+	closed: Int,
+}
+
+---
+`GET /metrics/issues`: the window, how much of it has data (`data_since`, the
+first close recorded), and each repository's flow, time to close by label,
+and days.
+---
+type IssueMetrics = {
+	since: String,
+	until: String,
+	data_since: Option[String],
+	repos: List[IssueFlow],
+	labels: List[LabelClose],
+	daily: List[IssueDay],
+}
+
+---
+One repository's open issues by people now, by age (`under_day`,
+`under_week`, `under_month`, `older`), with the oldest one's opening, and how
+many are `stale` (no update for 14 days). `bots_open` counts bots' open
+issues.
+---
+type IssueBacklog = {
+	repo: String,
+	open: Int,
+	under_day: Int,
+	under_week: Int,
+	under_month: Int,
+	older: Int,
+	oldest_opened_at: Option[String],
+	stale: Int,
+	bots_open: Int,
+}
+
+--- A stale issue: open, by a person, with no update for 14 days.
+type StaleIssue = {
+	repo: String,
+	number: Int,
+	title: String,
+	author: String,
+	labels: List[String],
+	opened_at: String,
+	updated_at: String,
+	url: String,
+}
+
+---
+`GET /metrics/issues/open`: each repository's backlog, and its stale issues,
+least recently updated first (at most `MAX_STALE_ISSUES` in all).
+---
+type IssuesOpen = {
+	backlog: List[IssueBacklog],
+	stale: List[StaleIssue],
+}
