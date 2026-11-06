@@ -369,8 +369,9 @@ type ReleaseFlow = {
 
 ---
 A repository's release workflow over the window: a workflow that ran on a
-release's tag, and its runs pushed to anything but the default branch (so a
-tag whose release run failed, and was never published, counts too).
+release's tag, and its runs on tags, whether or not a release came of them
+(so a tag whose release run failed, and was never published, counts too);
+its runs on branches don't count.
 `failed` counts failures and timeouts; `p50_seconds` is the median time from
 queued to completed of the successful runs.
 ---
@@ -394,8 +395,9 @@ type ReleaseMetrics = {
 ---
 One published release. `previous_tag` is the final release it was compared
 with (`None` until it is matched, and for one with nothing before it to
-compare with); `shipped` is how many pull requests it shipped (`None` when
-that isn't known).
+compare with); `shipped` is how many pull requests it shipped, bots' included
+(`None` when that isn't known), and `shipped_by_people` how many of them were
+by people, the pull requests `/metrics/releases` measures.
 ---
 type RecentRelease = {
 	repo: String,
@@ -405,6 +407,7 @@ type RecentRelease = {
 	published_at: String,
 	previous_tag: Option[String],
 	shipped: Option[Int],
+	shipped_by_people: Option[Int],
 	url: String,
 }
 

@@ -51,11 +51,13 @@ All notable changes to github-hooks. The format follows
     percentile);
   - what's waiting to ship since the latest release;
   - when its pull requests began to be recorded;
-  - its release workflow's runs, failures and median time.
+  - its release workflow's runs on tags, failures and median time (tags are
+    recorded from `push` deliveries, in a new `tags` table).
 
   `GET /metrics/releases/recent?repo=` lists each repository's latest 20
-  releases. Both are public, cached at the edge and rate-limited like the
-  other metrics routes. Migration `0010` adds the indexes they search by.
+  releases, with how many pull requests each shipped and how many were by
+  people. Both are public, cached at the edge and rate-limited like the
+  other metrics routes. Migration `0010` adds `tags` and the indexes they search by.
 - Phase 4, slice 3, step 2 (#36): the daily release sync. A `releaseSync`
   cron service (04:47 UTC) lists each public repository's releases (up to 90)
   and records them, so release history is there from the first run; marks

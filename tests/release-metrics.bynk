@@ -103,37 +103,46 @@ fn seed() -> List[SqlStatement] {
 `bynk-lang/bynk`'s release workflow (`release.yml`, as it ran on the tags of
 v1.2.0 and v1.3.0) ran in the week on v1.2.0 (20 minutes), v1.3.0 (30
 minutes) and v1.2.1, a tag whose run failed, so it has no release: 3 runs, 1
-failed, a median of 1200 s over the two that passed. Not counted: its run
-on v1.0.0, before the window; its run on `main` (the default branch, so not a
-release); CI on `main`; and a lint workflow pushed to a feature branch, which
-never ran on a release's tag.
+failed, a median of 1200 s over the two that passed. v1.2.1 is known to be a
+tag because it was pushed as one. Not counted: its run on v1.0.0, before the
+window; its runs on `main` and on a feature branch, which aren't tags; CI on
+`main`; and a lint workflow pushed to a feature branch, which never ran on a
+release's tag.
 ---
-fn runs() -> SqlStatement {
-	SqlStatement {
-		sql: """
-			INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
-			                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
-			  ('bynk-lang/bynk', 1, 1, 'Release', '.github/workflows/release.yml', 'v1.2.0', 'a', 'push', 'completed', 'success',
-			   '2026-11-02T11:00:00.000Z', '2026-11-02T11:00:00.000Z', NULL, '2026-11-02T11:20:00.000Z', '2026-11-02T11:20:00.000Z'),
-			  ('bynk-lang/bynk', 2, 1, 'Release', '.github/workflows/release.yml', 'v1.3.0', 'b', 'push', 'completed', 'success',
-			   '2026-11-04T11:00:00.000Z', '2026-11-04T11:00:00.000Z', NULL, '2026-11-04T11:30:00.000Z', '2026-11-04T11:30:00.000Z'),
-			  ('bynk-lang/bynk', 3, 1, 'Release', '.github/workflows/release.yml', 'v1.2.1', 'c', 'push', 'completed', 'failure',
-			   '2026-11-03T10:00:00.000Z', '2026-11-03T10:00:00.000Z', NULL, '2026-11-03T10:10:00.000Z', '2026-11-03T10:10:00.000Z'),
-			  ('bynk-lang/bynk', 4, 1, 'Release', '.github/workflows/release.yml', 'v1.0.0', 'd', 'push', 'completed', 'success',
-			   '2026-10-20T11:00:00.000Z', '2026-10-20T11:00:00.000Z', NULL, '2026-10-20T11:30:00.000Z', '2026-10-20T11:30:00.000Z'),
-			  ('bynk-lang/bynk', 7, 1, 'Release', '.github/workflows/release.yml', 'main', 'g', 'push', 'completed', 'failure',
-			   '2026-11-04T08:00:00.000Z', '2026-11-04T08:00:00.000Z', NULL, '2026-11-04T08:01:00.000Z', '2026-11-04T08:01:00.000Z'),
-			  ('bynk-lang/bynk', 5, 1, 'CI', '.github/workflows/ci.yml', 'main', 'e', 'push', 'completed', 'success',
-			   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', NULL, '2026-11-04T09:10:00.000Z', '2026-11-04T09:10:00.000Z'),
-			  ('bynk-lang/bynk', 6, 1, 'Lint', '.github/workflows/lint.yml', 'a-feature', 'f', 'push', 'completed', 'failure',
-			   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', NULL, '2026-11-04T09:05:00.000Z', '2026-11-04T09:05:00.000Z')
-		""",
-		params: [],
-	}
+fn runs() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO tags (repo, tag, pushed_at) VALUES ('bynk-lang/bynk', 'v1.2.1', '2026-11-03T09:59:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+				                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+				  ('bynk-lang/bynk', 1, 1, 'Release', '.github/workflows/release.yml', 'v1.2.0', 'a', 'push', 'completed', 'success',
+				   '2026-11-02T11:00:00.000Z', '2026-11-02T11:00:00.000Z', NULL, '2026-11-02T11:20:00.000Z', '2026-11-02T11:20:00.000Z'),
+				  ('bynk-lang/bynk', 2, 1, 'Release', '.github/workflows/release.yml', 'v1.3.0', 'b', 'push', 'completed', 'success',
+				   '2026-11-04T11:00:00.000Z', '2026-11-04T11:00:00.000Z', NULL, '2026-11-04T11:30:00.000Z', '2026-11-04T11:30:00.000Z'),
+				  ('bynk-lang/bynk', 3, 1, 'Release', '.github/workflows/release.yml', 'v1.2.1', 'c', 'push', 'completed', 'failure',
+				   '2026-11-03T10:00:00.000Z', '2026-11-03T10:00:00.000Z', NULL, '2026-11-03T10:10:00.000Z', '2026-11-03T10:10:00.000Z'),
+				  ('bynk-lang/bynk', 4, 1, 'Release', '.github/workflows/release.yml', 'v1.0.0', 'd', 'push', 'completed', 'success',
+				   '2026-10-20T11:00:00.000Z', '2026-10-20T11:00:00.000Z', NULL, '2026-10-20T11:30:00.000Z', '2026-10-20T11:30:00.000Z'),
+				  ('bynk-lang/bynk', 7, 1, 'Release', '.github/workflows/release.yml', 'main', 'g', 'push', 'completed', 'failure',
+				   '2026-11-04T08:00:00.000Z', '2026-11-04T08:00:00.000Z', NULL, '2026-11-04T08:01:00.000Z', '2026-11-04T08:01:00.000Z'),
+				  ('bynk-lang/bynk', 8, 1, 'Release', '.github/workflows/release.yml', 'a-feature', 'h', 'push', 'completed', 'failure',
+				   '2026-11-04T07:00:00.000Z', '2026-11-04T07:00:00.000Z', NULL, '2026-11-04T07:02:00.000Z', '2026-11-04T07:02:00.000Z'),
+				  ('bynk-lang/bynk', 5, 1, 'CI', '.github/workflows/ci.yml', 'main', 'e', 'push', 'completed', 'success',
+				   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', NULL, '2026-11-04T09:10:00.000Z', '2026-11-04T09:10:00.000Z'),
+				  ('bynk-lang/bynk', 6, 1, 'Lint', '.github/workflows/lint.yml', 'a-feature', 'f', 'push', 'completed', 'failure',
+				   '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', NULL, '2026-11-04T09:05:00.000Z', '2026-11-04T09:05:00.000Z')
+			""",
+			params: [],
+		},
+	]
 }
 
 case "a week of releases: cadence, merge to release, what's waiting, and the release workflow" {
-	let seeded <- Deliveries.batch(seed().append(runs()))
+	let seeded <- Deliveries.batch(seed().concat(runs()))
 	expect seeded is Ok(_)
 	let r <- api.GET("/metrics/releases", ReleaseQuery { repo: None, days: 7 }, viewer()) by Visitor
 	let Ok(m) = r else {
@@ -181,7 +190,7 @@ case "a week of releases: cadence, merge to release, what's waiting, and the rel
 }
 
 case "a longer window of releases reaches further back, and a repository filter narrows it" {
-	let seeded <- Deliveries.batch(seed().append(runs()))
+	let seeded <- Deliveries.batch(seed().concat(runs()))
 	expect seeded is Ok(_)
 	// 30 days from 6 Oct: v1.0.0 joins (with no release before it, no
 	// interval), and so does #5's 432000 s: p50 21600, p95 432000.
@@ -235,6 +244,7 @@ case "recent releases, newest first: pre-releases marked, drafts and deleted one
 		published_at: "2026-11-04T12:00:00.000Z",
 		previous_tag: Some("v1.2.0"),
 		shipped: Some(2),
+		shipped_by_people: Some(1),
 		url: "https://github.com/bynk-lang/bynk/releases/tag/v1.3.0",
 	})
 	expect m.releases.map((x) => x.prerelease) == [false, false, false, true, false, false]
@@ -310,4 +320,48 @@ case "a releases window other than 7, 30 or 90 days is refused, and the limit ap
 	expect limited is TooManyRequests(_)
 	let recent <- api.GET("/metrics/releases/recent", NowQuery { repo: None }, viewer()) by Visitor
 	expect recent is TooManyRequests(_)
+}
+
+---
+A `push` delivery for `ref` in `bynk-lang/bynk`, as GitHub sends it (cut to
+the fields read), deleting the ref when `deleted`.
+---
+fn push(ref: String, deleted: Bool) -> Bytes {
+	Bytes.fromUtf8(
+		"{\"ref\": \"\(ref)\", \"before\": \"0000\", \"after\": \"abcd\", \"created\": \(if deleted { "false" } else { "true" }), \"deleted\": \(if deleted { "true" } else { "false" }), \"repository\": {\"id\": 1, \"full_name\": \"bynk-lang/bynk\", \"private\": false}, \"sender\": {\"login\": \"a-person\", \"type\": \"User\"}}"
+	)
+}
+
+--- A delivery's headers.
+fn headers(event: String, id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: \(event)", "X-GitHub-Delivery: \(id)"])
+}
+
+case "a pushed tag is recorded, once; a branch push or a tag's deletion isn't" {
+	let first <- api.POST(
+		"/github",
+		headers("push", "push-tag"),
+		push("refs/tags/v1.2.1", false)
+	) by GitHub
+	expect first is Accepted(_)
+	let _ <- api.POST(
+		"/github",
+		headers("push", "push-again"),
+		push("refs/tags/v1.2.1", false)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("push", "push-branch"),
+		push("refs/heads/a-feature", false)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("push", "push-gone"),
+		push("refs/tags/v0.1.0", true)
+	) by GitHub
+	let rows <- Deliveries.first(
+		"SELECT group_concat(t.repo || ' ' || t.tag || ' ' || (t.pushed_at = d.received_at), ', ') AS rows FROM tags t JOIN deliveries d ON d.id = 'push-tag'",
+		[]
+	)
+	expect rows == Ok(Some("{\"rows\":\"bynk-lang/bynk v1.2.1 1\"}"))
 }

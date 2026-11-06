@@ -142,9 +142,12 @@ are nearest-rank percentiles, in seconds.
 | `recording_since` | when the repository's pull requests began to be recorded: nothing merged before it can be measured |
 
 `pipeline` lists each repository's release workflow over the window. A release
-workflow is one that ran on a release's tag. Its runs pushed to anything but
-the default branch are counted, so a tag whose release run failed, and was
-never published, counts too. Each entry gives:
+workflow is one that ran on a release's tag. Only its runs on tags are counted,
+not those on branches, so a workflow triggered by every push isn't judged by
+its feature-branch runs. A run names its ref without saying whether it's a
+branch or a tag, so a tag is known by having a release, or by a `push` delivery
+that pushed it (`refs/tags/…`, recorded in `tags`). So a tag whose release run
+failed, and was never published, still counts. Each entry gives:
 - `runs`;
 - `failed` (failures and timeouts);
 - `p50_seconds`, the median time from queued to completed of the successful
@@ -156,21 +159,26 @@ Each repository's latest 20 published releases, newest first, with:
 - `prerelease`;
 - `previous_tag`, the final release it was compared with, or `null` until
   it's matched and for one with nothing before it;
-- `shipped`, `null` when unknown;
+- `shipped`, every PR it shipped, bots' included, `null` when unknown;
+- `shipped_by_people`, how many of them were by people: the PRs
+  `/metrics/releases` measures;
 - a `url` to the release on GitHub.
 
 ### Queries
 
-Migration `0010` adds two indexes, chosen with `EXPLAIN QUERY PLAN`:
+Migration `0010` adds `tags` (each tag pushed, from `push` deliveries) and
+three indexes, chosen with `EXPLAIN QUERY PLAN`:
 - `pull_requests_by_released`, on `released_at`, for merge to release over a
   window;
 - `pull_requests_unreleased`, on `(repo, merged_at)` for merged pull requests
-  no release has shipped, for what's waiting.
+  no release has shipped, for what's waiting;
+- `pull_requests_by_release`, on `(repo, released_in)`, for each recent
+  release's count by people.
 
 What's waiting is driven from each repository's latest release, so it searches
 that index rather than scanning every unreleased pull request, which grows
 with repositories that never release. The release workflows are found among
-the window's runs through `workflow_runs_by_completed`, then by each run's tag
-in `releases`. `releases` itself is read whole for the shown repositories.
+the window's runs through `workflow_runs_by_completed`, each run's ref looked up
+in `tags` and `releases` by primary key. `releases` itself is read whole for the shown repositories.
 That's at most 90 releases each, as the sync keeps them, and the interval
 needs each repository's earlier releases anyway.

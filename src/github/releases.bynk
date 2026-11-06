@@ -207,3 +207,31 @@ fn pullNumberOf(message: String) -> Option[Int] {
 		None
 	}
 }
+
+---
+The parts of a `push` delivery that say a tag was pushed: `ref` is
+`refs/tags/<tag>` for a tag, and `deleted` is true when the push removed it.
+---
+type PushDelivery = {
+	ref: String,
+	deleted: Option[Bool],
+	repository: RepoRef,
+}
+
+--- A tag pushed to a repository.
+type TagPush = {
+	repo: String,
+	tag: String,
+}
+
+---
+The tag a `push` delivery pushed, if it pushed one: not a branch, and not a
+tag's deletion. A workflow run names its ref without saying whether it is a
+branch or a tag, so these say which runs were for tags (#36).
+---
+fn tagOf(body: Bytes) -> Option[TagPush] {
+	let Some(text) = body.decodeUtf8() else { None }
+	let Ok(p) = Json.decode[PushDelivery](text) else { None }
+	let true = p.ref.startsWith("refs/tags/") && !p.deleted.getOrElse(false) else { None }
+	Some(TagPush { repo: p.repository.full_name, tag: p.ref.slice(10, p.ref.length()) })
+}

@@ -414,7 +414,9 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 		let _ <- recordVisibility(body)
 		let _ <- if d.event == "pull_request_review" {
 			recordReview(d, body)
-		} else if d.event == "release" { recordRelease(d, body) } else { Effect.pure(()) }
+		} else if d.event == "release" {
+			recordRelease(d, body)
+		} else if d.event == "push" { recordTag(d, body) } else { Effect.pure(()) }
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {
 			recordRun(d, body)
@@ -635,6 +637,23 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 			params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
 		},
 	]
+}
+
+// Records a tag a push delivery pushed (#36), so the release workflow's runs
+// can be told from its runs on branches. The first push of a tag is kept.
+fn recordTag(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Some(t) = tagOf(body) else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO tags (repo, tag, pushed_at)
+		SELECT ?1, ?2, received_at FROM deliveries WHERE id = ?3
+		ON CONFLICT (repo, tag) DO NOTHING
+		""",
+		[Text(t.repo), Text(t.tag), Text(d.id)]
+	) else match {
+		Err(e) => Logger.error("could not record tag \(t.repo) \(t.tag): \(sqlError(e))"),
+	}
+	Effect.pure(())
 }
 
 // Records a release (#36). A `deleted` delivery marks the row deleted (kept,
@@ -2037,7 +2056,7 @@ service api from http {
 				_ => Deliveries.all(
 					"""
 						WITH shown AS (
-						  SELECT repo, default_branch FROM repositories
+						  SELECT repo FROM repositories
 						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
 						),
 						runs AS MATERIALIZED (
@@ -2045,7 +2064,8 @@ service api from http {
 						    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS v
 						  FROM workflow_runs w JOIN shown s ON s.repo = w.repo
 						  WHERE w.completed_at >= ?1 AND w.completed_at < ?2 AND w.event = 'push'
-						    AND w.branch IS NOT NULL AND w.branch != coalesce(s.default_branch, '')
+						    AND (EXISTS (SELECT 1 FROM tags t WHERE t.repo = w.repo AND t.tag = w.branch)
+						         OR EXISTS (SELECT 1 FROM releases r WHERE r.repo = w.repo AND r.tag = w.branch))
 						),
 						release_paths AS (
 						  SELECT DISTINCT u.repo, u.path FROM runs u
@@ -2128,6 +2148,9 @@ service api from http {
 			)
 			SELECT repo, tag, name, prerelease = 1 AS prerelease, published_at,
 			  nullif(previous_tag, '') AS previous_tag, shipped,
+			  CASE WHEN shipped IS NOT NULL THEN
+			    (SELECT count(*) FROM pull_requests p WHERE p.repo = ranked.repo AND p.released_in = ranked.tag AND p.author_is_bot = 0)
+			  END AS shipped_by_people,
 			  'https://github.com/' || repo || '/releases/tag/' || tag AS url
 			FROM ranked WHERE rn <= ?2
 			ORDER BY published_at DESC, repo, tag
