@@ -130,6 +130,18 @@ jobs:
           WELCOME_ASSOCIATIONS: ${{ secrets.WELCOME_ASSOCIATIONS != '' }}
           BUMP_APP_ID: ${{ secrets.BUMP_APP_ID != '' }}
           BUMP_APP_KEY: ${{ secrets.BUMP_APP_KEY != '' }}
+          # Each secret is one dotenv line, so a value with a line break would
+          # be cut short there: most likely a wrapped APP_PRIVATE_KEY.
+          MULTILINE: >-
+            ${{ contains(secrets.APP_WEBHOOK_SECRET, fromJSON('"\n"')) && 'APP_WEBHOOK_SECRET' || '' }}
+            ${{ contains(secrets.API_TOKEN_SECRET, fromJSON('"\n"')) && 'API_TOKEN_SECRET' || '' }}
+            ${{ contains(secrets.MAINTAINER_TOKEN_SECRET, fromJSON('"\n"')) && 'MAINTAINER_TOKEN_SECRET' || '' }}
+            ${{ contains(secrets.APP_CLIENT_ID, fromJSON('"\n"')) && 'APP_CLIENT_ID' || '' }}
+            ${{ contains(secrets.APP_PRIVATE_KEY, fromJSON('"\n"')) && 'APP_PRIVATE_KEY' || '' }}
+            ${{ contains(secrets.APP_CLIENT_SECRET, fromJSON('"\n"')) && 'APP_CLIENT_SECRET' || '' }}
+            ${{ contains(secrets.ACTION_REPOS, fromJSON('"\n"')) && 'ACTION_REPOS' || '' }}
+            ${{ contains(secrets.DASHBOARD_EXCLUDE, fromJSON('"\n"')) && 'DASHBOARD_EXCLUDE' || '' }}
+            ${{ contains(secrets.WELCOME_ASSOCIATIONS, fromJSON('"\n"')) && 'WELCOME_ASSOCIATIONS' || '' }}
         run: |
           row() { printf '| `%s` | %s | %s |\n' "$1" "$([ "$2" = true ] && echo set || echo missing)" "$3"; }
           {
@@ -159,6 +171,11 @@ jobs:
           done
           if [ -n "$missing" ]; then
             echo "::error::Set${missing} in the production environment to deploy."
+            exit 1
+          fi
+          broken=$(echo $MULTILINE)
+          if [ -n "$broken" ]; then
+            echo "::error::Store each of these as one line, with no line breaks (for the key, base64 -w0): $broken"
             exit 1
           fi
 
@@ -213,13 +230,17 @@ jobs:
             bynk.schema.lock
 
       # The live Worker answers: its root, and public figures read from D1.
+      # The metrics routes are edge-cached per URL, so the figures ask for a
+      # branch no run has, unique to this run: never a cached copy from the
+      # previous version, always the new Worker reading D1.
       - name: Check the live Worker
         if: ${{ !inputs.check-only }}
         env:
           BASE: https://github-hooks.bynk-lang.workers.dev
+          UNIQUE: deploy-check-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           fail=0
-          for path in /about "/metrics/ci?days=7" /metrics/releases/recent; do
+          for path in /about "/metrics/ci?days=7&branch=$UNIQUE"; do
             status=000
             for attempt in 1 2 3 4 5; do
               status=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE$path" || echo 000)

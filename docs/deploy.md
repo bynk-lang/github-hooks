@@ -17,9 +17,19 @@ per name, instead of a local `.secrets.env`.
 deploys it. Production deploys run one at a time and are never cancelled
 halfway.
 
-After a deploy, the job checks the live Worker: `/about`, and two public
-metrics routes, which read D1. A failure there fails the run but rolls nothing
+After a deploy, the job checks the live Worker: `/about`, and the CI figures
+for a branch unique to the run, which skips the edge cache and reads D1. A failure there fails the run but rolls nothing
 back.
+
+## The environment
+
+Create `production` under *Settings → Environments*. Under **Deployment
+branches and tags**, choose *Selected branches and tags* and allow the branch
+`main` and the tag pattern `v*`. GitHub enforces that rule whatever a workflow
+says. Without it, a pull request from a branch that edits `deploy.yml` (or adds
+a workflow) could name `environment: production` and read every secret below:
+the guards in `deploy.yml` only bind the copy on `main`. Required reviewers are
+optional on top: each deploy then waits for an approval.
 
 ## The secrets
 
@@ -39,8 +49,10 @@ Set these under *Settings → Environments → production → Environment secret
 | `DASHBOARD_EXCLUDE` | optional |
 | `WELCOME_ASSOCIATIONS` | optional |
 
-Enter each value exactly as it is in `.secrets.env`, without quotes, and delete
-`.secrets.env` once they're in. The lock pull request also uses the
+Enter each value exactly as it is in `.secrets.env`, on one line, without
+quotes, and delete `.secrets.env` once they're in. Each value becomes one line
+of the deploy's secrets file, so the deploy refuses a value with a line break
+(for the key, make it with `base64 -w0`). The lock pull request also uses the
 organisation's `BUMP_APP_ID` and `BUMP_APP_KEY`, which are already shared with
 this repository; they don't go in the environment.
 
