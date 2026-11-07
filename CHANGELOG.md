@@ -6,6 +6,13 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/deploy.md` says what the lock holds and when it changes: also whenever
+  a page's script or styles change, so most releases leave a lock to commit.
+  It says how to commit a tag deploy's lock, and that the lock from the last
+  local deploy must be committed before the first deploy from CI.
+
 ## [0.2.0] - 2026-11-07
 
 Phases 2 to 4: the read API, daily digest and retention; the App acting on

@@ -75,12 +75,26 @@ invalidates every token or session signed with the old value.
 
 ## The lock file
 
-A deploy that creates something new (a KV namespace, a D1 database, a context)
-changes `bynk.deploy.lock`, which must be committed. A manual run from `main`
-opens a pull request with the new lock, through the organisation's bump App. A
-tag's deploy can't (a tag isn't a branch to open one against), so it keeps the
-lock as the run's `bynk.deploy.lock` artifact, to commit by hand. Most deploys
-change nothing in it.
+`bynk.deploy.lock` records what the deploys have set up, and must be
+committed. It holds no secrets: the ids of the KV namespace, the D1 database
+and the rate limiters, the contexts deployed, and each static asset by its
+hashed file name. A deploy changes it when it creates something new, and
+whenever a page's script or styles change. So most releases that touch the
+pages change it.
+
+**After a release.** A tag's deploy can't open a pull request for the new lock
+(a tag isn't a branch to open one against), so it keeps the lock as the run's
+`bynk.deploy.lock` artifact: download it from the run's page (*Artifacts*, at
+the bottom) or with `gh run download <run id> -n bynk.deploy.lock`, and commit
+it. Or run *Deploy* manually on `main`: it redeploys the same code, and opens
+the lock pull request itself, through the organisation's bump App.
+
+**Before the first deploy from CI.** The committed lock must hold everything
+the last deploy by hand set up. The driver won't create again what a lock
+should already record, such as a rate limiter, since a second one wouldn't be
+the one that's live: it stops, naming it, and asks for the lock. v0.2.0's
+first tag hit this, as the rate limiters had only ever been recorded in a
+local lock. So commit the lock from the last local deploy first.
 
 ## By hand
 
