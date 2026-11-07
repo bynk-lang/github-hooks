@@ -2180,7 +2180,12 @@ service api from http {
 			)
 		}
 		let now <- Clock.now()
-		let version <- sessionVersion(user.login)
+		let Ok(version) <- sessionVersion(user.login) else match {
+			Err(why) => {
+				let _ <- Logger.error("could not read \(user.login)'s session: \(why)")
+				ServiceUnavailable("could not start your sign-in; try again")
+			},
+		}
 		let token <- sessionToken(signing, "\(user.login):\(version)", now)
 		Ok(SignedIn { token: token, expires_in: SESSION_SECONDS, login: user.login })
 	}
@@ -4892,7 +4897,8 @@ fn metricsRunnersNow(
 }
 
 // Lets a maintainer request through (#53), within their per-login limit,
-// with a session that hasn't been signed out, once GitHub still counts them a
+// with a session that hasn't been signed out (checked, or refused if it
+// can't be), once GitHub still counts them a
 // member of the organisation (a kept answer first), else answers why not.
 // `who` is the token's subject, `login:version` (see `sessionOf`); `answer`
 // is given the login.
@@ -4906,7 +4912,12 @@ fn forMaintainer[T](
 	let true = allowed else {
 		TooManyRequests("too many requests for your figures; try again in a minute")
 	}
-	let current <- sessionVersion(login)
+	let Ok(current) <- sessionVersion(login) else match {
+		Err(why) => {
+			let _ <- Logger.error("could not read \(login)'s session: \(why)")
+			ServiceUnavailable("could not check your sign-in; try again")
+		},
+	}
 	let true = session.version == current else {
 		RawError(
 			Forbidden,
@@ -4933,18 +4944,20 @@ fn forMaintainer[T](
 }
 
 // A login's current session version (#53, step 5): 0 until they first sign
-// out. A failed read counts as 0, so it never signs anyone out by itself.
-fn sessionVersion(login: String) -> Effect[Int] given Deliveries {
+// out. A read that fails is an error, never 0: 0 would let a signed-out
+// token back in, so callers refuse rather than guess (fail closed).
+fn sessionVersion(login: String) -> Effect[Result[Int, String]] given Deliveries {
 	let stored <- Deliveries.first(
 		"SELECT version FROM maintainer_sessions WHERE login = ?1",
 		[Text(login)]
 	)
 	match stored {
+		Ok(None) => Effect.pure(Ok(0)),
 		Ok(Some(row)) => match Json.decodeSql[SessionRow](row) {
-			Ok(r) => Effect.pure(r.version),
-			Err(_) => Effect.pure(0),
+			Ok(r) => Effect.pure(Ok(r.version)),
+			Err(e) => Effect.pure(Err(jsonError(e))),
 		},
-		_ => Effect.pure(0),
+		Err(e) => Effect.pure(Err(sqlError(e))),
 	}
 }
 
@@ -5195,8 +5208,7 @@ fn rerunFailedJobs(login: String, r: RerunRequest) -> Effect[HttpResult[RerunDon
 		   WHERE d.repo = w.repo COLLATE NOCASE AND d.installation IS NOT NULL
 		   ORDER BY d.received_at DESC LIMIT 1) AS installation,
 		  EXISTS (SELECT 1 FROM maintainer_actions a
-		          WHERE a.repo = w.repo AND a.run_id = w.run_id AND a.attempt = w.attempt
-		            AND a.status BETWEEN 200 AND 299) AS rerun
+		          WHERE a.repo = w.repo AND a.run_id = w.run_id AND a.attempt = w.attempt AND a.claimed = 1) AS rerun
 		FROM workflow_runs w
 		WHERE w.repo = ?1 COLLATE NOCASE AND w.run_id = ?2
 		ORDER BY w.attempt DESC LIMIT 1
@@ -5233,6 +5245,36 @@ fn rerunFailedJobs(login: String, r: RerunRequest) -> Effect[HttpResult[RerunDon
 	let Some(installation) = run.installation else {
 		ServiceUnavailable("no installation of the App has delivered for \(run.repo)")
 	}
+	// Claim the attempt before asking GitHub: two requests close together
+	// (a double click, two tabs, two maintainers) can both pass the check
+	// above, but only one claim is kept (`maintainer_actions_claimed`), so
+	// only one reaches GitHub. A refusal gives the claim up, so it can be
+	// tried again.
+	let claimedAt <- Clock.now()
+	let claim <- Deliveries.run(
+		"""
+		INSERT OR IGNORE INTO maintainer_actions (login, action, repo, run_id, attempt, at, status, outcome, claimed)
+		VALUES (?1, 'rerun-failed-jobs', ?2, ?3, ?4, ?5, NULL, 'pending', 1)
+		""",
+		[
+			Text(login),
+			Text(run.repo),
+			Integer(r.run_id),
+			Integer(run.attempt),
+			Text(claimedAt.toIso()),
+		]
+	)
+	let Ok(claimed) = claim else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not claim \(run.repo) run \(r.run_id) for a re-run: \(sqlError(e))"
+			)
+			ServerError("could not record the re-run; nothing was asked of GitHub")
+		},
+	}
+	let true = claimed.changes > 0 else {
+		Conflict("attempt \(run.attempt) of run \(r.run_id) is already being re-run")
+	}
 	let url = "https://api.github.com/repos/\(run.repo)/actions/runs/\(r.run_id)/rerun-failed-jobs"
 	let sent <- asApp(installation, (token) => GitHubHttp.post(token, url, "{}"))
 	let now <- Clock.now()
@@ -5255,19 +5297,21 @@ fn rerunFailedJobs(login: String, r: RerunRequest) -> Effect[HttpResult[RerunDon
 	}
 	let status = answer.status
 	let outcome = answer.outcome
+	// GitHub's answer completes the claim: kept for a success, given up for
+	// a refusal, so the attempt can be asked for again.
 	let kept <- Deliveries.run(
 		"""
-		INSERT INTO maintainer_actions (login, action, repo, run_id, attempt, at, status, outcome)
-		VALUES (?1, 'rerun-failed-jobs', ?2, ?3, ?4, ?5, ?6, ?7)
+		UPDATE maintainer_actions SET at = ?4, status = ?5, outcome = ?6, claimed = ?7
+		WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND claimed = 1 AND outcome = 'pending'
 		""",
 		[
-			Text(login),
 			Text(run.repo),
 			Integer(r.run_id),
 			Integer(run.attempt),
 			Text(now.toIso()),
 			integer(status),
 			Text(outcome),
+			Boolean(status == Some(201)),
 		]
 	)
 	let _ <- match kept {

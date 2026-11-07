@@ -12,7 +12,8 @@ CREATE TABLE maintainer_sessions (
 
 -- Every action a maintainer takes from the dashboard, and GitHub's answer:
 -- who, what, on which run attempt, when. Kept indefinitely, as an audit.
--- `status` is GitHub's HTTP status, or NULL when GitHub couldn't be reached.
+-- `status` is GitHub's HTTP status, or NULL while pending or when GitHub
+-- couldn't be reached.
 CREATE TABLE maintainer_actions (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   login   TEXT    NOT NULL,
@@ -22,8 +23,11 @@ CREATE TABLE maintainer_actions (
   attempt INTEGER NOT NULL,                   -- the attempt that was re-run
   at      TEXT    NOT NULL,
   status  INTEGER,
-  outcome TEXT    NOT NULL
+  outcome TEXT    NOT NULL,                   -- 'pending' while GitHub is asked
+  claimed INTEGER NOT NULL                    -- 1 while pending or once GitHub accepted
 );
 
--- "Has this attempt already been re-run?", per run.
-CREATE INDEX maintainer_actions_by_run ON maintainer_actions (repo, run_id, attempt);
+-- An attempt is claimed before GitHub is asked, and at most one claim per
+-- attempt is kept, so requests close together re-run it once. A refusal
+-- gives its claim up (claimed = 0), so it can be asked for again.
+CREATE UNIQUE INDEX maintainer_actions_claimed ON maintainer_actions (repo, run_id, attempt) WHERE claimed = 1;

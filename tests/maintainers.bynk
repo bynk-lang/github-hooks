@@ -399,3 +399,16 @@ case "signing in after signing out issues the next session's token" {
 		.andThen((b) => b.decodeUtf8())
 	expect claims.getOrElse("").contains("\"sub\":\"accuser:1\"")
 }
+
+case "a sign-in whose session can't be read is refused, not issued an old version's token" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let broken <- Deliveries.run("DROP TABLE maintainer_sessions", [])
+	expect broken is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is ServiceUnavailable(_)
+}

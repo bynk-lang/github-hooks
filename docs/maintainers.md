@@ -92,7 +92,9 @@ login · Sign out*.
    and goes back to where the sign-in started.
 4. **Signing out:** this ends the session on the server
    (`POST /maintainers/signout`, see [Sessions](#sessions)), then forgets the
-   token in the tab. GitHub's own session is GitHub's, so the next sign-in may
+   token in the tab. If the server can't be reached, the page says so and
+   stays signed in, so the person can try again rather than believe their
+   other devices are signed out. GitHub's own session is GitHub's, so the next sign-in may
    not ask again.
 
 Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
@@ -278,8 +280,9 @@ first sign out. A token for an earlier version is refused with a `403`
   `bynk token Maintainer --sub login`, counts as version 0. It stays valid
   until that login's first sign-out.
 - **The check** is one primary-key read per maintainer request, in
-  `forMaintainer`. A failed read counts as version 0, so it never signs
-  anyone out by itself.
+  `forMaintainer`. A read that fails is a `503`, for figures and actions
+  alike, and a sign-in then answers `503` too. Counting it as version 0
+  would let a signed-out token back in.
 
 ## Actions
 
@@ -296,7 +299,11 @@ The answer shows beside the run.
 - **Refusals:**
   - `404` for a run this service never recorded.
   - `409` when its latest attempt hasn't failed, or was already re-run from
-    here. Asking twice doesn't re-run twice.
+    here, or another request is re-running it now.
+- **Once only:** the attempt is claimed in `maintainer_actions` before
+  GitHub is asked. A unique index keeps one claim per attempt, so requests
+  close together (a double click, two tabs, two maintainers) re-run it once.
+  A refusal gives the claim up.
   - `429` past the per-login limit: `ActionLimit`, 10 actions a minute,
     besides the maintainer routes' own 60.
 - **GitHub's answer:** a `201` is success. Any refusal is a `502` with

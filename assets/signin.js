@@ -63,16 +63,24 @@
 
   // Signing out forgets this service's token. The GitHub sign-in itself is
   // GitHub's: the next sign-in may not ask again.
-  // Signing out ends the session on the server too (#53, step 5): every
-  // token issued to this login before now is refused, on any device. If the
-  // Worker can't be reached, the tab forgets the token all the same.
+  // Signing out ends the session on the server (#53, step 5): every token
+  // issued to this login before now is refused, on any device. The tab
+  // forgets its token only once the Worker has done that, or once the token
+  // is refused anyway (401, 403). Otherwise the person is told, and stays
+  // signed in to try again, so "Sign out" never claims more than it did.
   async function signOut() {
     const m = current();
     if (m) {
+      let ended = false;
       try {
-        await fetch("/maintainers/signout", { method: "POST", cache: "no-store", headers: { authorization: `Bearer ${m.token}` } });
+        const res = await fetch("/maintainers/signout", { method: "POST", cache: "no-store", headers: { authorization: `Bearer ${m.token}` } });
+        ended = res.ok || res.status === 401 || res.status === 403;
       } catch (e) {
         console.warn("Couldn't end the session on the server:", e.message);
+      }
+      if (!ended) {
+        window.alert("The sign-out didn't reach the server, so your other devices may still be signed in. You're still signed in here: try again in a moment.");
+        return;
       }
     }
     store.drop(KEY);

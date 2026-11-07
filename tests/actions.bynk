@@ -144,3 +144,34 @@ case "someone who has left, or whose session has ended, can't act" {
 	expect ended is RawError(403, _, _)
 	expect GitHubHttp.post never called
 }
+
+case "an attempt another request has claimed isn't re-run again, while GitHub is still being asked" {
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// Another maintainer's request for run 500 is in flight: claimed, GitHub not yet answered.
+	let inFlight <- Deliveries.run(
+		"""
+		INSERT INTO maintainer_actions (login, action, repo, run_id, attempt, at, status, outcome, claimed)
+		VALUES ('someone-else', 'rerun-failed-jobs', 'bynk-lang/secret', 500, 1, '2026-11-05T11:59:59.000Z', NULL, 'pending', 1)
+		""",
+		[]
+	)
+	expect inFlight is Ok(_)
+	let r <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect r is Conflict(_)
+	expect GitHubHttp.post never called
+}
+
+case "if a session can't be checked, nothing is let in: not figures, not actions, not a sign-in" {
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let broken <- Deliveries.run("DROP TABLE maintainer_sessions", [])
+	expect broken is Ok(_)
+	let acted <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect acted is ServiceUnavailable(_)
+	let read <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	expect read is ServiceUnavailable(_)
+	expect GitHubHttp.post never called
+}
