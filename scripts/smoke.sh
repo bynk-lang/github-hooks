@@ -141,6 +141,18 @@ if [ -n "${MAINTAINER_TOKEN_SECRET:-}" ]; then
   get 401 "an expired maintainer token is refused" /maintainers/me "$MEXPIRED"
   get 401 "a reader's token is not a maintainer's" /maintainers/me "$RTOKEN"
   get 503 "a valid maintainer token reaches the membership check" /maintainers/me "$MTOKEN"
+  # The maintainer figures (#53 step 2): POSTed, so neither the edge nor a
+  # browser keeps them, and only past the token and membership checks.
+  mpost() {
+    curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
+      ${2:+-H "Authorization: Bearer $2"} -d '{"days":7}' "$BASE$1" || echo 000
+  }
+  check 401 "$(mpost /maintainers/metrics/ci)" "the maintainer CI figures without a token are refused"
+  check 401 "$(mpost /maintainers/metrics/prs "$RTOKEN")" "the maintainer PR figures refuse a reader's token"
+  check 503 "$(mpost /maintainers/metrics/issues "$MTOKEN")" "a maintainer token reaches the figures' membership check"
+  stored=$(curl -s -o /dev/null -D - -H "Authorization: Bearer $MTOKEN" "$BASE/maintainers/repositories" \
+    | tr -d '\r' | awk -F': ' 'tolower($1) == "cache-control" { print $2 }') || stored=none
+  check no-store "$stored" "the maintainers' repository list is never cached"
 fi
 
 exit $failed

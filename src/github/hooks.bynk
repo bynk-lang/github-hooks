@@ -2066,6 +2066,63 @@ service api from http {
 		Ok(Me { login: login })
 	}
 
+	// The maintainers' figures (#53): each public metrics route's, for a
+	// signed-in maintainer who still belongs to the organisation, including
+	// private repositories and those `DASHBOARD_EXCLUDE` names. Never
+	// `@cache`d, so they're sent `no-store` and can't be kept at the edge for
+	// the public; nor rate-limited per address, as they need a token.
+	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsCi(body, true))
+	}
+
+	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsCiNow(body, true))
+	}
+
+	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsCiHistory(body, true))
+	}
+
+	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsPrs(body, true))
+	}
+
+	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsPrsOpen(body, true))
+	}
+
+	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsIssues(body, true))
+	}
+
+	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsIssuesOpen(body, true))
+	}
+
+	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsReleases(body, true))
+	}
+
+	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock {
+		forMaintainer("\(m.identity)", () => metricsReleasesRecent(body, true))
+	}
+
+	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock {
+		forMaintainer("\(m.identity)", () => metricsRunners(body, true))
+	}
+
+	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+		forMaintainer("\(m.identity)", () => metricsRunnersNow(body, true))
+	}
+
+	// Every repository the service has heard from (#53), for a maintainer:
+	// whether it is public, and whether `DASHBOARD_EXCLUDE` keeps it off the
+	// public pages, so the signed-in pages can mark the ones only maintainers
+	// see. Not `@cache`d, so it is sent `no-store`.
+	on GET("/maintainers/repositories") () -> Effect[HttpResult[List[ShownRepository]]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, Secrets {
+		forMaintainer("\(m.identity)", () => shownRepositories())
+	}
+
 	on GET("/about") () -> Effect[HttpResult[String]] by v: Visitor {
 		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
 	}
@@ -2179,105 +2236,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
-			BadRequest("days must be 7, 30 or 90")
-		}
-		let now <- Clock.now()
-		let since = now - Duration.millis(query.days * 86_400_000)
-		let Ok(rows) <- Deliveries.all(
-			"""
-			WITH win AS (
-			  SELECT w.* FROM workflow_runs w
-			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
-			  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
-			    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
-			    AND (?4 IS NULL OR w.branch = ?4)
-			    AND (?5 IS NULL OR w.event = ?5)
-			),
-			counts AS (
-			  SELECT repo, path, count(*) AS runs,
-			    sum(conclusion = 'success') AS success,
-			    sum(conclusion = 'failure') AS failure,
-			    sum(conclusion = 'timed_out') AS timed_out,
-			    sum(conclusion = 'cancelled') AS cancelled,
-			    sum(conclusion = 'skipped') AS skipped,
-			    sum(conclusion IS NULL
-			        OR conclusion NOT IN ('success', 'failure', 'timed_out', 'cancelled', 'skipped')) AS other
-			  FROM win GROUP BY repo, path
-			),
-			walls AS (
-			  SELECT repo, path,
-			    CAST(round((julianday(completed_at) - julianday(queued_at)) * 86400) AS INTEGER) AS seconds,
-			    row_number() OVER (PARTITION BY repo, path
-			                       ORDER BY julianday(completed_at) - julianday(queued_at)) AS rn,
-			    count(*) OVER (PARTITION BY repo, path) AS n
-			  FROM win WHERE conclusion = 'success'
-			),
-			pct AS (
-			  SELECT repo, path,
-			    max(CASE WHEN rn = (50 * n + 99) / 100 THEN seconds END) AS p50,
-			    max(CASE WHEN rn = (95 * n + 99) / 100 THEN seconds END) AS p95
-			  FROM walls GROUP BY repo, path
-			),
-			flaky AS (
-			  SELECT s.repo, s.path, count(DISTINCT s.run_id) AS n
-			  FROM win s
-			  JOIN workflow_runs f
-			    ON f.repo = s.repo AND f.run_id = s.run_id AND f.attempt = 1 AND f.conclusion = 'failure'
-			  WHERE s.attempt > 1 AND s.conclusion = 'success'
-			  GROUP BY s.repo, s.path
-			)
-			SELECT c.repo, c.path,
-			  (SELECT l.workflow FROM win l WHERE l.repo = c.repo AND l.path = c.path
-			   ORDER BY l.completed_at DESC LIMIT 1) AS workflow,
-			  c.runs, c.success, c.failure, c.timed_out, c.cancelled, c.skipped, c.other,
-			  CASE WHEN c.success + c.failure + c.timed_out > 0
-			    THEN CAST(round(100.0 * c.success / (c.success + c.failure + c.timed_out)) AS INTEGER)
-			  END AS pass_percent,
-			  p.p50 AS wall_p50_seconds, p.p95 AS wall_p95_seconds,
-			  coalesce(fl.n, 0) AS flaky
-			FROM counts c
-			LEFT JOIN pct p ON p.repo = c.repo AND p.path = c.path
-			LEFT JOIN flaky fl ON fl.repo = c.repo AND fl.path = c.path
-			ORDER BY c.repo, c.path
-			""",
-			[
-				Text(since.toIso()),
-				Text(now.toIso()),
-				text(query.repo.map((r) => "\(r)")),
-				text(query.branch),
-				text(query.event),
-			]
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not compute CI metrics: \(sqlError(e))")
-				ServerError("could not compute CI metrics")
-			},
-		}
-		let Ok(health) = Json.decodeSql[List[WorkflowHealth]](rows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode CI metrics: \(jsonError(e))")
-				ServerError("CI metrics did not decode")
-			},
-		}
-		// When collection began: the first completion recorded anywhere, which
-		// `workflow_runs_by_completed` answers without scanning the table.
-		let first <- Deliveries.first("SELECT min(completed_at) AS first FROM workflow_runs", [])
-		// Only a hint of how much of the window has data, so a failed read is "unknown".
-		let dataSince: Option[String] = match first {
-			Ok(Some(row)) => match Json.decodeSql[FirstRun](row) {
-				Ok(f) => f.first,
-				Err(_) => None,
-			},
-			_ => None,
-		}
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		Ok(CiMetrics {
-			since: since.toIso(),
-			until: now.toIso(),
-			data_since: dataSince,
-			workflows: health.filter((h) => !allows(excluded, h.repo)),
-		})
+		metricsCi(query, false)
 	}
 
 	// What is running now, and each workflow's latest result on its
@@ -2291,71 +2250,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let now <- Clock.now()
-		let repo = text(query.repo.map((r) => "\(r)"))
-		let Ok(running) <- Deliveries.all(
-			"""
-			SELECT w.repo, w.path, w.workflow, w.run_id, w.attempt, w.branch, w.event, w.status, w.queued_at
-			FROM workflow_runs w
-			JOIN repositories r ON r.repo = w.repo AND r.public = 1
-			WHERE w.status != 'completed' AND w.queued_at >= ?2
-			  AND (?1 IS NULL OR w.repo = ?1 COLLATE NOCASE)
-			ORDER BY w.queued_at, w.repo, w.path
-			""",
-			[repo, Text((now - 1.days).toIso())]
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not list running workflows: \(sqlError(e))")
-				ServerError("could not read running workflows")
-			},
-		}
-		let Ok(states) <- Deliveries.all(
-			"""
-			WITH judged AS (
-			  SELECT w.repo, w.path, w.workflow, w.branch, w.conclusion, w.completed_at,
-			    row_number() OVER (PARTITION BY w.repo, w.path ORDER BY w.completed_at DESC) AS rn
-			  FROM workflow_runs w
-			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
-			  WHERE w.status = 'completed' AND w.completed_at >= ?2
-			    AND w.event = 'push' AND w.branch = r.default_branch
-			    AND w.conclusion IN ('success', 'failure', 'timed_out')
-			    AND (?1 IS NULL OR w.repo = ?1 COLLATE NOCASE)
-			)
-			SELECT j.repo, j.path, j.workflow, j.branch, j.conclusion, j.completed_at,
-			  CASE WHEN j.conclusion != 'success' THEN (
-			    SELECT min(k.completed_at) FROM judged k
-			    WHERE k.repo = j.repo AND k.path = j.path AND k.conclusion != 'success'
-			      AND k.completed_at > coalesce(
-			        (SELECT max(s.completed_at) FROM judged s
-			         WHERE s.repo = j.repo AND s.path = j.path AND s.conclusion = 'success'), '')
-			  ) END AS red_since
-			FROM judged j WHERE j.rn = 1
-			ORDER BY j.repo, j.path
-			""",
-			[repo, Text((now - 90.days).toIso())]
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not read default-branch states: \(sqlError(e))")
-				ServerError("could not read default-branch states")
-			},
-		}
-		let Ok(inFlight) = Json.decodeSql[List[InFlight]](running) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode running workflows: \(jsonError(e))")
-				ServerError("running workflows did not decode")
-			},
-		}
-		let Ok(main) = Json.decodeSql[List[MainState]](states) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode default-branch states: \(jsonError(e))")
-				ServerError("default-branch states did not decode")
-			},
-		}
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		Ok(CiNow {
-			in_flight: inFlight.filter((r) => !allows(excluded, r.repo)),
-			main: main.filter((m) => !allows(excluded, m.repo)),
-		})
+		metricsCiNow(query, false)
 	}
 
 	// History for each workflow over the same window and filters as
@@ -2367,108 +2262,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
-			BadRequest("days must be 7, 30 or 90")
-		}
-		let now <- Clock.now()
-		let since = now - Duration.millis(query.days * 86_400_000)
-		let params = [
-			Text(since.toIso()),
-			Text(now.toIso()),
-			text(query.repo.map((r) => "\(r)")),
-			text(query.branch),
-			text(query.event),
-		]
-		let Ok(recentRows) <- Deliveries.all(
-			"""
-			WITH ranked AS (
-			  SELECT w.repo, w.path, w.run_id, w.attempt, w.branch, w.event,
-			    coalesce(w.conclusion, 'unknown') AS conclusion, w.completed_at,
-			    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS wall_seconds,
-			    row_number() OVER (PARTITION BY w.repo, w.path
-			                       ORDER BY w.completed_at DESC, w.run_id DESC, w.attempt DESC) AS rn
-			  FROM workflow_runs w
-			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
-			  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
-			    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
-			    AND (?4 IS NULL OR w.branch = ?4)
-			    AND (?5 IS NULL OR w.event = ?5)
-			)
-			SELECT repo, path, run_id, attempt, branch, event, conclusion, completed_at, wall_seconds
-			FROM ranked WHERE rn <= ?6
-			ORDER BY repo, path, completed_at, run_id, attempt
-			""",
-			params.append(Integer(RECENT_RUNS))
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not read recent runs: \(sqlError(e))")
-				ServerError("could not read recent runs")
-			},
-		}
-		let Ok(dayRows) <- Deliveries.all(
-			"""
-			WITH win AS (
-			  SELECT w.repo, w.path, substr(w.completed_at, 1, 10) AS day, w.conclusion,
-			    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS seconds
-			  FROM workflow_runs w
-			  JOIN repositories r ON r.repo = w.repo AND r.public = 1
-			  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
-			    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
-			    AND (?4 IS NULL OR w.branch = ?4)
-			    AND (?5 IS NULL OR w.event = ?5)
-			),
-			counts AS (
-			  SELECT repo, path, day, count(*) AS runs,
-			    sum(conclusion = 'success') AS success,
-			    sum(conclusion IN ('failure', 'timed_out')) AS failed,
-			    sum(conclusion IS NULL OR conclusion NOT IN ('success', 'failure', 'timed_out')) AS other
-			  FROM win GROUP BY repo, path, day
-			),
-			walls AS (
-			  SELECT repo, path, day, seconds,
-			    row_number() OVER (PARTITION BY repo, path, day ORDER BY seconds) AS rn,
-			    count(*) OVER (PARTITION BY repo, path, day) AS n
-			  FROM win WHERE conclusion = 'success'
-			),
-			p50 AS (
-			  SELECT repo, path, day, max(CASE WHEN rn = (50 * n + 99) / 100 THEN seconds END) AS p50
-			  FROM walls GROUP BY repo, path, day
-			)
-			SELECT c.repo, c.path, c.day, c.runs, c.success, c.failed, c.other,
-			  CASE WHEN c.success + c.failed > 0
-			    THEN CAST(round(100.0 * c.success / (c.success + c.failed)) AS INTEGER)
-			  END AS pass_percent,
-			  p.p50 AS wall_p50_seconds
-			FROM counts c
-			LEFT JOIN p50 p ON p.repo = c.repo AND p.path = c.path AND p.day = c.day
-			ORDER BY c.repo, c.path, c.day
-			""",
-			params
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not compute daily CI health: \(sqlError(e))")
-				ServerError("could not compute daily CI health")
-			},
-		}
-		let Ok(recent) = Json.decodeSql[List[RecentRun]](recentRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode recent runs: \(jsonError(e))")
-				ServerError("recent runs did not decode")
-			},
-		}
-		let Ok(daily) = Json.decodeSql[List[DailyHealth]](dayRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode daily CI health: \(jsonError(e))")
-				ServerError("daily CI health did not decode")
-			},
-		}
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		Ok(CiHistory {
-			since: since.toIso(),
-			until: now.toIso(),
-			recent: recent.filter((r) => !allows(excluded, r.repo)),
-			daily: daily.filter((d) => !allows(excluded, d.repo)),
-		})
+		metricsCiHistory(query, false)
 	}
 
 	// PR flow over a window (#26): pull requests merged or closed in it, from
@@ -2481,198 +2275,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
-			BadRequest("days must be 7, 30 or 90")
-		}
-		let now <- Clock.now()
-		let since = now - Duration.millis(query.days * 86_400_000)
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let window = [
-			Text(since.toIso()),
-			Text(now.toIso()),
-			text(query.repo.map((r) => "\(r)")),
-			Text(excludedNames(excluded)),
-		]
-		// Each read is a literal (Bynk checks SQL at compile time), chosen by
-		// position, so the four run concurrently: 0 the flow, 1 queue exits,
-		// 2 merges by day, 3 when collection began (the first merge recorded,
-		// which `pull_requests_by_merged` answers without scanning).
-		let reads <- [0, 1, 2, 3].parTraverseAll(
-			(read) => match read {
-				0 => Deliveries.all(
-					"""
-						WITH shown AS (
-						  SELECT repo FROM repositories
-						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-						),
-						merged AS MATERIALIZED (
-						  SELECT p.*,
-						    (SELECT e.action FROM pull_request_events e
-						     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued') AND e.at <= p.merged_at
-						     ORDER BY e.at DESC LIMIT 1) AS last_queue,
-						    (SELECT max(e.at) FROM pull_request_events e
-						     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'enqueued' AND e.at <= p.merged_at) AS enqueued_at,
-						    (SELECT count(*) FROM pull_request_events e
-						     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'enqueued') AS enqueues
-						  FROM pull_requests p JOIN shown s ON s.repo = p.repo
-						  WHERE p.merged_at >= ?1 AND p.merged_at < ?2
-						),
-						closed AS (
-						  SELECT p.repo, p.author_is_bot FROM pull_requests p JOIN shown s ON s.repo = p.repo
-						  WHERE p.state = 'closed' AND p.closed_at >= ?1 AND p.closed_at < ?2
-						),
-						open_bots AS (
-						  SELECT p.repo FROM pull_requests p JOIN shown s ON s.repo = p.repo
-						  WHERE p.state = 'open' AND p.author_is_bot = 1
-						),
-						repos AS (
-						  SELECT repo FROM merged UNION SELECT repo FROM closed UNION SELECT repo FROM open_bots
-						),
-						counts AS (
-						  SELECT repo, sum(author_is_bot = 0) AS merged, sum(author_is_bot = 0 AND enqueues > 1) AS requeued,
-						    sum(author_is_bot = 1) AS bots_merged
-						  FROM merged GROUP BY repo
-						),
-						closed_counts AS (
-						  SELECT repo, sum(author_is_bot = 0) AS n FROM closed GROUP BY repo
-						),
-						bot_counts AS (
-						  SELECT repo, count(*) AS n FROM open_bots GROUP BY repo
-						),
-						measures AS (
-						  SELECT repo, 'ready' AS k,
-						    CAST(round((julianday(merged_at) - julianday(ready_at)) * 86400) AS INTEGER) AS v
-						  FROM merged WHERE author_is_bot = 0 AND ready_at IS NOT NULL
-						  UNION ALL
-						  SELECT repo, 'open', CAST(round((julianday(merged_at) - julianday(opened_at)) * 86400) AS INTEGER)
-						  FROM merged WHERE author_is_bot = 0
-						  UNION ALL
-						  SELECT repo, 'queue', CAST(round((julianday(merged_at) - julianday(enqueued_at)) * 86400) AS INTEGER)
-						  FROM merged WHERE author_is_bot = 0 AND last_queue = 'enqueued'
-						  UNION ALL
-						  SELECT repo, 'size', additions + deletions
-						  FROM merged WHERE author_is_bot = 0 AND additions IS NOT NULL AND deletions IS NOT NULL
-						  UNION ALL
-						  SELECT repo, 'bot', CAST(round((julianday(merged_at) - julianday(opened_at)) * 86400) AS INTEGER)
-						  FROM merged WHERE author_is_bot = 1
-						),
-						ranked AS (
-						  SELECT repo, k, v,
-						    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
-						    count(*) OVER (PARTITION BY repo, k) AS n
-						  FROM measures
-						),
-						pct AS (
-						  SELECT repo, k, max(n) AS n,
-						    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
-						    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
-						  FROM ranked GROUP BY repo, k
-						)
-						SELECT r.repo,
-						  coalesce(c.merged, 0) AS merged,
-						  coalesce(cc.n, 0) AS closed_unmerged,
-						  coalesce(rd.n, 0) AS ready_to_merge_counted, rd.p50 AS ready_to_merge_p50_seconds, rd.p95 AS ready_to_merge_p95_seconds,
-						  op.p50 AS open_to_merge_p50_seconds, op.p95 AS open_to_merge_p95_seconds,
-						  coalesce(qu.n, 0) AS queue_counted, qu.p50 AS queue_p50_seconds, qu.p95 AS queue_p95_seconds,
-						  coalesce(c.requeued, 0) AS requeued,
-						  coalesce(sz.n, 0) AS size_counted, sz.p50 AS size_p50_lines,
-						  coalesce(c.bots_merged, 0) AS bots_merged,
-						  coalesce(bc.n, 0) AS bots_open,
-						  bt.p50 AS bots_merge_p50_seconds
-						FROM repos r
-						LEFT JOIN counts c ON c.repo = r.repo
-						LEFT JOIN closed_counts cc ON cc.repo = r.repo
-						LEFT JOIN bot_counts bc ON bc.repo = r.repo
-						LEFT JOIN pct rd ON rd.repo = r.repo AND rd.k = 'ready'
-						LEFT JOIN pct op ON op.repo = r.repo AND op.k = 'open'
-						LEFT JOIN pct qu ON qu.repo = r.repo AND qu.k = 'queue'
-						LEFT JOIN pct sz ON sz.repo = r.repo AND sz.k = 'size'
-						LEFT JOIN pct bt ON bt.repo = r.repo AND bt.k = 'bot'
-						ORDER BY r.repo
-					""",
-					window
-				),
-				1 => Deliveries.all(
-					"""
-						WITH shown AS (
-						  SELECT repo FROM repositories
-						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-						)
-						SELECT e.repo, coalesce(e.reason, 'unknown') AS reason, count(*) AS count
-						FROM pull_request_events e JOIN shown s ON s.repo = e.repo
-						WHERE e.action = 'dequeued' AND coalesce(e.reason, '') != 'MERGE'
-						  AND e.at >= ?1 AND e.at < ?2
-						GROUP BY e.repo, coalesce(e.reason, 'unknown')
-						ORDER BY e.repo, count DESC, reason
-					""",
-					window
-				),
-				2 => Deliveries.all(
-					"""
-						WITH shown AS (
-						  SELECT repo FROM repositories
-						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-						)
-						SELECT p.repo, substr(p.merged_at, 1, 10) AS day, count(*) AS merged
-						FROM pull_requests p JOIN shown s ON s.repo = p.repo
-						WHERE p.author_is_bot = 0 AND p.merged_at >= ?1 AND p.merged_at < ?2
-						GROUP BY p.repo, day
-						ORDER BY p.repo, day
-					""",
-					window
-				),
-				_ => Deliveries.all(
-					"SELECT min(merged_at) AS first FROM pull_requests WHERE merged_at IS NOT NULL",
-					[]
-				),
-			}
-		)
-		let Some(Ok(flowRows)) = reads.get(0) else {
-			let _ <- Logger.error("could not compute PR flow: \(readError(reads.get(0)))")
-			ServerError("could not compute PR flow")
-		}
-		let Some(Ok(exitRows)) = reads.get(1) else {
-			let _ <- Logger.error("could not read merge-queue exits: \(readError(reads.get(1)))")
-			ServerError("could not read merge-queue exits")
-		}
-		let Some(Ok(dayRows)) = reads.get(2) else {
-			let _ <- Logger.error("could not count merges by day: \(readError(reads.get(2)))")
-			ServerError("could not count merges by day")
-		}
-		let Ok(flow) = Json.decodeSql[List[PrFlow]](flowRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode PR flow: \(jsonError(e))")
-				ServerError("PR flow did not decode")
-			},
-		}
-		let Ok(exits) = Json.decodeSql[List[QueueExit]](exitRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode merge-queue exits: \(jsonError(e))")
-				ServerError("merge-queue exits did not decode")
-			},
-		}
-		let Ok(days) = Json.decodeSql[List[MergedDay]](dayRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode merges by day: \(jsonError(e))")
-				ServerError("merges by day did not decode")
-			},
-		}
-		// Only a hint of how much of the window has data, so a failed read is "unknown".
-		let dataSince: Option[String] = match reads.get(3) {
-			Some(Ok(rows)) => match Json.decodeSql[List[FirstRun]](rows) {
-				Ok([f]) => f.first,
-				_ => None,
-			},
-			_ => None,
-		}
-		Ok(PrMetrics {
-			since: since.toIso(),
-			until: now.toIso(),
-			data_since: dataSince,
-			repos: flow,
-			queue_exits: exits,
-			daily: days,
-		})
+		metricsPrs(query, false)
 	}
 
 	// Every open pull request in public repositories less
@@ -2687,54 +2290,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let now <- Clock.now()
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let Ok(rows) <- Deliveries.all(
-			"""
-			WITH shown AS (
-			  SELECT repo FROM repositories
-			  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?5, ',' || lower(repo) || ',') = 0
-			),
-			open AS (
-			  SELECT p.repo, p.number, p.title, p.author, p.author_is_bot, p.draft, p.opened_at,
-			    coalesce(
-			      (SELECT max(e.at) FROM pull_request_events e
-			       WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'),
-			      p.ready_at) AS ready_since,
-			    (SELECT CASE WHEN e.action = 'enqueued' AND e.at >= ?3 THEN 1 ELSE 0 END FROM pull_request_events e
-			     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued')
-			     ORDER BY e.at DESC LIMIT 1) AS queued
-			  FROM pull_requests p JOIN shown s ON s.repo = p.repo
-			  WHERE p.state = 'open'
-			)
-			SELECT repo, number, title, author, author_is_bot = 1 AS author_is_bot,
-			  CASE WHEN draft = 1 THEN 'draft' WHEN queued = 1 THEN 'queued' ELSE 'ready' END AS stage,
-			  opened_at, ready_since,
-			  (draft = 0 AND coalesce(queued, 0) = 0 AND ready_since IS NOT NULL AND ready_since < ?2) AS stale
-			FROM open
-			ORDER BY draft, coalesce(ready_since, opened_at), repo, number
-			LIMIT ?4
-			""",
-			[
-				text(query.repo.map((r) => "\(r)")),
-				Text((now - 7.days).toIso()),
-				Text((now - QUEUE_TIMEOUT).toIso()),
-				Integer(MAX_OPEN_PULLS),
-				Text(excludedNames(excluded)),
-			]
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not list open pull requests: \(sqlError(e))")
-				ServerError("could not list open pull requests")
-			},
-		}
-		let Ok(open) = Json.decodeSql[List[OpenPull]](rows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode open pull requests: \(jsonError(e))")
-				ServerError("open pull requests did not decode")
-			},
-		}
-		Ok(PrsOpen { open: open })
+		metricsPrsOpen(query, false)
 	}
 
 	// Issue flow over a window (#48): issues opened or closed in it, from
@@ -2749,185 +2305,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
-			BadRequest("days must be 7, 30 or 90")
-		}
-		let now <- Clock.now()
-		let since = now - Duration.millis(query.days * 86_400_000)
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let window = [
-			Text(since.toIso()),
-			Text(now.toIso()),
-			text(query.repo.map((r) => "\(r)")),
-			Text(excludedNames(excluded)),
-		]
-		let reads <- [0, 1, 2, 3].parTraverseAll(
-			(read) => match read {
-				0 => Deliveries.all(
-					"""
-					WITH shown AS (
-					  SELECT repo FROM repositories
-					  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-					),
-					touched AS MATERIALIZED (
-					  SELECT i.*,
-					    (i.opened_at >= ?1 AND i.opened_at < ?2) AS opened_in,
-					    (i.state = 'closed' AND i.closed_at >= ?1 AND i.closed_at < ?2) AS closed_in,
-					    coalesce(i.state_reason, 'completed') AS reason,
-					    (i.author_is_bot = 0 AND i.author_association NOT IN ('OWNER', 'MEMBER', 'COLLABORATOR')
-					      AND coalesce(i.author_maintainer, 0) = 0) AS outside
-					  FROM issues i JOIN shown s ON s.repo = i.repo
-					  WHERE i.state IN ('open', 'closed')
-					    AND ((i.opened_at >= ?1 AND i.opened_at < ?2) OR (i.closed_at >= ?1 AND i.closed_at < ?2))
-					),
-					counts AS (
-					  SELECT repo,
-					    sum(author_is_bot = 0 AND opened_in) AS opened,
-					    sum(author_is_bot = 0 AND closed_in AND reason NOT IN ('not_planned', 'duplicate')) AS completed,
-					    sum(author_is_bot = 0 AND closed_in AND reason = 'not_planned') AS not_planned,
-					    sum(author_is_bot = 0 AND closed_in AND reason = 'duplicate') AS duplicate,
-					    sum(outside AND opened_in) AS outside_opened,
-					    sum(outside AND opened_in AND first_response_at IS NOT NULL) AS outside_responded,
-					    sum(outside AND opened_in AND state = 'open' AND first_response_at IS NULL) AS outside_waiting,
-					    sum(author_is_bot = 1 AND opened_in) AS bots_opened
-					  FROM touched GROUP BY repo
-					),
-					measures AS (
-					  SELECT repo, 'close' AS k, CAST(round((julianday(closed_at) - julianday(opened_at)) * 86400) AS INTEGER) AS v
-					  FROM touched WHERE author_is_bot = 0 AND closed_in AND reason NOT IN ('not_planned', 'duplicate')
-					  UNION ALL
-					  SELECT repo, 'response', CAST(round((julianday(first_response_at) - julianday(opened_at)) * 86400) AS INTEGER)
-					  FROM touched WHERE outside AND opened_in AND first_response_at IS NOT NULL
-					),
-					ranked AS (
-					  SELECT repo, k, v,
-					    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
-					    count(*) OVER (PARTITION BY repo, k) AS n
-					  FROM measures
-					),
-					pct AS (
-					  SELECT repo, k,
-					    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
-					    max(CASE WHEN rn = (90 * n + 99) / 100 THEN v END) AS p90
-					  FROM ranked GROUP BY repo, k
-					)
-					SELECT c.repo, c.opened, c.completed, c.not_planned, c.duplicate,
-					  cl.p50 AS close_p50_seconds, cl.p90 AS close_p90_seconds,
-					  c.outside_opened, c.outside_responded, c.outside_waiting,
-					  rs.p50 AS response_p50_seconds, rs.p90 AS response_p90_seconds,
-					  c.bots_opened
-					FROM counts c
-					LEFT JOIN pct cl ON cl.repo = c.repo AND cl.k = 'close'
-					LEFT JOIN pct rs ON rs.repo = c.repo AND rs.k = 'response'
-					ORDER BY c.repo
-					""",
-					window
-				),
-				1 => Deliveries.all(
-					"""
-					WITH shown AS (
-					  SELECT repo FROM repositories
-					  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-					),
-					closed AS (
-					  SELECT i.repo, i.number,
-					    CAST(round((julianday(i.closed_at) - julianday(i.opened_at)) * 86400) AS INTEGER) AS v
-					  FROM issues i JOIN shown s ON s.repo = i.repo
-					  WHERE i.state = 'closed' AND i.author_is_bot = 0 AND i.closed_at >= ?1 AND i.closed_at < ?2
-					    AND coalesce(i.state_reason, 'completed') NOT IN ('not_planned', 'duplicate')
-					),
-					labelled AS (
-					  SELECT c.repo, l.label, c.v FROM closed c
-					  LEFT JOIN issue_labels l ON l.repo = c.repo AND l.number = c.number
-					),
-					ranked AS (
-					  SELECT repo, label, v,
-					    row_number() OVER (PARTITION BY repo, label ORDER BY v) AS rn,
-					    count(*) OVER (PARTITION BY repo, label) AS n
-					  FROM labelled
-					)
-					SELECT repo, label, max(n) AS completed,
-					  max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50_seconds,
-					  max(CASE WHEN rn = (90 * n + 99) / 100 THEN v END) AS p90_seconds
-					FROM ranked GROUP BY repo, label
-					ORDER BY repo, completed DESC, label IS NULL, label
-					""",
-					window
-				),
-				2 => Deliveries.all(
-					"""
-					WITH shown AS (
-					  SELECT repo FROM repositories
-					  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-					),
-					moments AS (
-					  SELECT i.repo, substr(i.opened_at, 1, 10) AS day, 1 AS opened, 0 AS closed
-					  FROM issues i JOIN shown s ON s.repo = i.repo
-					  WHERE i.author_is_bot = 0 AND i.state IN ('open', 'closed') AND i.opened_at >= ?1 AND i.opened_at < ?2
-					  UNION ALL
-					  SELECT i.repo, substr(i.closed_at, 1, 10), 0, 1
-					  FROM issues i JOIN shown s ON s.repo = i.repo
-					  WHERE i.author_is_bot = 0 AND i.state = 'closed' AND i.closed_at >= ?1 AND i.closed_at < ?2
-					)
-					SELECT repo, day, sum(opened) AS opened, sum(closed) AS closed
-					FROM moments GROUP BY repo, day ORDER BY repo, day
-					""",
-					window
-				),
-				_ => Deliveries.all(
-					"SELECT min(closed_at) AS first FROM issues WHERE closed_at IS NOT NULL",
-					[]
-				),
-			}
-		)
-		let Some(Ok(flowRows)) = reads.get(0) else {
-			let _ <- Logger.error("could not compute issue flow: \(readError(reads.get(0)))")
-			ServerError("could not compute issue flow")
-		}
-		let Some(Ok(labelRows)) = reads.get(1) else {
-			let _ <- Logger.error(
-				"could not compute time to close by label: \(readError(reads.get(1)))"
-			)
-			ServerError("could not compute time to close by label")
-		}
-		let Some(Ok(dayRows)) = reads.get(2) else {
-			let _ <- Logger.error("could not count issues by day: \(readError(reads.get(2)))")
-			ServerError("could not count issues by day")
-		}
-		let Ok(flow) = Json.decodeSql[List[IssueFlow]](flowRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode issue flow: \(jsonError(e))")
-				ServerError("issue flow did not decode")
-			},
-		}
-		let Ok(labels) = Json.decodeSql[List[LabelClose]](labelRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode time to close by label: \(jsonError(e))")
-				ServerError("time to close by label did not decode")
-			},
-		}
-		let Ok(days) = Json.decodeSql[List[IssueDay]](dayRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode issues by day: \(jsonError(e))")
-				ServerError("issues by day did not decode")
-			},
-		}
-		// Only a hint of how much of the window has data, so a failed read is "unknown".
-		let dataSince: Option[String] = match reads.get(3) {
-			Some(Ok(rows)) => match Json.decodeSql[List[FirstRun]](rows) {
-				Ok([f]) => f.first,
-				_ => None,
-			},
-			_ => None,
-		}
-		Ok(IssueMetrics {
-			since: since.toIso(),
-			until: now.toIso(),
-			data_since: dataSince,
-			repos: flow,
-			labels: labels,
-			daily: days,
-		})
+		metricsIssues(query, false)
 	}
 
 	// The open issues of public repositories less `DASHBOARD_EXCLUDE` (#48):
@@ -2941,89 +2319,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let now <- Clock.now()
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let repo = text(query.repo.map((r) => "\(r)"))
-		let staleBefore = Text((now - ISSUE_STALE).toIso())
-		let reads <- [0, 1].parTraverseAll(
-			(read) => match read {
-				0 => Deliveries.all(
-					"""
-					WITH shown AS (
-					  SELECT repo FROM repositories
-					  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?6, ',' || lower(repo) || ',') = 0
-					)
-					SELECT i.repo,
-					  sum(i.author_is_bot = 0) AS open,
-					  sum(i.author_is_bot = 0 AND i.opened_at >= ?2) AS under_day,
-					  sum(i.author_is_bot = 0 AND i.opened_at < ?2 AND i.opened_at >= ?3) AS under_week,
-					  sum(i.author_is_bot = 0 AND i.opened_at < ?3 AND i.opened_at >= ?4) AS under_month,
-					  sum(i.author_is_bot = 0 AND i.opened_at < ?4) AS older,
-					  min(CASE WHEN i.author_is_bot = 0 THEN i.opened_at END) AS oldest_opened_at,
-					  sum(i.author_is_bot = 0 AND i.updated_at < ?5) AS stale,
-					  sum(i.author_is_bot = 1) AS bots_open
-					FROM issues i JOIN shown s ON s.repo = i.repo
-					WHERE i.state = 'open'
-					GROUP BY i.repo
-					ORDER BY i.repo
-					""",
-					[
-						repo,
-						Text((now - 1.days).toIso()),
-						Text((now - 7.days).toIso()),
-						Text((now - 30.days).toIso()),
-						staleBefore,
-						Text(excludedNames(excluded)),
-					]
-				),
-				_ => Deliveries.all(
-					"""
-					WITH shown AS (
-					  SELECT repo FROM repositories
-					  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-					),
-					stale AS (
-					  SELECT i.repo, i.number, i.title, i.author, i.opened_at, i.updated_at,
-					    (SELECT coalesce(json_group_array(label), '[]')
-					     FROM (SELECT l.label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY l.label)) AS labels,
-					    row_number() OVER (PARTITION BY i.repo ORDER BY i.updated_at, i.number) AS place
-					  FROM issues i JOIN shown s ON s.repo = i.repo
-					  WHERE i.state = 'open' AND i.author_is_bot = 0 AND i.updated_at < ?2
-					)
-					SELECT coalesce(json_group_array(json_object('repo', repo, 'number', number, 'title', title,
-					    'author', author, 'labels', json(labels), 'opened_at', opened_at, 'updated_at', updated_at,
-					    'url', 'https://github.com/' || repo || '/issues/' || number)), '[]') AS items
-					FROM (SELECT * FROM stale WHERE place <= ?3 ORDER BY repo, updated_at, number)
-					""",
-					[repo, staleBefore, Integer(MAX_STALE_ISSUES), Text(excludedNames(excluded))]
-				),
-			}
-		)
-		let Some(Ok(backlogRows)) = reads.get(0) else {
-			let _ <- Logger.error("could not read the issue backlog: \(readError(reads.get(0)))")
-			ServerError("could not read the issue backlog")
-		}
-		let Ok(backlog) = Json.decodeSql[List[IssueBacklog]](backlogRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode the issue backlog: \(jsonError(e))")
-				ServerError("the issue backlog did not decode")
-			},
-		}
-		let Some(Ok(staleRows)) = reads.get(1) else {
-			let _ <- Logger.error("could not list stale issues: \(readError(reads.get(1)))")
-			ServerError("could not list stale issues")
-		}
-		let Ok([listed]) = Json.decodeSql[List[StaleList]](staleRows) else {
-			let _ <- Logger.error("stale issues did not come back as one list")
-			ServerError("stale issues did not decode")
-		}
-		let Ok(stale) = Json.decode[List[StaleIssue]](listed.items) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode stale issues: \(jsonError(e))")
-				ServerError("stale issues did not decode")
-			},
-		}
-		Ok(IssuesOpen { backlog: backlog, stale: stale })
+		metricsIssuesOpen(query, false)
 	}
 
 	// Releases over a window (#36): each public repository (less
@@ -3037,168 +2333,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
-			BadRequest("days must be 7, 30 or 90")
-		}
-		let now <- Clock.now()
-		let since = now - Duration.millis(query.days * 86_400_000)
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let window = [
-			Text(since.toIso()),
-			Text(now.toIso()),
-			text(query.repo.map((r) => "\(r)")),
-			Text(excludedNames(excluded)),
-		]
-		let reads <- [0, 1].parTraverseAll(
-			(read) => match read {
-				0 => Deliveries.all(
-					"""
-						WITH shown AS (
-						  SELECT repo FROM repositories
-						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-						),
-						finals AS MATERIALIZED (
-						  SELECT r.repo, r.tag, r.published_at,
-						    lag(r.published_at) OVER (PARTITION BY r.repo ORDER BY r.published_at) AS prev_at
-						  FROM releases r JOIN shown s ON s.repo = r.repo
-						  WHERE r.draft = 0 AND r.prerelease = 0 AND r.deleted_at IS NULL
-						    AND r.published_at IS NOT NULL AND r.published_at < ?2
-						),
-						latest AS MATERIALIZED (
-						  SELECT repo, tag, published_at AS at FROM (
-						    SELECT repo, tag, published_at,
-						      row_number() OVER (PARTITION BY repo ORDER BY published_at DESC, tag DESC) AS rn
-						    FROM finals
-						  ) WHERE rn = 1
-						),
-						counts AS (
-						  SELECT repo, count(*) AS n FROM finals WHERE published_at >= ?1 GROUP BY repo
-						),
-						pre AS (
-						  SELECT r.repo, count(*) AS n FROM releases r JOIN shown s ON s.repo = r.repo
-						  WHERE r.prerelease = 1 AND r.draft = 0 AND r.deleted_at IS NULL
-						    AND r.published_at >= ?1 AND r.published_at < ?2
-						  GROUP BY r.repo
-						),
-						waiting AS (
-						  SELECT p.repo, count(*) AS n, min(p.merged_at) AS oldest
-						  FROM latest l CROSS JOIN pull_requests p
-						  WHERE p.repo = l.repo AND p.merged_at > l.at AND p.released_in IS NULL AND p.author_is_bot = 0
-						  GROUP BY p.repo
-						),
-						recording AS (
-						  SELECT l.repo, (SELECT min(e.at) FROM pull_request_events e WHERE e.repo = l.repo) AS at FROM latest l
-						),
-						measures AS (
-						  SELECT repo, 'interval' AS k,
-						    CAST(round((julianday(published_at) - julianday(prev_at)) * 86400) AS INTEGER) AS v
-						  FROM finals WHERE published_at >= ?1 AND prev_at IS NOT NULL
-						  UNION ALL
-						  SELECT p.repo, 'ship', CAST(round((julianday(p.released_at) - julianday(p.merged_at)) * 86400) AS INTEGER)
-						  FROM pull_requests p JOIN shown s ON s.repo = p.repo
-						  WHERE p.released_at >= ?1 AND p.released_at < ?2 AND p.author_is_bot = 0
-						),
-						ranked AS (
-						  SELECT repo, k, v,
-						    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
-						    count(*) OVER (PARTITION BY repo, k) AS n
-						  FROM measures
-						),
-						pct AS (
-						  SELECT repo, k, max(n) AS n,
-						    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
-						    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
-						  FROM ranked GROUP BY repo, k
-						)
-						SELECT l.repo,
-						  coalesce(c.n, 0) AS releases,
-						  coalesce(pr.n, 0) AS prereleases,
-						  iv.p50 AS interval_p50_seconds,
-						  l.tag AS last_tag, l.at AS last_at,
-						  coalesce(sh.n, 0) AS shipped_counted, sh.p50 AS merge_to_release_p50_seconds, sh.p95 AS merge_to_release_p95_seconds,
-						  coalesce(w.n, 0) AS waiting, w.oldest AS waiting_since,
-						  rc.at AS recording_since
-						FROM latest l
-						LEFT JOIN counts c ON c.repo = l.repo
-						LEFT JOIN pre pr ON pr.repo = l.repo
-						LEFT JOIN waiting w ON w.repo = l.repo
-						LEFT JOIN recording rc ON rc.repo = l.repo
-						LEFT JOIN pct iv ON iv.repo = l.repo AND iv.k = 'interval'
-						LEFT JOIN pct sh ON sh.repo = l.repo AND sh.k = 'ship'
-						ORDER BY l.repo
-					""",
-					window
-				),
-				_ => Deliveries.all(
-					"""
-						WITH shown AS (
-						  SELECT repo FROM repositories
-						  WHERE public = 1 AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
-						),
-						runs AS MATERIALIZED (
-						  SELECT w.repo, w.path, w.workflow, w.branch, w.conclusion, w.completed_at,
-						    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS v
-						  FROM workflow_runs w JOIN shown s ON s.repo = w.repo
-						  WHERE w.completed_at >= ?1 AND w.completed_at < ?2 AND w.event = 'push'
-						    AND (EXISTS (SELECT 1 FROM tags t WHERE t.repo = w.repo AND t.tag = w.branch)
-						         OR EXISTS (SELECT 1 FROM releases r WHERE r.repo = w.repo AND r.tag = w.branch))
-						),
-						release_paths AS (
-						  SELECT DISTINCT u.repo, u.path FROM runs u
-						  WHERE EXISTS (SELECT 1 FROM releases r WHERE r.repo = u.repo AND r.tag = u.branch)
-						),
-						release_runs AS (
-						  SELECT u.* FROM runs u JOIN release_paths p ON p.repo = u.repo AND p.path = u.path
-						),
-						ranked AS (
-						  SELECT repo, path, v,
-						    row_number() OVER (PARTITION BY repo, path ORDER BY v) AS rn,
-						    count(*) OVER (PARTITION BY repo, path) AS n
-						  FROM release_runs WHERE conclusion = 'success'
-						),
-						pct AS (
-						  SELECT repo, path, max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50
-						  FROM ranked GROUP BY repo, path
-						)
-						SELECT u.repo,
-						  (SELECT x.workflow FROM release_runs x WHERE x.repo = u.repo AND x.path = u.path ORDER BY x.completed_at DESC LIMIT 1) AS workflow,
-						  u.path, count(*) AS runs,
-						  sum(u.conclusion IN ('failure', 'timed_out')) AS failed,
-						  p.p50 AS p50_seconds
-						FROM release_runs u LEFT JOIN pct p ON p.repo = u.repo AND p.path = u.path
-						GROUP BY u.repo, u.path
-						ORDER BY u.repo, u.path
-					""",
-					window
-				),
-			}
-		)
-		let Some(Ok(flowRows)) = reads.get(0) else {
-			let _ <- Logger.error("could not compute releases: \(readError(reads.get(0)))")
-			ServerError("could not compute releases")
-		}
-		let Some(Ok(pipelineRows)) = reads.get(1) else {
-			let _ <- Logger.error("could not compute release workflows: \(readError(reads.get(1)))")
-			ServerError("could not compute release workflows")
-		}
-		let Ok(flow) = Json.decodeSql[List[ReleaseFlow]](flowRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode releases: \(jsonError(e))")
-				ServerError("releases did not decode")
-			},
-		}
-		let Ok(pipeline) = Json.decodeSql[List[ReleasePipeline]](pipelineRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode release workflows: \(jsonError(e))")
-				ServerError("release workflows did not decode")
-			},
-		}
-		Ok(ReleaseMetrics {
-			since: since.toIso(),
-			until: now.toIso(),
-			repos: flow,
-			pipeline: pipeline,
-		})
+		metricsReleases(query, false)
 	}
 
 	// Each public repository's latest `MAX_RECENT_RELEASES` published releases
@@ -3210,45 +2345,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let Ok(rows) <- Deliveries.all(
-			"""
-			WITH shown AS (
-			  SELECT repo FROM repositories
-			  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?3, ',' || lower(repo) || ',') = 0
-			),
-			ranked AS (
-			  SELECT r.*, row_number() OVER (PARTITION BY r.repo ORDER BY r.published_at DESC, r.tag DESC) AS rn
-			  FROM releases r JOIN shown s ON s.repo = r.repo
-			  WHERE r.draft = 0 AND r.deleted_at IS NULL AND r.published_at IS NOT NULL
-			)
-			SELECT repo, tag, name, prerelease = 1 AS prerelease, published_at,
-			  nullif(previous_tag, '') AS previous_tag, shipped,
-			  CASE WHEN shipped IS NOT NULL THEN
-			    (SELECT count(*) FROM pull_requests p WHERE p.repo = ranked.repo AND p.released_in = ranked.tag AND p.author_is_bot = 0)
-			  END AS shipped_by_people,
-			  'https://github.com/' || repo || '/releases/tag/' || tag AS url
-			FROM ranked WHERE rn <= ?2
-			ORDER BY published_at DESC, repo, tag
-			""",
-			[
-				text(query.repo.map((r) => "\(r)")),
-				Integer(MAX_RECENT_RELEASES),
-				Text(excludedNames(excluded)),
-			]
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not list recent releases: \(sqlError(e))")
-				ServerError("could not list recent releases")
-			},
-		}
-		let Ok(releases) = Json.decodeSql[List[RecentRelease]](rows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode recent releases: \(jsonError(e))")
-				ServerError("recent releases did not decode")
-			},
-		}
-		Ok(ReleasesRecent { releases: releases })
+		metricsReleasesRecent(query, false)
 	}
 
 	// Runner wait over a window (#42): the figures the `runnerFigures` cron
@@ -3262,85 +2359,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let true = query.days == 7 || query.days == 30 || query.days == 90 else {
-			BadRequest("days must be 7, 30 or 90")
-		}
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let reads <- [0, 1].parTraverseAll(
-			(read) => match read {
-				0 => Deliveries.all(
-					"SELECT computed_at, since, until, data_since, runners, longest, slowest FROM runner_windows WHERE days = ?1",
-					[Integer(query.days)]
-				),
-				_ => Deliveries.all(
-					"""
-					SELECT repo FROM repositories
-					WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?2, ',' || lower(repo) || ',') = 0
-					""",
-					[text(query.repo.map((r) => "\(r)")), Text(excludedNames(excluded))]
-				),
-			}
-		)
-		let Some(Ok(windowRows)) = reads.get(0) else {
-			let _ <- Logger.error("could not read the runner figures: \(readError(reads.get(0)))")
-			ServerError("could not read the runner figures")
-		}
-		let Some(Ok(shownRows)) = reads.get(1) else {
-			let _ <- Logger.error(
-				"could not list the repositories shown: \(readError(reads.get(1)))"
-			)
-			ServerError("could not list the repositories shown")
-		}
-		let Ok(windows) = Json.decodeSql[List[RunnerWindow]](windowRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode the runner figures: \(jsonError(e))")
-				ServerError("the runner figures did not decode")
-			},
-		}
-		let Ok(shown) = Json.decodeSql[List[ShownRepo]](shownRows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode the repositories shown: \(jsonError(e))")
-				ServerError("the repositories shown did not decode")
-			},
-		}
-		let empty = RunnerMetrics {
-			since: None,
-			until: None,
-			computed_at: None,
-			data_since: None,
-			runners: [],
-			longest: [],
-			slowest: [],
-		}
-		let Some(w) = windows.first() else { Ok(empty) }
-		let isShown = (repo: String) => shown.any((r) => r.repo == repo)
-		let Ok(runners) = Json.decodeSql[List[RunnerWait]](w.runners) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode runner waits: \(jsonError(e))")
-				ServerError("runner waits did not decode")
-			},
-		}
-		let Ok(longest) = Json.decodeSql[List[LongWait]](w.longest) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode the longest waits: \(jsonError(e))")
-				ServerError("the longest waits did not decode")
-			},
-		}
-		let Ok(slowest) = Json.decodeSql[List[JobTime]](w.slowest) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode the slowest jobs: \(jsonError(e))")
-				ServerError("the slowest jobs did not decode")
-			},
-		}
-		Ok(RunnerMetrics {
-			since: Some(w.since),
-			until: Some(w.until),
-			computed_at: Some(w.computed_at),
-			data_since: w.data_since,
-			runners: runners.filter((r) => isShown(r.repo)),
-			longest: longest.filter((l) => isShown(l.repo)),
-			slowest: slowest.filter((j) => isShown(j.repo)),
-		})
+		metricsRunners(query, false)
 	}
 
 	// What public repositories' jobs are waiting for now (#42), live from the
@@ -3353,41 +2372,7 @@ service api from http {
 		let true = allowed else {
 			TooManyRequests("too many metrics requests; try again in a minute")
 		}
-		let now <- Clock.now()
-		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
-		let Ok(rows) <- Deliveries.all(
-			"""
-			WITH shown AS (
-			  SELECT repo FROM repositories
-			  WHERE public = 1 AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?3, ',' || lower(repo) || ',') = 0
-			)
-			SELECT j.repo, j.runner,
-			  sum(j.status = 'queued') AS queued,
-			  min(CASE WHEN j.status = 'queued' THEN j.created_at END) AS oldest_queued_at,
-			  sum(j.status = 'waiting') AS awaiting_approval
-			FROM workflow_jobs j JOIN shown s ON s.repo = j.repo
-			WHERE j.status IN ('queued', 'waiting') AND j.created_at >= ?2
-			GROUP BY j.repo, j.runner
-			ORDER BY j.repo, queued DESC, j.runner
-			""",
-			[
-				text(query.repo.map((r) => "\(r)")),
-				Text((now - JOB_QUEUE_TIMEOUT).toIso()),
-				Text(excludedNames(excluded)),
-			]
-		) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not read the jobs waiting now: \(sqlError(e))")
-				ServerError("could not read the jobs waiting now")
-			},
-		}
-		let Ok(waiting) = Json.decodeSql[List[WaitingNow]](rows) else match {
-			Err(e) => {
-				let _ <- Logger.error("could not decode the jobs waiting now: \(jsonError(e))")
-				ServerError("the jobs waiting now did not decode")
-			},
-		}
-		Ok(RunnersNow { waiting: waiting })
+		metricsRunnersNow(query, false)
 	}
 
 	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
@@ -4522,4 +3507,1235 @@ type RunnerWindow = {
 --- A repository the public pages may show.
 type ShownRepo = {
 	repo: String,
+}
+
+// /metrics/ci's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsCi(
+	query: CiQuery,
+	everything: Bool
+) -> Effect[HttpResult[CiMetrics]] given Deliveries, Logger, Clock, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let now <- Clock.now()
+	let since = now - Duration.millis(query.days * 86_400_000)
+	let Ok(rows) <- Deliveries.all(
+		"""
+		WITH win AS (
+		  SELECT w.* FROM workflow_runs w
+		  JOIN repositories r ON r.repo = w.repo AND (r.public = 1 OR ?6 = 1)
+		  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
+		    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
+		    AND (?4 IS NULL OR w.branch = ?4)
+		    AND (?5 IS NULL OR w.event = ?5)
+		),
+		counts AS (
+		  SELECT repo, path, count(*) AS runs,
+		    sum(conclusion = 'success') AS success,
+		    sum(conclusion = 'failure') AS failure,
+		    sum(conclusion = 'timed_out') AS timed_out,
+		    sum(conclusion = 'cancelled') AS cancelled,
+		    sum(conclusion = 'skipped') AS skipped,
+		    sum(conclusion IS NULL
+		        OR conclusion NOT IN ('success', 'failure', 'timed_out', 'cancelled', 'skipped')) AS other
+		  FROM win GROUP BY repo, path
+		),
+		walls AS (
+		  SELECT repo, path,
+		    CAST(round((julianday(completed_at) - julianday(queued_at)) * 86400) AS INTEGER) AS seconds,
+		    row_number() OVER (PARTITION BY repo, path
+		                       ORDER BY julianday(completed_at) - julianday(queued_at)) AS rn,
+		    count(*) OVER (PARTITION BY repo, path) AS n
+		  FROM win WHERE conclusion = 'success'
+		),
+		pct AS (
+		  SELECT repo, path,
+		    max(CASE WHEN rn = (50 * n + 99) / 100 THEN seconds END) AS p50,
+		    max(CASE WHEN rn = (95 * n + 99) / 100 THEN seconds END) AS p95
+		  FROM walls GROUP BY repo, path
+		),
+		flaky AS (
+		  SELECT s.repo, s.path, count(DISTINCT s.run_id) AS n
+		  FROM win s
+		  JOIN workflow_runs f
+		    ON f.repo = s.repo AND f.run_id = s.run_id AND f.attempt = 1 AND f.conclusion = 'failure'
+		  WHERE s.attempt > 1 AND s.conclusion = 'success'
+		  GROUP BY s.repo, s.path
+		)
+		SELECT c.repo, c.path,
+		  (SELECT l.workflow FROM win l WHERE l.repo = c.repo AND l.path = c.path
+		   ORDER BY l.completed_at DESC LIMIT 1) AS workflow,
+		  c.runs, c.success, c.failure, c.timed_out, c.cancelled, c.skipped, c.other,
+		  CASE WHEN c.success + c.failure + c.timed_out > 0
+		    THEN CAST(round(100.0 * c.success / (c.success + c.failure + c.timed_out)) AS INTEGER)
+		  END AS pass_percent,
+		  p.p50 AS wall_p50_seconds, p.p95 AS wall_p95_seconds,
+		  coalesce(fl.n, 0) AS flaky
+		FROM counts c
+		LEFT JOIN pct p ON p.repo = c.repo AND p.path = c.path
+		LEFT JOIN flaky fl ON fl.repo = c.repo AND fl.path = c.path
+		ORDER BY c.repo, c.path
+		""",
+		[
+			Text(since.toIso()),
+			Text(now.toIso()),
+			text(query.repo.map((r) => "\(r)")),
+			text(query.branch),
+			text(query.event),
+			Boolean(everything),
+		]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not compute CI metrics: \(sqlError(e))")
+			ServerError("could not compute CI metrics")
+		},
+	}
+	let Ok(health) = Json.decodeSql[List[WorkflowHealth]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode CI metrics: \(jsonError(e))")
+			ServerError("CI metrics did not decode")
+		},
+	}
+	// When collection began: the first completion recorded anywhere, which
+	// `workflow_runs_by_completed` answers without scanning the table.
+	let first <- Deliveries.first("SELECT min(completed_at) AS first FROM workflow_runs", [])
+	// Only a hint of how much of the window has data, so a failed read is "unknown".
+	let dataSince: Option[String] = match first {
+		Ok(Some(row)) => match Json.decodeSql[FirstRun](row) {
+			Ok(f) => f.first,
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Ok(CiMetrics {
+		since: since.toIso(),
+		until: now.toIso(),
+		data_since: dataSince,
+		workflows: health.filter((h) => (everything || !allows(excluded, h.repo))),
+	})
+}
+
+// /metrics/ci/now's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsCiNow(
+	query: NowQuery,
+	everything: Bool
+) -> Effect[HttpResult[CiNow]] given Deliveries, Logger, Clock, Secrets {
+	let now <- Clock.now()
+	let repo = text(query.repo.map((r) => "\(r)"))
+	let Ok(running) <- Deliveries.all(
+		"""
+		SELECT w.repo, w.path, w.workflow, w.run_id, w.attempt, w.branch, w.event, w.status, w.queued_at
+		FROM workflow_runs w
+		JOIN repositories r ON r.repo = w.repo AND (r.public = 1 OR ?3 = 1)
+		WHERE w.status != 'completed' AND w.queued_at >= ?2
+		  AND (?1 IS NULL OR w.repo = ?1 COLLATE NOCASE)
+		ORDER BY w.queued_at, w.repo, w.path
+		""",
+		[repo, Text((now - 1.days).toIso()), Boolean(everything)]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not list running workflows: \(sqlError(e))")
+			ServerError("could not read running workflows")
+		},
+	}
+	let Ok(states) <- Deliveries.all(
+		"""
+		WITH judged AS (
+		  SELECT w.repo, w.path, w.workflow, w.branch, w.conclusion, w.completed_at,
+		    row_number() OVER (PARTITION BY w.repo, w.path ORDER BY w.completed_at DESC) AS rn
+		  FROM workflow_runs w
+		  JOIN repositories r ON r.repo = w.repo AND (r.public = 1 OR ?3 = 1)
+		  WHERE w.status = 'completed' AND w.completed_at >= ?2
+		    AND w.event = 'push' AND w.branch = r.default_branch
+		    AND w.conclusion IN ('success', 'failure', 'timed_out')
+		    AND (?1 IS NULL OR w.repo = ?1 COLLATE NOCASE)
+		)
+		SELECT j.repo, j.path, j.workflow, j.branch, j.conclusion, j.completed_at,
+		  CASE WHEN j.conclusion != 'success' THEN (
+		    SELECT min(k.completed_at) FROM judged k
+		    WHERE k.repo = j.repo AND k.path = j.path AND k.conclusion != 'success'
+		      AND k.completed_at > coalesce(
+		        (SELECT max(s.completed_at) FROM judged s
+		         WHERE s.repo = j.repo AND s.path = j.path AND s.conclusion = 'success'), '')
+		  ) END AS red_since
+		FROM judged j WHERE j.rn = 1
+		ORDER BY j.repo, j.path
+		""",
+		[repo, Text((now - 90.days).toIso()), Boolean(everything)]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not read default-branch states: \(sqlError(e))")
+			ServerError("could not read default-branch states")
+		},
+	}
+	let Ok(inFlight) = Json.decodeSql[List[InFlight]](running) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode running workflows: \(jsonError(e))")
+			ServerError("running workflows did not decode")
+		},
+	}
+	let Ok(main) = Json.decodeSql[List[MainState]](states) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode default-branch states: \(jsonError(e))")
+			ServerError("default-branch states did not decode")
+		},
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Ok(CiNow {
+		in_flight: inFlight.filter((r) => (everything || !allows(excluded, r.repo))),
+		main: main.filter((m) => (everything || !allows(excluded, m.repo))),
+	})
+}
+
+// /metrics/ci/history's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsCiHistory(
+	query: CiQuery,
+	everything: Bool
+) -> Effect[HttpResult[CiHistory]] given Deliveries, Logger, Clock, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let now <- Clock.now()
+	let since = now - Duration.millis(query.days * 86_400_000)
+	let params = [
+		Text(since.toIso()),
+		Text(now.toIso()),
+		text(query.repo.map((r) => "\(r)")),
+		text(query.branch),
+		text(query.event),
+		Boolean(everything),
+	]
+	let Ok(recentRows) <- Deliveries.all(
+		"""
+		WITH ranked AS (
+		  SELECT w.repo, w.path, w.run_id, w.attempt, w.branch, w.event,
+		    coalesce(w.conclusion, 'unknown') AS conclusion, w.completed_at,
+		    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS wall_seconds,
+		    row_number() OVER (PARTITION BY w.repo, w.path
+		                       ORDER BY w.completed_at DESC, w.run_id DESC, w.attempt DESC) AS rn
+		  FROM workflow_runs w
+		  JOIN repositories r ON r.repo = w.repo AND (r.public = 1 OR ?6 = 1)
+		  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
+		    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
+		    AND (?4 IS NULL OR w.branch = ?4)
+		    AND (?5 IS NULL OR w.event = ?5)
+		)
+		SELECT repo, path, run_id, attempt, branch, event, conclusion, completed_at, wall_seconds
+		FROM ranked WHERE rn <= ?7
+		ORDER BY repo, path, completed_at, run_id, attempt
+		""",
+		params.append(Integer(RECENT_RUNS))
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not read recent runs: \(sqlError(e))")
+			ServerError("could not read recent runs")
+		},
+	}
+	let Ok(dayRows) <- Deliveries.all(
+		"""
+		WITH win AS (
+		  SELECT w.repo, w.path, substr(w.completed_at, 1, 10) AS day, w.conclusion,
+		    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS seconds
+		  FROM workflow_runs w
+		  JOIN repositories r ON r.repo = w.repo AND (r.public = 1 OR ?6 = 1)
+		  WHERE w.status = 'completed' AND w.completed_at >= ?1 AND w.completed_at < ?2
+		    AND (?3 IS NULL OR w.repo = ?3 COLLATE NOCASE)
+		    AND (?4 IS NULL OR w.branch = ?4)
+		    AND (?5 IS NULL OR w.event = ?5)
+		),
+		counts AS (
+		  SELECT repo, path, day, count(*) AS runs,
+		    sum(conclusion = 'success') AS success,
+		    sum(conclusion IN ('failure', 'timed_out')) AS failed,
+		    sum(conclusion IS NULL OR conclusion NOT IN ('success', 'failure', 'timed_out')) AS other
+		  FROM win GROUP BY repo, path, day
+		),
+		walls AS (
+		  SELECT repo, path, day, seconds,
+		    row_number() OVER (PARTITION BY repo, path, day ORDER BY seconds) AS rn,
+		    count(*) OVER (PARTITION BY repo, path, day) AS n
+		  FROM win WHERE conclusion = 'success'
+		),
+		p50 AS (
+		  SELECT repo, path, day, max(CASE WHEN rn = (50 * n + 99) / 100 THEN seconds END) AS p50
+		  FROM walls GROUP BY repo, path, day
+		)
+		SELECT c.repo, c.path, c.day, c.runs, c.success, c.failed, c.other,
+		  CASE WHEN c.success + c.failed > 0
+		    THEN CAST(round(100.0 * c.success / (c.success + c.failed)) AS INTEGER)
+		  END AS pass_percent,
+		  p.p50 AS wall_p50_seconds
+		FROM counts c
+		LEFT JOIN p50 p ON p.repo = c.repo AND p.path = c.path AND p.day = c.day
+		ORDER BY c.repo, c.path, c.day
+		""",
+		params
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not compute daily CI health: \(sqlError(e))")
+			ServerError("could not compute daily CI health")
+		},
+	}
+	let Ok(recent) = Json.decodeSql[List[RecentRun]](recentRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode recent runs: \(jsonError(e))")
+			ServerError("recent runs did not decode")
+		},
+	}
+	let Ok(daily) = Json.decodeSql[List[DailyHealth]](dayRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode daily CI health: \(jsonError(e))")
+			ServerError("daily CI health did not decode")
+		},
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Ok(CiHistory {
+		since: since.toIso(),
+		until: now.toIso(),
+		recent: recent.filter((r) => (everything || !allows(excluded, r.repo))),
+		daily: daily.filter((d) => (everything || !allows(excluded, d.repo))),
+	})
+}
+
+// /metrics/prs's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsPrs(
+	query: PrQuery,
+	everything: Bool
+) -> Effect[HttpResult[PrMetrics]] given Deliveries, Logger, Clock, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let now <- Clock.now()
+	let since = now - Duration.millis(query.days * 86_400_000)
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let window = [
+		Text(since.toIso()),
+		Text(now.toIso()),
+		text(query.repo.map((r) => "\(r)")),
+		Text(shownNames(excluded, everything)),
+	]
+	// Each read is a literal (Bynk checks SQL at compile time), chosen by
+	// position, so the four run concurrently: 0 the flow, 1 queue exits,
+	// 2 merges by day, 3 when collection began (the first merge recorded,
+	// which `pull_requests_by_merged` answers without scanning).
+	let reads <- [0, 1, 2, 3].parTraverseAll(
+		(read) => match read {
+			0 => Deliveries.all(
+				"""
+					WITH shown AS (
+					  SELECT repo FROM repositories
+					  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+					),
+					merged AS MATERIALIZED (
+					  SELECT p.*,
+					    (SELECT e.action FROM pull_request_events e
+					     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued') AND e.at <= p.merged_at
+					     ORDER BY e.at DESC LIMIT 1) AS last_queue,
+					    (SELECT max(e.at) FROM pull_request_events e
+					     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'enqueued' AND e.at <= p.merged_at) AS enqueued_at,
+					    (SELECT count(*) FROM pull_request_events e
+					     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'enqueued') AS enqueues
+					  FROM pull_requests p JOIN shown s ON s.repo = p.repo
+					  WHERE p.merged_at >= ?1 AND p.merged_at < ?2
+					),
+					closed AS (
+					  SELECT p.repo, p.author_is_bot FROM pull_requests p JOIN shown s ON s.repo = p.repo
+					  WHERE p.state = 'closed' AND p.closed_at >= ?1 AND p.closed_at < ?2
+					),
+					open_bots AS (
+					  SELECT p.repo FROM pull_requests p JOIN shown s ON s.repo = p.repo
+					  WHERE p.state = 'open' AND p.author_is_bot = 1
+					),
+					repos AS (
+					  SELECT repo FROM merged UNION SELECT repo FROM closed UNION SELECT repo FROM open_bots
+					),
+					counts AS (
+					  SELECT repo, sum(author_is_bot = 0) AS merged, sum(author_is_bot = 0 AND enqueues > 1) AS requeued,
+					    sum(author_is_bot = 1) AS bots_merged
+					  FROM merged GROUP BY repo
+					),
+					closed_counts AS (
+					  SELECT repo, sum(author_is_bot = 0) AS n FROM closed GROUP BY repo
+					),
+					bot_counts AS (
+					  SELECT repo, count(*) AS n FROM open_bots GROUP BY repo
+					),
+					measures AS (
+					  SELECT repo, 'ready' AS k,
+					    CAST(round((julianday(merged_at) - julianday(ready_at)) * 86400) AS INTEGER) AS v
+					  FROM merged WHERE author_is_bot = 0 AND ready_at IS NOT NULL
+					  UNION ALL
+					  SELECT repo, 'open', CAST(round((julianday(merged_at) - julianday(opened_at)) * 86400) AS INTEGER)
+					  FROM merged WHERE author_is_bot = 0
+					  UNION ALL
+					  SELECT repo, 'queue', CAST(round((julianday(merged_at) - julianday(enqueued_at)) * 86400) AS INTEGER)
+					  FROM merged WHERE author_is_bot = 0 AND last_queue = 'enqueued'
+					  UNION ALL
+					  SELECT repo, 'size', additions + deletions
+					  FROM merged WHERE author_is_bot = 0 AND additions IS NOT NULL AND deletions IS NOT NULL
+					  UNION ALL
+					  SELECT repo, 'bot', CAST(round((julianday(merged_at) - julianday(opened_at)) * 86400) AS INTEGER)
+					  FROM merged WHERE author_is_bot = 1
+					),
+					ranked AS (
+					  SELECT repo, k, v,
+					    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
+					    count(*) OVER (PARTITION BY repo, k) AS n
+					  FROM measures
+					),
+					pct AS (
+					  SELECT repo, k, max(n) AS n,
+					    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
+					    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
+					  FROM ranked GROUP BY repo, k
+					)
+					SELECT r.repo,
+					  coalesce(c.merged, 0) AS merged,
+					  coalesce(cc.n, 0) AS closed_unmerged,
+					  coalesce(rd.n, 0) AS ready_to_merge_counted, rd.p50 AS ready_to_merge_p50_seconds, rd.p95 AS ready_to_merge_p95_seconds,
+					  op.p50 AS open_to_merge_p50_seconds, op.p95 AS open_to_merge_p95_seconds,
+					  coalesce(qu.n, 0) AS queue_counted, qu.p50 AS queue_p50_seconds, qu.p95 AS queue_p95_seconds,
+					  coalesce(c.requeued, 0) AS requeued,
+					  coalesce(sz.n, 0) AS size_counted, sz.p50 AS size_p50_lines,
+					  coalesce(c.bots_merged, 0) AS bots_merged,
+					  coalesce(bc.n, 0) AS bots_open,
+					  bt.p50 AS bots_merge_p50_seconds
+					FROM repos r
+					LEFT JOIN counts c ON c.repo = r.repo
+					LEFT JOIN closed_counts cc ON cc.repo = r.repo
+					LEFT JOIN bot_counts bc ON bc.repo = r.repo
+					LEFT JOIN pct rd ON rd.repo = r.repo AND rd.k = 'ready'
+					LEFT JOIN pct op ON op.repo = r.repo AND op.k = 'open'
+					LEFT JOIN pct qu ON qu.repo = r.repo AND qu.k = 'queue'
+					LEFT JOIN pct sz ON sz.repo = r.repo AND sz.k = 'size'
+					LEFT JOIN pct bt ON bt.repo = r.repo AND bt.k = 'bot'
+					ORDER BY r.repo
+				""",
+				window
+			),
+			1 => Deliveries.all(
+				"""
+					WITH shown AS (
+					  SELECT repo FROM repositories
+					  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+					)
+					SELECT e.repo, coalesce(e.reason, 'unknown') AS reason, count(*) AS count
+					FROM pull_request_events e JOIN shown s ON s.repo = e.repo
+					WHERE e.action = 'dequeued' AND coalesce(e.reason, '') != 'MERGE'
+					  AND e.at >= ?1 AND e.at < ?2
+					GROUP BY e.repo, coalesce(e.reason, 'unknown')
+					ORDER BY e.repo, count DESC, reason
+				""",
+				window
+			),
+			2 => Deliveries.all(
+				"""
+					WITH shown AS (
+					  SELECT repo FROM repositories
+					  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+					)
+					SELECT p.repo, substr(p.merged_at, 1, 10) AS day, count(*) AS merged
+					FROM pull_requests p JOIN shown s ON s.repo = p.repo
+					WHERE p.author_is_bot = 0 AND p.merged_at >= ?1 AND p.merged_at < ?2
+					GROUP BY p.repo, day
+					ORDER BY p.repo, day
+				""",
+				window
+			),
+			_ => Deliveries.all(
+				"SELECT min(merged_at) AS first FROM pull_requests WHERE merged_at IS NOT NULL",
+				[]
+			),
+		}
+	)
+	let Some(Ok(flowRows)) = reads.get(0) else {
+		let _ <- Logger.error("could not compute PR flow: \(readError(reads.get(0)))")
+		ServerError("could not compute PR flow")
+	}
+	let Some(Ok(exitRows)) = reads.get(1) else {
+		let _ <- Logger.error("could not read merge-queue exits: \(readError(reads.get(1)))")
+		ServerError("could not read merge-queue exits")
+	}
+	let Some(Ok(dayRows)) = reads.get(2) else {
+		let _ <- Logger.error("could not count merges by day: \(readError(reads.get(2)))")
+		ServerError("could not count merges by day")
+	}
+	let Ok(flow) = Json.decodeSql[List[PrFlow]](flowRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode PR flow: \(jsonError(e))")
+			ServerError("PR flow did not decode")
+		},
+	}
+	let Ok(exits) = Json.decodeSql[List[QueueExit]](exitRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode merge-queue exits: \(jsonError(e))")
+			ServerError("merge-queue exits did not decode")
+		},
+	}
+	let Ok(days) = Json.decodeSql[List[MergedDay]](dayRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode merges by day: \(jsonError(e))")
+			ServerError("merges by day did not decode")
+		},
+	}
+	// Only a hint of how much of the window has data, so a failed read is "unknown".
+	let dataSince: Option[String] = match reads.get(3) {
+		Some(Ok(rows)) => match Json.decodeSql[List[FirstRun]](rows) {
+			Ok([f]) => f.first,
+			_ => None,
+		},
+		_ => None,
+	}
+	Ok(PrMetrics {
+		since: since.toIso(),
+		until: now.toIso(),
+		data_since: dataSince,
+		repos: flow,
+		queue_exits: exits,
+		daily: days,
+	})
+}
+
+// /metrics/prs/open's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsPrsOpen(
+	query: NowQuery,
+	everything: Bool
+) -> Effect[HttpResult[PrsOpen]] given Deliveries, Logger, Clock, Secrets {
+	let now <- Clock.now()
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let Ok(rows) <- Deliveries.all(
+		"""
+		WITH shown AS (
+		  SELECT repo FROM repositories
+		  WHERE (public = 1 OR ?5 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?5, ',' || lower(repo) || ',') = 0
+		),
+		open AS (
+		  SELECT p.repo, p.number, p.title, p.author, p.author_is_bot, p.draft, p.opened_at,
+		    coalesce(
+		      (SELECT max(e.at) FROM pull_request_events e
+		       WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'),
+		      p.ready_at) AS ready_since,
+		    (SELECT CASE WHEN e.action = 'enqueued' AND e.at >= ?3 THEN 1 ELSE 0 END FROM pull_request_events e
+		     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued')
+		     ORDER BY e.at DESC LIMIT 1) AS queued
+		  FROM pull_requests p JOIN shown s ON s.repo = p.repo
+		  WHERE p.state = 'open'
+		)
+		SELECT repo, number, title, author, author_is_bot = 1 AS author_is_bot,
+		  CASE WHEN draft = 1 THEN 'draft' WHEN queued = 1 THEN 'queued' ELSE 'ready' END AS stage,
+		  opened_at, ready_since,
+		  (draft = 0 AND coalesce(queued, 0) = 0 AND ready_since IS NOT NULL AND ready_since < ?2) AS stale
+		FROM open
+		ORDER BY draft, coalesce(ready_since, opened_at), repo, number
+		LIMIT ?4
+		""",
+		[
+			text(query.repo.map((r) => "\(r)")),
+			Text((now - 7.days).toIso()),
+			Text((now - QUEUE_TIMEOUT).toIso()),
+			Integer(MAX_OPEN_PULLS),
+			Text(shownNames(excluded, everything)),
+		]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not list open pull requests: \(sqlError(e))")
+			ServerError("could not list open pull requests")
+		},
+	}
+	let Ok(open) = Json.decodeSql[List[OpenPull]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode open pull requests: \(jsonError(e))")
+			ServerError("open pull requests did not decode")
+		},
+	}
+	Ok(PrsOpen { open: open })
+}
+
+// /metrics/issues's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsIssues(
+	query: IssueQuery,
+	everything: Bool
+) -> Effect[HttpResult[IssueMetrics]] given Deliveries, Logger, Clock, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let now <- Clock.now()
+	let since = now - Duration.millis(query.days * 86_400_000)
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let window = [
+		Text(since.toIso()),
+		Text(now.toIso()),
+		text(query.repo.map((r) => "\(r)")),
+		Text(shownNames(excluded, everything)),
+	]
+	let reads <- [0, 1, 2, 3].parTraverseAll(
+		(read) => match read {
+			0 => Deliveries.all(
+				"""
+				WITH shown AS (
+				  SELECT repo FROM repositories
+				  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+				),
+				touched AS MATERIALIZED (
+				  SELECT i.*,
+				    (i.opened_at >= ?1 AND i.opened_at < ?2) AS opened_in,
+				    (i.state = 'closed' AND i.closed_at >= ?1 AND i.closed_at < ?2) AS closed_in,
+				    coalesce(i.state_reason, 'completed') AS reason,
+				    (i.author_is_bot = 0 AND i.author_association NOT IN ('OWNER', 'MEMBER', 'COLLABORATOR')
+				      AND coalesce(i.author_maintainer, 0) = 0) AS outside
+				  FROM issues i JOIN shown s ON s.repo = i.repo
+				  WHERE i.state IN ('open', 'closed')
+				    AND ((i.opened_at >= ?1 AND i.opened_at < ?2) OR (i.closed_at >= ?1 AND i.closed_at < ?2))
+				),
+				counts AS (
+				  SELECT repo,
+				    sum(author_is_bot = 0 AND opened_in) AS opened,
+				    sum(author_is_bot = 0 AND closed_in AND reason NOT IN ('not_planned', 'duplicate')) AS completed,
+				    sum(author_is_bot = 0 AND closed_in AND reason = 'not_planned') AS not_planned,
+				    sum(author_is_bot = 0 AND closed_in AND reason = 'duplicate') AS duplicate,
+				    sum(outside AND opened_in) AS outside_opened,
+				    sum(outside AND opened_in AND first_response_at IS NOT NULL) AS outside_responded,
+				    sum(outside AND opened_in AND state = 'open' AND first_response_at IS NULL) AS outside_waiting,
+				    sum(author_is_bot = 1 AND opened_in) AS bots_opened
+				  FROM touched GROUP BY repo
+				),
+				measures AS (
+				  SELECT repo, 'close' AS k, CAST(round((julianday(closed_at) - julianday(opened_at)) * 86400) AS INTEGER) AS v
+				  FROM touched WHERE author_is_bot = 0 AND closed_in AND reason NOT IN ('not_planned', 'duplicate')
+				  UNION ALL
+				  SELECT repo, 'response', CAST(round((julianday(first_response_at) - julianday(opened_at)) * 86400) AS INTEGER)
+				  FROM touched WHERE outside AND opened_in AND first_response_at IS NOT NULL
+				),
+				ranked AS (
+				  SELECT repo, k, v,
+				    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
+				    count(*) OVER (PARTITION BY repo, k) AS n
+				  FROM measures
+				),
+				pct AS (
+				  SELECT repo, k,
+				    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
+				    max(CASE WHEN rn = (90 * n + 99) / 100 THEN v END) AS p90
+				  FROM ranked GROUP BY repo, k
+				)
+				SELECT c.repo, c.opened, c.completed, c.not_planned, c.duplicate,
+				  cl.p50 AS close_p50_seconds, cl.p90 AS close_p90_seconds,
+				  c.outside_opened, c.outside_responded, c.outside_waiting,
+				  rs.p50 AS response_p50_seconds, rs.p90 AS response_p90_seconds,
+				  c.bots_opened
+				FROM counts c
+				LEFT JOIN pct cl ON cl.repo = c.repo AND cl.k = 'close'
+				LEFT JOIN pct rs ON rs.repo = c.repo AND rs.k = 'response'
+				ORDER BY c.repo
+				""",
+				window
+			),
+			1 => Deliveries.all(
+				"""
+				WITH shown AS (
+				  SELECT repo FROM repositories
+				  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+				),
+				closed AS (
+				  SELECT i.repo, i.number,
+				    CAST(round((julianday(i.closed_at) - julianday(i.opened_at)) * 86400) AS INTEGER) AS v
+				  FROM issues i JOIN shown s ON s.repo = i.repo
+				  WHERE i.state = 'closed' AND i.author_is_bot = 0 AND i.closed_at >= ?1 AND i.closed_at < ?2
+				    AND coalesce(i.state_reason, 'completed') NOT IN ('not_planned', 'duplicate')
+				),
+				labelled AS (
+				  SELECT c.repo, l.label, c.v FROM closed c
+				  LEFT JOIN issue_labels l ON l.repo = c.repo AND l.number = c.number
+				),
+				ranked AS (
+				  SELECT repo, label, v,
+				    row_number() OVER (PARTITION BY repo, label ORDER BY v) AS rn,
+				    count(*) OVER (PARTITION BY repo, label) AS n
+				  FROM labelled
+				)
+				SELECT repo, label, max(n) AS completed,
+				  max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50_seconds,
+				  max(CASE WHEN rn = (90 * n + 99) / 100 THEN v END) AS p90_seconds
+				FROM ranked GROUP BY repo, label
+				ORDER BY repo, completed DESC, label IS NULL, label
+				""",
+				window
+			),
+			2 => Deliveries.all(
+				"""
+				WITH shown AS (
+				  SELECT repo FROM repositories
+				  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+				),
+				moments AS (
+				  SELECT i.repo, substr(i.opened_at, 1, 10) AS day, 1 AS opened, 0 AS closed
+				  FROM issues i JOIN shown s ON s.repo = i.repo
+				  WHERE i.author_is_bot = 0 AND i.state IN ('open', 'closed') AND i.opened_at >= ?1 AND i.opened_at < ?2
+				  UNION ALL
+				  SELECT i.repo, substr(i.closed_at, 1, 10), 0, 1
+				  FROM issues i JOIN shown s ON s.repo = i.repo
+				  WHERE i.author_is_bot = 0 AND i.state = 'closed' AND i.closed_at >= ?1 AND i.closed_at < ?2
+				)
+				SELECT repo, day, sum(opened) AS opened, sum(closed) AS closed
+				FROM moments GROUP BY repo, day ORDER BY repo, day
+				""",
+				window
+			),
+			_ => Deliveries.all(
+				"SELECT min(closed_at) AS first FROM issues WHERE closed_at IS NOT NULL",
+				[]
+			),
+		}
+	)
+	let Some(Ok(flowRows)) = reads.get(0) else {
+		let _ <- Logger.error("could not compute issue flow: \(readError(reads.get(0)))")
+		ServerError("could not compute issue flow")
+	}
+	let Some(Ok(labelRows)) = reads.get(1) else {
+		let _ <- Logger.error(
+			"could not compute time to close by label: \(readError(reads.get(1)))"
+		)
+		ServerError("could not compute time to close by label")
+	}
+	let Some(Ok(dayRows)) = reads.get(2) else {
+		let _ <- Logger.error("could not count issues by day: \(readError(reads.get(2)))")
+		ServerError("could not count issues by day")
+	}
+	let Ok(flow) = Json.decodeSql[List[IssueFlow]](flowRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode issue flow: \(jsonError(e))")
+			ServerError("issue flow did not decode")
+		},
+	}
+	let Ok(labels) = Json.decodeSql[List[LabelClose]](labelRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode time to close by label: \(jsonError(e))")
+			ServerError("time to close by label did not decode")
+		},
+	}
+	let Ok(days) = Json.decodeSql[List[IssueDay]](dayRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode issues by day: \(jsonError(e))")
+			ServerError("issues by day did not decode")
+		},
+	}
+	// Only a hint of how much of the window has data, so a failed read is "unknown".
+	let dataSince: Option[String] = match reads.get(3) {
+		Some(Ok(rows)) => match Json.decodeSql[List[FirstRun]](rows) {
+			Ok([f]) => f.first,
+			_ => None,
+		},
+		_ => None,
+	}
+	Ok(IssueMetrics {
+		since: since.toIso(),
+		until: now.toIso(),
+		data_since: dataSince,
+		repos: flow,
+		labels: labels,
+		daily: days,
+	})
+}
+
+// /metrics/issues/open's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsIssuesOpen(
+	query: NowQuery,
+	everything: Bool
+) -> Effect[HttpResult[IssuesOpen]] given Deliveries, Logger, Clock, Secrets {
+	let now <- Clock.now()
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let repo = text(query.repo.map((r) => "\(r)"))
+	let staleBefore = Text((now - ISSUE_STALE).toIso())
+	let reads <- [0, 1].parTraverseAll(
+		(read) => match read {
+			0 => Deliveries.all(
+				"""
+				WITH shown AS (
+				  SELECT repo FROM repositories
+				  WHERE (public = 1 OR ?6 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?6, ',' || lower(repo) || ',') = 0
+				)
+				SELECT i.repo,
+				  sum(i.author_is_bot = 0) AS open,
+				  sum(i.author_is_bot = 0 AND i.opened_at >= ?2) AS under_day,
+				  sum(i.author_is_bot = 0 AND i.opened_at < ?2 AND i.opened_at >= ?3) AS under_week,
+				  sum(i.author_is_bot = 0 AND i.opened_at < ?3 AND i.opened_at >= ?4) AS under_month,
+				  sum(i.author_is_bot = 0 AND i.opened_at < ?4) AS older,
+				  min(CASE WHEN i.author_is_bot = 0 THEN i.opened_at END) AS oldest_opened_at,
+				  sum(i.author_is_bot = 0 AND i.updated_at < ?5) AS stale,
+				  sum(i.author_is_bot = 1) AS bots_open
+				FROM issues i JOIN shown s ON s.repo = i.repo
+				WHERE i.state = 'open'
+				GROUP BY i.repo
+				ORDER BY i.repo
+				""",
+				[
+					repo,
+					Text((now - 1.days).toIso()),
+					Text((now - 7.days).toIso()),
+					Text((now - 30.days).toIso()),
+					staleBefore,
+					Text(shownNames(excluded, everything)),
+				]
+			),
+			_ => Deliveries.all(
+				"""
+				WITH shown AS (
+				  SELECT repo FROM repositories
+				  WHERE (public = 1 OR ?4 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+				),
+				stale AS (
+				  SELECT i.repo, i.number, i.title, i.author, i.opened_at, i.updated_at,
+				    (SELECT coalesce(json_group_array(label), '[]')
+				     FROM (SELECT l.label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY l.label)) AS labels,
+				    row_number() OVER (PARTITION BY i.repo ORDER BY i.updated_at, i.number) AS place
+				  FROM issues i JOIN shown s ON s.repo = i.repo
+				  WHERE i.state = 'open' AND i.author_is_bot = 0 AND i.updated_at < ?2
+				)
+				SELECT coalesce(json_group_array(json_object('repo', repo, 'number', number, 'title', title,
+				    'author', author, 'labels', json(labels), 'opened_at', opened_at, 'updated_at', updated_at,
+				    'url', 'https://github.com/' || repo || '/issues/' || number)), '[]') AS items
+				FROM (SELECT * FROM stale WHERE place <= ?3 ORDER BY repo, updated_at, number)
+				""",
+				[
+					repo,
+					staleBefore,
+					Integer(MAX_STALE_ISSUES),
+					Text(shownNames(excluded, everything)),
+				]
+			),
+		}
+	)
+	let Some(Ok(backlogRows)) = reads.get(0) else {
+		let _ <- Logger.error("could not read the issue backlog: \(readError(reads.get(0)))")
+		ServerError("could not read the issue backlog")
+	}
+	let Ok(backlog) = Json.decodeSql[List[IssueBacklog]](backlogRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the issue backlog: \(jsonError(e))")
+			ServerError("the issue backlog did not decode")
+		},
+	}
+	let Some(Ok(staleRows)) = reads.get(1) else {
+		let _ <- Logger.error("could not list stale issues: \(readError(reads.get(1)))")
+		ServerError("could not list stale issues")
+	}
+	let Ok([listed]) = Json.decodeSql[List[StaleList]](staleRows) else {
+		let _ <- Logger.error("stale issues did not come back as one list")
+		ServerError("stale issues did not decode")
+	}
+	let Ok(stale) = Json.decode[List[StaleIssue]](listed.items) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode stale issues: \(jsonError(e))")
+			ServerError("stale issues did not decode")
+		},
+	}
+	Ok(IssuesOpen { backlog: backlog, stale: stale })
+}
+
+// /metrics/releases's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsReleases(
+	query: ReleaseQuery,
+	everything: Bool
+) -> Effect[HttpResult[ReleaseMetrics]] given Deliveries, Logger, Clock, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let now <- Clock.now()
+	let since = now - Duration.millis(query.days * 86_400_000)
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let window = [
+		Text(since.toIso()),
+		Text(now.toIso()),
+		text(query.repo.map((r) => "\(r)")),
+		Text(shownNames(excluded, everything)),
+	]
+	let reads <- [0, 1].parTraverseAll(
+		(read) => match read {
+			0 => Deliveries.all(
+				"""
+					WITH shown AS (
+					  SELECT repo FROM repositories
+					  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+					),
+					finals AS MATERIALIZED (
+					  SELECT r.repo, r.tag, r.published_at,
+					    lag(r.published_at) OVER (PARTITION BY r.repo ORDER BY r.published_at) AS prev_at
+					  FROM releases r JOIN shown s ON s.repo = r.repo
+					  WHERE r.draft = 0 AND r.prerelease = 0 AND r.deleted_at IS NULL
+					    AND r.published_at IS NOT NULL AND r.published_at < ?2
+					),
+					latest AS MATERIALIZED (
+					  SELECT repo, tag, published_at AS at FROM (
+					    SELECT repo, tag, published_at,
+					      row_number() OVER (PARTITION BY repo ORDER BY published_at DESC, tag DESC) AS rn
+					    FROM finals
+					  ) WHERE rn = 1
+					),
+					counts AS (
+					  SELECT repo, count(*) AS n FROM finals WHERE published_at >= ?1 GROUP BY repo
+					),
+					pre AS (
+					  SELECT r.repo, count(*) AS n FROM releases r JOIN shown s ON s.repo = r.repo
+					  WHERE r.prerelease = 1 AND r.draft = 0 AND r.deleted_at IS NULL
+					    AND r.published_at >= ?1 AND r.published_at < ?2
+					  GROUP BY r.repo
+					),
+					waiting AS (
+					  SELECT p.repo, count(*) AS n, min(p.merged_at) AS oldest
+					  FROM latest l CROSS JOIN pull_requests p
+					  WHERE p.repo = l.repo AND p.merged_at > l.at AND p.released_in IS NULL AND p.author_is_bot = 0
+					  GROUP BY p.repo
+					),
+					recording AS (
+					  SELECT l.repo, (SELECT min(e.at) FROM pull_request_events e WHERE e.repo = l.repo) AS at FROM latest l
+					),
+					measures AS (
+					  SELECT repo, 'interval' AS k,
+					    CAST(round((julianday(published_at) - julianday(prev_at)) * 86400) AS INTEGER) AS v
+					  FROM finals WHERE published_at >= ?1 AND prev_at IS NOT NULL
+					  UNION ALL
+					  SELECT p.repo, 'ship', CAST(round((julianday(p.released_at) - julianday(p.merged_at)) * 86400) AS INTEGER)
+					  FROM pull_requests p JOIN shown s ON s.repo = p.repo
+					  WHERE p.released_at >= ?1 AND p.released_at < ?2 AND p.author_is_bot = 0
+					),
+					ranked AS (
+					  SELECT repo, k, v,
+					    row_number() OVER (PARTITION BY repo, k ORDER BY v) AS rn,
+					    count(*) OVER (PARTITION BY repo, k) AS n
+					  FROM measures
+					),
+					pct AS (
+					  SELECT repo, k, max(n) AS n,
+					    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
+					    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
+					  FROM ranked GROUP BY repo, k
+					)
+					SELECT l.repo,
+					  coalesce(c.n, 0) AS releases,
+					  coalesce(pr.n, 0) AS prereleases,
+					  iv.p50 AS interval_p50_seconds,
+					  l.tag AS last_tag, l.at AS last_at,
+					  coalesce(sh.n, 0) AS shipped_counted, sh.p50 AS merge_to_release_p50_seconds, sh.p95 AS merge_to_release_p95_seconds,
+					  coalesce(w.n, 0) AS waiting, w.oldest AS waiting_since,
+					  rc.at AS recording_since
+					FROM latest l
+					LEFT JOIN counts c ON c.repo = l.repo
+					LEFT JOIN pre pr ON pr.repo = l.repo
+					LEFT JOIN waiting w ON w.repo = l.repo
+					LEFT JOIN recording rc ON rc.repo = l.repo
+					LEFT JOIN pct iv ON iv.repo = l.repo AND iv.k = 'interval'
+					LEFT JOIN pct sh ON sh.repo = l.repo AND sh.k = 'ship'
+					ORDER BY l.repo
+				""",
+				window
+			),
+			_ => Deliveries.all(
+				"""
+					WITH shown AS (
+					  SELECT repo FROM repositories
+					  WHERE (public = 1 OR ?4 = '*') AND (?3 IS NULL OR repo = ?3 COLLATE NOCASE) AND instr(?4, ',' || lower(repo) || ',') = 0
+					),
+					runs AS MATERIALIZED (
+					  SELECT w.repo, w.path, w.workflow, w.branch, w.conclusion, w.completed_at,
+					    CAST(round((julianday(w.completed_at) - julianday(w.queued_at)) * 86400) AS INTEGER) AS v
+					  FROM workflow_runs w JOIN shown s ON s.repo = w.repo
+					  WHERE w.completed_at >= ?1 AND w.completed_at < ?2 AND w.event = 'push'
+					    AND (EXISTS (SELECT 1 FROM tags t WHERE t.repo = w.repo AND t.tag = w.branch)
+					         OR EXISTS (SELECT 1 FROM releases r WHERE r.repo = w.repo AND r.tag = w.branch))
+					),
+					release_paths AS (
+					  SELECT DISTINCT u.repo, u.path FROM runs u
+					  WHERE EXISTS (SELECT 1 FROM releases r WHERE r.repo = u.repo AND r.tag = u.branch)
+					),
+					release_runs AS (
+					  SELECT u.* FROM runs u JOIN release_paths p ON p.repo = u.repo AND p.path = u.path
+					),
+					ranked AS (
+					  SELECT repo, path, v,
+					    row_number() OVER (PARTITION BY repo, path ORDER BY v) AS rn,
+					    count(*) OVER (PARTITION BY repo, path) AS n
+					  FROM release_runs WHERE conclusion = 'success'
+					),
+					pct AS (
+					  SELECT repo, path, max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50
+					  FROM ranked GROUP BY repo, path
+					)
+					SELECT u.repo,
+					  (SELECT x.workflow FROM release_runs x WHERE x.repo = u.repo AND x.path = u.path ORDER BY x.completed_at DESC LIMIT 1) AS workflow,
+					  u.path, count(*) AS runs,
+					  sum(u.conclusion IN ('failure', 'timed_out')) AS failed,
+					  p.p50 AS p50_seconds
+					FROM release_runs u LEFT JOIN pct p ON p.repo = u.repo AND p.path = u.path
+					GROUP BY u.repo, u.path
+					ORDER BY u.repo, u.path
+				""",
+				window
+			),
+		}
+	)
+	let Some(Ok(flowRows)) = reads.get(0) else {
+		let _ <- Logger.error("could not compute releases: \(readError(reads.get(0)))")
+		ServerError("could not compute releases")
+	}
+	let Some(Ok(pipelineRows)) = reads.get(1) else {
+		let _ <- Logger.error("could not compute release workflows: \(readError(reads.get(1)))")
+		ServerError("could not compute release workflows")
+	}
+	let Ok(flow) = Json.decodeSql[List[ReleaseFlow]](flowRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode releases: \(jsonError(e))")
+			ServerError("releases did not decode")
+		},
+	}
+	let Ok(pipeline) = Json.decodeSql[List[ReleasePipeline]](pipelineRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode release workflows: \(jsonError(e))")
+			ServerError("release workflows did not decode")
+		},
+	}
+	Ok(ReleaseMetrics { since: since.toIso(), until: now.toIso(), repos: flow, pipeline: pipeline })
+}
+
+// /metrics/releases/recent's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsReleasesRecent(
+	query: NowQuery,
+	everything: Bool
+) -> Effect[HttpResult[ReleasesRecent]] given Deliveries, Logger, Secrets {
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let Ok(rows) <- Deliveries.all(
+		"""
+		WITH shown AS (
+		  SELECT repo FROM repositories
+		  WHERE (public = 1 OR ?3 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?3, ',' || lower(repo) || ',') = 0
+		),
+		ranked AS (
+		  SELECT r.*, row_number() OVER (PARTITION BY r.repo ORDER BY r.published_at DESC, r.tag DESC) AS rn
+		  FROM releases r JOIN shown s ON s.repo = r.repo
+		  WHERE r.draft = 0 AND r.deleted_at IS NULL AND r.published_at IS NOT NULL
+		)
+		SELECT repo, tag, name, prerelease = 1 AS prerelease, published_at,
+		  nullif(previous_tag, '') AS previous_tag, shipped,
+		  CASE WHEN shipped IS NOT NULL THEN
+		    (SELECT count(*) FROM pull_requests p WHERE p.repo = ranked.repo AND p.released_in = ranked.tag AND p.author_is_bot = 0)
+		  END AS shipped_by_people,
+		  'https://github.com/' || repo || '/releases/tag/' || tag AS url
+		FROM ranked WHERE rn <= ?2
+		ORDER BY published_at DESC, repo, tag
+		""",
+		[
+			text(query.repo.map((r) => "\(r)")),
+			Integer(MAX_RECENT_RELEASES),
+			Text(shownNames(excluded, everything)),
+		]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not list recent releases: \(sqlError(e))")
+			ServerError("could not list recent releases")
+		},
+	}
+	let Ok(releases) = Json.decodeSql[List[RecentRelease]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode recent releases: \(jsonError(e))")
+			ServerError("recent releases did not decode")
+		},
+	}
+	Ok(ReleasesRecent { releases: releases })
+}
+
+// /metrics/runners's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsRunners(
+	query: RunnerQuery,
+	everything: Bool
+) -> Effect[HttpResult[RunnerMetrics]] given Deliveries, Logger, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let reads <- [0, 1].parTraverseAll(
+		(read) => match read {
+			0 => Deliveries.all(
+				"SELECT computed_at, since, until, data_since, runners, longest, slowest FROM runner_windows WHERE days = ?1",
+				[Integer(query.days)]
+			),
+			_ => Deliveries.all(
+				"""
+				SELECT repo FROM repositories
+				WHERE (public = 1 OR ?2 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?2, ',' || lower(repo) || ',') = 0
+				""",
+				[text(query.repo.map((r) => "\(r)")), Text(shownNames(excluded, everything))]
+			),
+		}
+	)
+	let Some(Ok(windowRows)) = reads.get(0) else {
+		let _ <- Logger.error("could not read the runner figures: \(readError(reads.get(0)))")
+		ServerError("could not read the runner figures")
+	}
+	let Some(Ok(shownRows)) = reads.get(1) else {
+		let _ <- Logger.error("could not list the repositories shown: \(readError(reads.get(1)))")
+		ServerError("could not list the repositories shown")
+	}
+	let Ok(windows) = Json.decodeSql[List[RunnerWindow]](windowRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the runner figures: \(jsonError(e))")
+			ServerError("the runner figures did not decode")
+		},
+	}
+	let Ok(shown) = Json.decodeSql[List[ShownRepo]](shownRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the repositories shown: \(jsonError(e))")
+			ServerError("the repositories shown did not decode")
+		},
+	}
+	let empty = RunnerMetrics {
+		since: None,
+		until: None,
+		computed_at: None,
+		data_since: None,
+		runners: [],
+		longest: [],
+		slowest: [],
+	}
+	let Some(w) = windows.first() else { Ok(empty) }
+	let isShown = (repo: String) => shown.any((r) => r.repo == repo)
+	let Ok(runners) = Json.decodeSql[List[RunnerWait]](w.runners) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode runner waits: \(jsonError(e))")
+			ServerError("runner waits did not decode")
+		},
+	}
+	let Ok(longest) = Json.decodeSql[List[LongWait]](w.longest) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the longest waits: \(jsonError(e))")
+			ServerError("the longest waits did not decode")
+		},
+	}
+	let Ok(slowest) = Json.decodeSql[List[JobTime]](w.slowest) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the slowest jobs: \(jsonError(e))")
+			ServerError("the slowest jobs did not decode")
+		},
+	}
+	Ok(RunnerMetrics {
+		since: Some(w.since),
+		until: Some(w.until),
+		computed_at: Some(w.computed_at),
+		data_since: w.data_since,
+		runners: runners.filter((r) => isShown(r.repo)),
+		longest: longest.filter((l) => isShown(l.repo)),
+		slowest: slowest.filter((j) => isShown(j.repo)),
+	})
+}
+
+// /metrics/runners/now's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsRunnersNow(
+	query: NowQuery,
+	everything: Bool
+) -> Effect[HttpResult[RunnersNow]] given Deliveries, Logger, Clock, Secrets {
+	let now <- Clock.now()
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let Ok(rows) <- Deliveries.all(
+		"""
+		WITH shown AS (
+		  SELECT repo FROM repositories
+		  WHERE (public = 1 OR ?3 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?3, ',' || lower(repo) || ',') = 0
+		)
+		SELECT j.repo, j.runner,
+		  sum(j.status = 'queued') AS queued,
+		  min(CASE WHEN j.status = 'queued' THEN j.created_at END) AS oldest_queued_at,
+		  sum(j.status = 'waiting') AS awaiting_approval
+		FROM workflow_jobs j JOIN shown s ON s.repo = j.repo
+		WHERE j.status IN ('queued', 'waiting') AND j.created_at >= ?2
+		GROUP BY j.repo, j.runner
+		ORDER BY j.repo, queued DESC, j.runner
+		""",
+		[
+			text(query.repo.map((r) => "\(r)")),
+			Text((now - JOB_QUEUE_TIMEOUT).toIso()),
+			Text(shownNames(excluded, everything)),
+		]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not read the jobs waiting now: \(sqlError(e))")
+			ServerError("could not read the jobs waiting now")
+		},
+	}
+	let Ok(waiting) = Json.decodeSql[List[WaitingNow]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the jobs waiting now: \(jsonError(e))")
+			ServerError("the jobs waiting now did not decode")
+		},
+	}
+	Ok(RunnersNow { waiting: waiting })
+}
+
+// Lets a maintainer request through (#53) once GitHub still counts them a
+// member of the organisation (a kept answer first), else answers why not.
+fn forMaintainer[T](
+	login: String,
+	answer: () -> Effect[HttpResult[T]]
+) -> Effect[HttpResult[T]] given Deliveries, GitHubApi, Clock, Logger {
+	let Ok(member) <- maintainerMember(login, false) else match {
+		Err(why) => {
+			let _ <- Logger.error(
+				"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
+			)
+			ServiceUnavailable("GitHub could not say whether you belong to \(MAINTAINER_ORG)")
+		},
+	}
+	let true = member else {
+		RawError(
+			Forbidden,
+			refusal403("not_a_member", "\(login) doesn't belong to \(MAINTAINER_ORG)"),
+			"application/json"
+		)
+	}
+	answer()
+}
+
+// The exclusion list a metrics query is given: `DASHBOARD_EXCLUDE`'s names,
+// or for a maintainer `ALL_REPOSITORIES`, which each query reads as "every
+// repository, private ones too" and which matches no repository's name.
+fn shownNames(excluded: Option[String], everything: Bool) -> String {
+	if everything { ALL_REPOSITORIES } else { excludedNames(excluded) }
+}
+
+const ALL_REPOSITORIES: String = "*"
+
+// The repositories behind `GET /maintainers/repositories`, by name.
+fn shownRepositories() -> Effect[HttpResult[List[ShownRepository]]] given Deliveries, Logger, Secrets {
+	let Ok(rows) <- Deliveries.all("SELECT repo, public FROM repositories ORDER BY repo", []) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not list repositories: \(sqlError(e))")
+			ServerError("could not list repositories")
+		},
+	}
+	let Ok(listed) = Json.decodeSql[List[RepositoryRow]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode repositories: \(jsonError(e))")
+			ServerError("repositories did not decode")
+		},
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Ok(listed.map((r) => ShownRepository {
+		repo: r.repo,
+		public: r.public == 1,
+		excluded: allows(excluded, r.repo),
+	}))
+}
+
+type RepositoryRow = {
+	repo: String,
+	public: Int,
 }

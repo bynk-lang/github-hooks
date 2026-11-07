@@ -353,3 +353,59 @@ case "an issues window other than 7, 30 or 90 days is refused, and the limit app
 	let open <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
 	expect open is TooManyRequests(_)
 }
+
+--- accuser, a maintainer: GitHub's kept answer, so the maintainer routes need no GitHub stub.
+fn keptMaintainer() -> SqlStatement {
+	SqlStatement {
+		sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-06T00:00:00.000Z')",
+		params: [],
+	}
+}
+
+case "a maintainer's issue figures include private and excluded repositories; the public's never do" {
+	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
+	expect seeded is Ok(_)
+	let public0 <- api.GET(
+		"/metrics/issues",
+		IssueQuery {
+			repo: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let mine0 <- api.POST("/maintainers/metrics/issues", IssueQuery {
+		repo: None,
+		days: 7,
+	}) by Maintainer("accuser")
+	let Ok(p0) = public0 else {
+		expect false
+	}
+	let Ok(m0) = mine0 else {
+		expect false
+	}
+	// /metrics/issues: the public never see the private or excluded repository; a maintainer sees both.
+	let pt0 = Json.encode(p0)
+	let mt0 = Json.encode(m0)
+	expect !pt0.contains("bynk-lang/secret") && !pt0.contains("bynk-lang/sandbox")
+	// Only the private repository's issue is in the window; the open route covers the excluded one.
+	expect mt0.contains("bynk-lang/secret")
+	expect mt0.contains("bynk-lang/bynk")
+	let public1 <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
+	let mine1 <- api.POST(
+		"/maintainers/metrics/issues/open",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	let Ok(p1) = public1 else {
+		expect false
+	}
+	let Ok(m1) = mine1 else {
+		expect false
+	}
+	// /metrics/issues/open: the public never see the private or excluded repository; a maintainer sees both.
+	let pt1 = Json.encode(p1)
+	let mt1 = Json.encode(m1)
+	expect !pt1.contains("bynk-lang/secret") && !pt1.contains("bynk-lang/sandbox")
+	// Only the excluded repository has an open issue in the seed; the private one's is closed.
+	expect mt1.contains("bynk-lang/sandbox")
+	expect mt1.contains("bynk-lang/bynk")
+}

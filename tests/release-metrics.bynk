@@ -365,3 +365,57 @@ case "a pushed tag is recorded, once; a branch push or a tag's deletion isn't" {
 	)
 	expect rows == Ok(Some("{\"rows\":\"bynk-lang/bynk v1.2.1 1\"}"))
 }
+
+--- accuser, a maintainer: GitHub's kept answer, so the maintainer routes need no GitHub stub.
+fn keptMaintainer() -> SqlStatement {
+	SqlStatement {
+		sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-06T00:00:00.000Z')",
+		params: [],
+	}
+}
+
+case "a maintainer's release figures include private and excluded repositories; the public's never do" {
+	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
+	expect seeded is Ok(_)
+	let public0 <- api.GET(
+		"/metrics/releases",
+		ReleaseQuery {
+			repo: None,
+			days: 7,
+		},
+		viewer()
+	) by Visitor
+	let mine0 <- api.POST("/maintainers/metrics/releases", ReleaseQuery {
+		repo: None,
+		days: 7,
+	}) by Maintainer("accuser")
+	let Ok(p0) = public0 else {
+		expect false
+	}
+	let Ok(m0) = mine0 else {
+		expect false
+	}
+	// /metrics/releases: the public never see the private or excluded repository; a maintainer sees both.
+	let pt0 = Json.encode(p0)
+	let mt0 = Json.encode(m0)
+	expect !pt0.contains("bynk-lang/secret") && !pt0.contains("bynk-lang/sandbox")
+	expect mt0.contains("bynk-lang/secret") && mt0.contains("bynk-lang/sandbox")
+	expect mt0.contains("bynk-lang/bynk")
+	let public1 <- api.GET("/metrics/releases/recent", NowQuery { repo: None }, viewer()) by Visitor
+	let mine1 <- api.POST(
+		"/maintainers/metrics/releases/recent",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	let Ok(p1) = public1 else {
+		expect false
+	}
+	let Ok(m1) = mine1 else {
+		expect false
+	}
+	// /metrics/releases/recent: the public never see the private or excluded repository; a maintainer sees both.
+	let pt1 = Json.encode(p1)
+	let mt1 = Json.encode(m1)
+	expect !pt1.contains("bynk-lang/secret") && !pt1.contains("bynk-lang/sandbox")
+	expect mt1.contains("bynk-lang/secret") && mt1.contains("bynk-lang/sandbox")
+	expect mt1.contains("bynk-lang/bynk")
+}

@@ -43,6 +43,24 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 6, step 2 (#53): the maintainers' figures.
+  - **Eleven twins:** each public metrics route has a maintainer twin,
+    `POST /maintainers/metrics/…`, with the same figures over every
+    repository, private and `DASHBOARD_EXCLUDE`'d ones included. The request
+    is the public query string as a JSON body. They're `POST` because Bynk's
+    generated test code doesn't compile for a `Bearer` route with a query
+    string in a project with a `system`-tier suite (bynk-lang/bynk#3024).
+  - **One query each:** each route's body is now a function both routes call.
+    A maintainer's call passes `*` as the exclusion list, which the SQL reads
+    as "private repositories too", or, for the CI routes, a flag.
+  - **`GET /maintainers/repositories`:** every repository, marked public or
+    not and excluded or not, for the signed-in pages to mark.
+  - **Access:** every maintainer request rechecks membership (`forMaintainer`,
+    a kept answer first). Nothing is cached: no `@cache`, so `no-store` or a
+    `POST`.
+  - **Testing:** each metrics suite compares every public route with its twin
+    on one seed, and smoke checks the twins refuse a missing or reader's
+    token.
 - Phase 4, slice 6, step 1 (#53): maintainer sign-in with GitHub.
   - **Sign-in:** maintainers sign in through the GitHub App's user
     authorisation, with PKCE. The Worker exchanges the code with the App's

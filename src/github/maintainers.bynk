@@ -130,3 +130,14 @@ fn sessionSigningInput(login: String, now: Instant) -> String {
 	}
 	"\(base64Url(SESSION_HEADER)).\(base64Url(Json.encode(claims)))"
 }
+
+---
+A repository, as `GET /maintainers/repositories` lists it: whether it is
+public, and whether `DASHBOARD_EXCLUDE` keeps it off the public pages. Only
+maintainers see a repository that is private or excluded.
+---
+type ShownRepository = {
+	repo: String,
+	public: Bool,
+	excluded: Bool,
+}
