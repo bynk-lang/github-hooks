@@ -331,4 +331,11 @@ case "the callback page loads the sign-in script, and every dashboard has the si
 	expect pages.all((p) => p.contains("src=\"\(signinJs.url)\"")
 		&& p.contains("id=\"signin\"")
 		&& !p.contains("{signin}"))
+	// The page scripts fetch through signin.js (#53, step 3), so it loads first.
+	expect pages.all(
+		(p) => !p.split("<script src=\"\(signinJs.url)\"").first().getOrElse("").contains("<script")
+	)
+	// Signed in, each page says it covers every repository.
+	expect pages.all((p) => p.contains("class=\"subtitle for-public\"")
+		&& p.contains("class=\"subtitle for-maintainers\""))
 }

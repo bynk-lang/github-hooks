@@ -2079,48 +2079,92 @@ service api from http {
 	// private repositories and those `DASHBOARD_EXCLUDE` names. Never
 	// `@cache`d, so they're sent `no-store` and can't be kept at the edge for
 	// the public. Limited per login (`MaintainerLimit`), not per address.
-	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsCi(body, true))
+	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/ci",
+			Json.encode(body),
+			() => metricsCi(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsCiNow(body, true))
+	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/ci/now",
+			Json.encode(body),
+			() => metricsCiNow(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsCiHistory(body, true))
+	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/ci/history",
+			Json.encode(body),
+			() => metricsCiHistory(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsPrs(body, true))
+	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/prs",
+			Json.encode(body),
+			() => metricsPrs(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsPrsOpen(body, true))
+	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/prs/open",
+			Json.encode(body),
+			() => metricsPrsOpen(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsIssues(body, true))
+	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/issues",
+			Json.encode(body),
+			() => metricsIssues(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsIssuesOpen(body, true))
+	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/issues/open",
+			Json.encode(body),
+			() => metricsIssuesOpen(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsReleases(body, true))
+	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/releases",
+			Json.encode(body),
+			() => metricsReleases(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsReleasesRecent(body, true))
+	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/releases/recent",
+			Json.encode(body),
+			() => metricsReleasesRecent(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsRunners(body, true))
+	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/runners",
+			Json.encode(body),
+			() => metricsRunners(body, true)
+		))
 	}
 
-	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => metricsRunnersNow(body, true))
+	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", () => sharedFigures(
+			"/metrics/runners/now",
+			Json.encode(body),
+			() => metricsRunnersNow(body, true)
+		))
 	}
 
 	// Every repository the service has heard from (#53), for a maintainer:
@@ -4752,3 +4796,71 @@ type RepositoryRow = {
 	repo: String,
 	public: Int,
 }
+
+// A maintainer's figures (#53), shared: the same for every maintainer, so one
+// answer per route and query (`body`, the request as JSON) serves them all
+// for `FIGURES_CACHE_SECONDS`, and signed-in pages polling them don't each
+// become D1 reads. Only a success is kept. A kept answer is never decoded
+// into anything but the route's own type; one that won't decode is computed
+// again. Asked only past `forMaintainer`, so it never skips the membership
+// check, and kept in `Tokens`, KV, apart from installation tokens by prefix.
+//
+// The key carries the route's purge generation: when its last edge purge was
+// claimed (`edge_purges`, or `edge_purge_slots` for the issue routes, which
+// purge on their own). A live change that purges the public routes makes
+// every earlier answer unreachable, so a signed-in page's refetch after it
+// reads afresh, as the public one does at the edge. If the generation can't
+// be read, nothing is kept or reused.
+fn sharedFigures[T: Codable](
+	route: String,
+	body: String,
+	compute: () -> Effect[HttpResult[T]]
+) -> Effect[HttpResult[T]] given Tokens, Deliveries {
+	let purges <- Deliveries.first(
+		"""
+		SELECT (SELECT at FROM edge_purges WHERE id = 1) AS shared,
+		  (SELECT at FROM edge_purge_slots WHERE slot = 'issues') AS issues
+		""",
+		[]
+	)
+	let generations: Option[PurgeGenerations] = match purges {
+		Ok(Some(row)) => match Json.decodeSql[PurgeGenerations](row) {
+			Ok(g) => Some(g),
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let Some(g) = generations else { compute() }
+	let purged = if route.startsWith("/metrics/issues") { g.issues } else { g.shared }
+	let key = "figures:\(purged.getOrElse("never")):\(route):\(body)"
+	let kept <- Tokens.get(key)
+	let fromKept: Option[T] = match kept {
+		Some(text) => match Json.decode[T](text) {
+			Ok(v) => Some(v),
+			Err(_) => None,
+		},
+		None => None,
+	}
+	match fromKept {
+		Some(v) => Ok(v),
+		None => {
+			let answer <- compute()
+			let _ <- match answer {
+				Ok(v) => Tokens.putTtl(key, Json.encode(v), FIGURES_CACHE_SECONDS),
+				_ => Effect.pure(()),
+			}
+			Effect.pure(answer)
+		},
+	}
+}
+
+// When each purge slot last purged the metrics routes' edge cache.
+type PurgeGenerations = {
+	shared: Option[String],
+	issues: Option[String],
+}
+
+// How long a maintainer's figures are shared: KV's shortest expiry. A live
+// change that purges the public routes moves on to a fresh key (see
+// `sharedFigures`), so this bounds only how long an unchanged answer is reused.
+const FIGURES_CACHE_SECONDS: Int = 60

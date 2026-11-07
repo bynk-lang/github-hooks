@@ -4,8 +4,8 @@ The last slice of the dashboard
 ([#53](https://github.com/bynk-lang/github-hooks/issues/53)): a signed-in view
 for bynk-lang's maintainers, covering private repositories, what is theirs to
 act on, and actions such as re-running a flaky run. This page covers signing
-in (step 1) and the maintainers' figures (step 2). The signed-in pages, the
-per-person view and the actions follow in later steps.
+in (step 1), the maintainers' figures (step 2) and the signed-in pages (step
+3). The per-person view and the actions follow in later steps.
 
 ## Who may sign in
 
@@ -176,13 +176,49 @@ and those `DASHBOARD_EXCLUDE` keeps off the public pages.
   (or a runaway one) can keep D1 busy. Over the limit is a `429`. There's no
   per-address limit, as they need a token, and every request checks
   membership (a kept answer first).
-- **Not yet shared:** a maintainer's figures are the same for every
-  maintainer, so a short server-side cache of each answer would bound D1
-  load further. That's left for step 3, once the signed-in pages' polling is
-  known.
+- **Shared for a minute:** a maintainer's figures are the same for every
+  maintainer, so each twin's answer is kept in KV (`Tokens`, keys
+  `figures:<purge>:<route>:<query as JSON>`) for `FIGURES_CACHE_SECONDS`, 60 seconds,
+  KV's shortest expiry (`sharedFigures`). Every signed-in tab polling the
+  same figures becomes one D1 read a minute between them. Only successes are
+  kept, and the cache is asked only past the membership check, so a kept
+  answer never lets a leaver in.
+- **Live, through the cache:** each key carries the route's purge
+  generation, when its last edge purge was claimed (`edge_purges.at`, or the
+  issue routes' own `edge_purge_slots` row). A live change that purges the
+  public routes moves the maintainers' figures to a fresh key too, so a
+  signed-in page's refetch after a live event reads afresh, as a public one
+  does at the edge. Older entries are never read again and expire. That costs
+  one primary-key read per request.
 - **Marking:** `GET /maintainers/repositories` says which repositories are
   public and which are excluded, so the signed-in pages (step 3) can mark the
   ones only maintainers see.
+
+## The signed-in pages
+
+The same four dashboards, signed in (step 3). Nothing about a page changes
+for the public.
+
+- **The figures:** every page fetches through `window.bynkMetrics(path,
+  query)` in `assets/signin.js`. Signed out, it's the public `GET`, as before.
+  Signed in, it's the route's maintainer twin: a `POST` with the query as JSON
+  and the token. So `signin.js` now loads before each page's own script.
+- **Marks:** signed in, each page loads `GET /maintainers/repositories` once,
+  and marks a repository only maintainers see beside its name: **private**,
+  or **not public** for one `DASHBOARD_EXCLUDE` keeps off the public pages.
+  The mark is text, not colour alone.
+- **The wording:** signed in, each page's subtitle says it covers every
+  repository, private ones included (`for-maintainers`, shown when
+  `signin.js` marks the page `signed-in`).
+- **Freshness:** the live feed carries only public, non-excluded
+  repositories. Signed in, a page keeps the live feed for those, but no
+  longer slows its polling to the live feed's two-minute safety net, so
+  private and not-public repositories refresh at the pages' usual 30 to 60
+  seconds. The freshness line says so: "Public repositories live, private and
+  not-public ones polled".
+- **A refused token:** if a twin answers `401` (an expired or forged token)
+  or `403` (someone who has left the organisation), the page signs out and
+  fetches the public figures instead.
 
 ## Settings
 

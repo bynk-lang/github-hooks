@@ -59,18 +59,16 @@
       day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC",
     }) + " UTC";
 
-  async function getJson(path) {
-    // Always ask the edge, never the browser's own copy: a live change purges
-    // the edge, which the browser's cache wouldn't know about.
-    const res = await fetch(path, { cache: "no-cache", headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
-    return res.json();
-  }
+  // Signed in (#53), the maintainers' twin of each route, private and
+  // excluded repositories included; otherwise the public route (signin.js).
+  const figures = (path, query) => window.bynkMetrics(path, query);
+  const signedIn = () => Boolean(window.bynkMaintainer && window.bynkMaintainer());
+  const repoMark = (name) => (window.bynkRepoMark ? window.bynkRepoMark(name) : null);
 
   async function refreshMetrics() {
     const asked = days;
     try {
-      const m = await getJson(`/metrics/ci?days=${asked}`);
+      const m = await figures("/metrics/ci", { days: asked });
       if (asked !== days) return; // the window changed while this was in flight
       metrics = m;
       ok("metrics");
@@ -84,7 +82,7 @@
   async function refreshHistory() {
     const asked = days;
     try {
-      const h = await getJson(`/metrics/ci/history?days=${asked}`);
+      const h = await figures("/metrics/ci/history", { days: asked });
       if (asked !== days) return;
       history = indexHistory(h);
       ok("history");
@@ -105,7 +103,7 @@
   async function refreshRunners() {
     const asked = days;
     try {
-      const r = await getJson(`/metrics/runners?days=${asked}`);
+      const r = await figures("/metrics/runners", { days: asked });
       if (asked !== days) return;
       runners = r;
       ok("runners");
@@ -118,7 +116,7 @@
 
   async function refreshRunnersNow() {
     try {
-      runnersNow = await getJson("/metrics/runners/now");
+      runnersNow = await figures("/metrics/runners/now");
       ok("runnersNow");
     } catch (e) {
       failed("runnersNow", e);
@@ -141,7 +139,7 @@
 
   async function refreshNow() {
     try {
-      now = await getJson("/metrics/ci/now");
+      now = await figures("/metrics/ci/now");
       ok("now");
     } catch (e) {
       failed("now", e);
@@ -181,7 +179,7 @@
       f.textContent = `${problems.join("; ")}.`;
     } else if (latest) {
       f.textContent = live
-        ? `Live · updated ${clock(latest)} UTC as runs change`
+        ? `${signedIn() ? "Public repositories live, private and not-public ones polled" : "Live"} · updated ${clock(latest)} UTC as runs change`
         : `Updated ${clock(latest)} UTC · refreshes every 30 seconds`;
     } else {
       f.textContent = "Loading…";
@@ -624,7 +622,7 @@
       const running = r.running.length;
       section.append(el("div", { class: "repo-head" },
         el("h2", { id: `repo-${name}` },
-          el("a", { href: `https://github.com/${name}/actions`, "data-key": `link:${name}` }, name)),
+          el("a", { href: `https://github.com/${name}/actions`, "data-key": `link:${name}` }, name), repoMark(name)),
         el("span", { class: "running" }, running === 0 ? "Nothing running" : `${running} running`)));
 
       const table = el("table", {},
@@ -716,7 +714,7 @@
   function poll() {
     timers.forEach(clearInterval);
     timers = [
-      ...(live
+      ...(live && !signedIn()
         ? [setInterval(refreshWindow, LIVE_POLL_MS), setInterval(refreshNow, LIVE_POLL_MS)]
         : [setInterval(refreshWindow, METRICS_EVERY_MS), setInterval(refreshNow, NOW_EVERY_MS)]),
       setInterval(refreshRunners, METRICS_EVERY_MS),
@@ -847,6 +845,10 @@
     live = false;
     if (ws) ws.close();
   }
+
+  // Signed in, the repository marks arrive after the first figures; signed
+  // out (a refused token), they go. Redraw either way.
+  document.addEventListener("bynk:repositories", () => render());
 
   document.addEventListener("DOMContentLoaded", () => {
     for (const input of document.querySelectorAll('input[name="days"]')) {
