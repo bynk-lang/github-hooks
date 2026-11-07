@@ -4,8 +4,8 @@ The last slice of the dashboard
 ([#53](https://github.com/bynk-lang/github-hooks/issues/53)): a signed-in view
 for bynk-lang's maintainers, covering private repositories, what is theirs to
 act on, and actions such as re-running a flaky run. This page covers signing
-in (step 1). The maintainer routes, the signed-in pages, the per-person view
-and the actions follow in later steps.
+in (step 1) and the maintainers' figures (step 2). The signed-in pages, the
+per-person view and the actions follow in later steps.
 
 ## Who may sign in
 
@@ -109,6 +109,8 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 | `GET /maintainers/callback` | anyone | the page GitHub returns to |
 | `POST /maintainers/token` | anyone | finishes a sign-in: `{code, code_verifier, redirect_uri}` in, `{token, expires_in, login}` out |
 | `GET /maintainers/me` | a maintainer | `{login}` |
+| `POST /maintainers/metrics/…` | a maintainer | each public metrics route's figures, private and excluded repositories included ([below](#the-maintainers-figures)) |
+| `GET /maintainers/repositories` | a maintainer | every repository: `[{repo, public, excluded}]` |
 
 **`/maintainers/token`:**
 - **Callback only:** the `redirect_uri` must be `/maintainers/callback` on
@@ -131,6 +133,57 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 - **`503`:** when GitHub can't say, or no installation has delivered for the
   organisation yet.
 
+## The maintainers' figures
+
+Every public metrics route has a maintainer twin, under `/maintainers`, with
+the same figures and answer shape, over **every** repository: private ones,
+and those `DASHBOARD_EXCLUDE` keeps off the public pages.
+
+| Public | Maintainers' |
+|---|---|
+| `GET /metrics/ci` | `POST /maintainers/metrics/ci` |
+| `GET /metrics/ci/now` | `POST /maintainers/metrics/ci/now` |
+| `GET /metrics/ci/history` | `POST /maintainers/metrics/ci/history` |
+| `GET /metrics/runners` | `POST /maintainers/metrics/runners` |
+| `GET /metrics/runners/now` | `POST /maintainers/metrics/runners/now` |
+| `GET /metrics/prs` | `POST /maintainers/metrics/prs` |
+| `GET /metrics/prs/open` | `POST /maintainers/metrics/prs/open` |
+| `GET /metrics/releases` | `POST /maintainers/metrics/releases` |
+| `GET /metrics/releases/recent` | `POST /maintainers/metrics/releases/recent` |
+| `GET /metrics/issues` | `POST /maintainers/metrics/issues` |
+| `GET /metrics/issues/open` | `POST /maintainers/metrics/issues/open` |
+
+- **The request:** the public route's query string, as a JSON body. For
+  example, `{"days": 30, "repo": "bynk-lang/bynk"}` for
+  `?days=30&repo=bynk-lang/bynk`. Fields the public route defaults (such as
+  `days`) may be left out.
+- **Why `POST`:** Bynk (v0.510.25 to v0.510.34) generates test code that
+  doesn't compile for a `Bearer` route taking a query string when the project
+  has a `system`-tier suite, as this one does. A JSON body avoids it. They can
+  move to `GET` once that's fixed (bynk-lang/bynk#3024).
+- **One query each:** a twin runs exactly the public route's SQL. Each query's
+  exclusion parameter is given `*` instead of `DASHBOARD_EXCLUDE`'s names,
+  which the query reads as "private repositories too" (`public = 1 OR ? =
+  '*'`) and which matches no repository's name. The CI routes, which filter
+  exclusions after reading, take a flag instead.
+- **Never cached:** the twins carry no `@cache`. A `POST` answer is never kept
+  by Cloudflare's cache or a browser's, and `GET /maintainers/repositories` is
+  sent `no-store`. Nothing purges them, as nothing keeps them.
+- **Limited per login:** they skip the edge cache, so every request is a D1
+  read, and D1 runs one query at a time, with webhook writes queuing behind.
+  `MaintainerLimit` allows each login 60 requests a minute across every
+  maintainer route, a few signed-in tabs' polling, so no one person's tabs
+  (or a runaway one) can keep D1 busy. Over the limit is a `429`. There's no
+  per-address limit, as they need a token, and every request checks
+  membership (a kept answer first).
+- **Not yet shared:** a maintainer's figures are the same for every
+  maintainer, so a short server-side cache of each answer would bound D1
+  load further. That's left for step 3, once the signed-in pages' polling is
+  known.
+- **Marking:** `GET /maintainers/repositories` says which repositories are
+  public and which are excluded, so the signed-in pages (step 3) can mark the
+  ones only maintainers see.
+
 ## Settings
 
 | Setting | Meaning |
@@ -148,9 +201,17 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
     standard HS256), membership at sign-in and on each request, GitHub's
     refusals, and the callback rule.
   - `tests/maintainers-unset.bynk` covers sign-in before it's configured.
+  - Each metrics suite (`tests/metrics.bynk`, `prs.bynk`, `issue-metrics.bynk`,
+    `release-metrics.bynk`, `runners.bynk`) asks every public route and its
+    maintainer twin about the same seed. The public answer never names the
+    private or the excluded repository; the maintainer's names them.
+    `tests/metrics.bynk` also covers `/maintainers/repositories`, and refusing
+    a leaver.
 - **End to end:** with `MAINTAINER_TOKEN_SECRET` set, `scripts/smoke.sh`
   mints tokens with `bynk token Maintainer` and checks that a missing, forged,
   expired or reader's token is refused with a `401`, and that a valid one
-  reaches the membership check. CI's smoke job runs it.
+  reaches the membership check, for `/maintainers/me` and the maintainers'
+  figures. It also checks `/maintainers/repositories` is sent `no-store`.
+  CI's smoke job runs it.
 - **By hand:** `bynk token Maintainer --sub <login>` mints a token for the
   maintainer routes, given the same `MAINTAINER_TOKEN_SECRET` as the Worker.
