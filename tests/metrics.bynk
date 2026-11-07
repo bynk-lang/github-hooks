@@ -723,7 +723,7 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 	expect again == first
 	// A live change that purges the public routes reaches the shared answer too.
 	let purged <- Deliveries.run(
-		"UPDATE edge_purges SET at = '2026-11-05T11:59:00.000Z' WHERE id = 1",
+		"UPDATE edge_purge_slots SET at = '2026-11-05T11:59:00.000Z' WHERE slot = 'runs'",
 		[]
 	)
 	expect purged is Ok(_)

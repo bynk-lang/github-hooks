@@ -421,6 +421,19 @@ All notable changes to github-hooks. The format follows
 
 ### Fixed
 
+- Each kind of live change purges only the routes it changes, on its own
+  slot (#62, migration `0019`). Runs purge `/metrics/ci` every 20 seconds at
+  most; pull requests and releases share a slot for `/metrics/prs` and
+  `/metrics/releases`, once a minute; issues keep theirs. Before, runs, pull
+  requests and releases shared one slot that purged every metrics route, so a
+  burst of CI runs spent the purges a merge needed. The maintainers' shared
+  figures follow each route's own slot.
+- The slowest jobs are matched to their workflow by its file, from each job's
+  run, not by the workflow's name, which two workflow files can share (#62).
+  `/metrics/runners`' slowest jobs carry `path`.
+- The trend charts' duration axis labels ticks under a minute in seconds, and
+  keeps one decimal of minutes: a 30-second tick read "1 m", and a 150-second
+  one "3 m" (#62).
 - Organisation membership is read from GitHub's membership endpoint
   (`GET /orgs/{org}/memberships/{login}`), not the "check membership" one,
   which answers `404` when it won't show a private membership. Private

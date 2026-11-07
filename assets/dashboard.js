@@ -367,16 +367,24 @@
     const steps = [60, 120, 300, 600, 900, 1200, 1800, 2400, 3600, 5400, 7200, 10800, 14400, 21600, 43200, 86400];
     return steps.find((s) => s >= seconds) || Math.ceil(seconds / 86400) * 86400;
   }
-  const shortDuration = (s) => (s === 0 ? "0" : s < 3600 ? `${Math.round(s / 60)} m` : `${+(s / 3600).toFixed(1)} h`);
+  // An axis tick's duration (#62). Ticks fall at 0, half the top and the top
+  // (`niceTop`), so halves are common: below a minute it's seconds, and
+  // minutes keep one decimal. Rounding to whole minutes labelled a 30-second
+  // tick "1 m" and a 150-second one "3 m".
+  const shortDuration = (s) => (s === 0 ? "0"
+    : s < 60 ? `${Math.round(s)} s`
+      : s < 3600 ? `${+(s / 60).toFixed(1)} m`
+        : `${+(s / 3600).toFixed(1)} h`);
 
   // This workflow's jobs among the repository's slowest (#42): the figures
   // keep each repository's 10 slowest jobs by median, with at least 3
-  // successful runs in the window, matched to the workflow by its name (jobs
-  // don't carry the workflow's path), so two workflows of the same name in a
-  // repository share them.
-  function slowestJobs(repoName, workflowName) {
+  // successful runs in the window. They're matched to the workflow by its
+  // path, from each job's run (#62), so two workflows of the same name stay
+  // apart; by name only for a job whose run wasn't recorded.
+  function slowestJobs(repoName, workflowName, path) {
     if (!runners || !runners.computed_at) return null;
-    const jobs = runners.slowest.filter((j) => j.repo === repoName && j.workflow === workflowName);
+    const jobs = runners.slowest.filter((j) => j.repo === repoName
+      && (j.path ? j.path === path : j.workflow === workflowName));
     const box = el("div", { class: "slowest" }, el("h4", {}, "Slowest jobs"));
     if (jobs.length === 0) {
       box.append(el("p", { class: "empty" },
@@ -402,7 +410,7 @@
     return box;
   }
 
-  function trendPanel(name, key, entry, repoName) {
+  function trendPanel(name, key, entry, repoName, path) {
     const daily = entry ? entry.daily : [];
     const byDay = new Map(daily.map((d) => [d.day, d]));
     const allDays = windowDays(history);
@@ -410,7 +418,7 @@
     const panel = el("div", { class: "trend" });
     if (daily.length === 0) {
       panel.append(el("p", { class: "empty" }, "No completed runs in this window."));
-      const slow = slowestJobs(repoName, name);
+      const slow = slowestJobs(repoName, name, path);
       if (slow) panel.append(slow);
       return panel;
     }
@@ -458,7 +466,7 @@
           el("th", { scope: "col", class: "num" }, "Pass rate"),
           el("th", { scope: "col", class: "num" }, "Median time"))),
         rows)));
-    const slow = slowestJobs(repoName, name);
+    const slow = slowestJobs(repoName, name, path);
     if (slow) panel.append(slow);
     const rerun = signedIn() ? rerunList(entry) : null;
     if (rerun) panel.append(rerun);
@@ -719,7 +727,7 @@
             : el("td", { class: "strip-cell none", "data-label": "Recent runs" }, "—")));
         if (history && isOpen) {
           body.append(el("tr", { class: "trend-row", id: trendId },
-            el("td", { colspan: "9" }, trendPanel(nameText, key, entry, name))));
+            el("td", { colspan: "9" }, trendPanel(nameText, key, entry, name, path))));
         }
       }
       table.append(body);

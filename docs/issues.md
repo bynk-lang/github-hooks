@@ -321,11 +321,13 @@ ignore them.
 - **Prefix:** unlike the other kinds, an issue event purges only
   `/metrics/issues`. So a burst of comments doesn't empty the CI, PR and
   release routes' cache.
-- **Throttle:** it has its own slot (`edge_purge_slots`, migration `0015`), so
-  it never spends the slot runs, pull requests and releases share.
-- **Rate:** that slot allows one purge a minute (`ISSUE_PURGE_GAP`). With the
-  shared slot's 4, that keeps the Worker within Cloudflare's 5 a minute. An
-  issue event inside the minute is told to wait for the cache to expire.
+- **Throttle:** it has its own slot (`edge_purge_slots`, migration `0015`), as
+  runs and pull requests have since `0019` (#62), so no kind spends another's
+  purges.
+- **Rate:** that slot allows one purge a minute. With the runs' 3 and pull
+  requests' and releases' 1, that keeps the Worker within Cloudflare's 5 a
+  minute ([ci-metrics.md](ci-metrics.md#live-feed)). An issue event inside the
+  minute is told to wait for the cache to expire.
 
 Otherwise the refetch timing (`refetch_ms`, the purge and its follow-up) is
 the PR page's ([pr-flow.md](pr-flow.md#live-feed)).

@@ -87,27 +87,42 @@ case "a private repository's pull request is never pushed" {
 	expect LiveFeed.publish never called
 }
 
-case "a change purges the metrics routes' edge cache, so pages can refetch at once" {
+case "a change purges the routes it changes, so pages can refetch at once" {
 	stub Edge.purge(_) returns true
 	let _ <- api.POST("/github", pullHeaders("pr-edge-1"), Bytes.fromUtf8(mergedPull)) by GitHub
-	expect Edge.purge called once with prefixes == ["/metrics/"]
+	// A merge changes PR flow and what waits to ship.
+	expect Edge.purge called once with prefixes == ["/metrics/prs", "/metrics/releases"]
 	expect LiveFeed.publish called once with e.refetch_ms == 3000
 }
 
-case "a second change within 15 seconds isn't purged, so pages wait for the cache to expire" {
+case "each kind of change purges on its own slot: a run never spends a pull request's purge (#62)" {
 	stub Edge.purge(_) returns true
 	let _ <- api.POST("/github", runHeaders("edge-run"), Bytes.fromUtf8(completedRun)) by GitHub
 	let _ <- api.POST("/github", pullHeaders("edge-pr"), Bytes.fromUtf8(mergedPull)) by GitHub
-	expect Edge.purge called once
+	expect Edge.purge called with prefixes == ["/metrics/ci"]
+	expect Edge.purge called with prefixes == ["/metrics/prs", "/metrics/releases"]
 	expect LiveFeed.publish called with e.kind == "run" && e.refetch_ms == 3000
-	expect LiveFeed.publish called with e.kind == "pull" && e.refetch_ms == 31000
+	expect LiveFeed.publish called with e.kind == "pull" && e.refetch_ms == 3000
+}
+
+case "a second change of a kind within its slot's gap isn't purged, so pages wait for the cache to expire" {
+	stub Edge.purge(_) returns true
+	let _ <- api.POST("/github", pullHeaders("edge-pr-1"), Bytes.fromUtf8(mergedPull)) by GitHub
+	let later = mergedPull.replace(
+		"\"updated_at\": \"2026-11-05T08:10:14Z\"",
+		"\"updated_at\": \"2026-11-05T08:10:44Z\""
+	)
+	let _ <- api.POST("/github", pullHeaders("edge-pr-2"), Bytes.fromUtf8(later)) by GitHub
+	expect Edge.purge called once
+	expect LiveFeed.publish called with e.refetch_ms == 3000
+	expect LiveFeed.publish called with e.refetch_ms == 31000
 }
 
 case "a purge Cloudflare refuses tells pages to wait for the cache to expire" {
 	stub Edge.purge(_) returns false
 	let _ <- api.POST("/github", pullHeaders("pr-refused"), Bytes.fromUtf8(mergedPull)) by GitHub
 	expect LiveFeed.publish called once with e.refetch_ms == 31000
-	expect Logger.warn called once with msg.startsWith("Cloudflare refused the edge purge")
+	expect Logger.warn called once with msg.startsWith("Cloudflare refused the flow edge purge")
 }
 
 case "a public issue's delivery is pushed, as an issue" {
@@ -166,7 +181,7 @@ case "an issue's change purges only the issue routes, so the other pages keep th
 	expect LiveFeed.publish called once with e.kind == "issue" && e.refetch_ms == 3000
 }
 
-case "issue changes don't spend the purge slot runs, pull requests and releases share" {
+case "issue changes don't spend the runs' purge slot" {
 	stub Edge.purge(_) returns true
 	let _ <- api.POST(
 		"/github",
@@ -175,7 +190,7 @@ case "issue changes don't spend the purge slot runs, pull requests and releases 
 	) by GitHub
 	let _ <- api.POST("/github", runHeaders("run-after"), Bytes.fromUtf8(completedRun)) by GitHub
 	expect Edge.purge called with prefixes == ["/metrics/issues"]
-	expect Edge.purge called with prefixes == ["/metrics/"]
+	expect Edge.purge called with prefixes == ["/metrics/ci"]
 	expect LiveFeed.publish called with e.kind == "run" && e.refetch_ms == 3000
 }
 

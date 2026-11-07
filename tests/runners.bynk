@@ -408,3 +408,50 @@ case "a maintainer's runner figures include private and excluded repositories; t
 	expect mt1.contains("bynk-lang/secret")
 	expect mt1.contains("bynk-lang/bynk")
 }
+
+case "two workflows of one name keep their own slowest jobs, told apart by their files (#62)" {
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/bynk', 1, 'main')",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+					                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+					  ('bynk-lang/bynk', 101, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a', 'push', 'completed', 'success', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z'),
+					  ('bynk-lang/bynk', 102, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a', 'push', 'completed', 'success', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z'),
+					  ('bynk-lang/bynk', 103, 1, 'CI', '.github/workflows/ci.yml', 'main', 'a', 'push', 'completed', 'success', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z'),
+					  ('bynk-lang/bynk', 104, 1, 'CI', '.github/workflows/nightly.yml', 'main', 'a', 'push', 'completed', 'success', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z'),
+					  ('bynk-lang/bynk', 105, 1, 'CI', '.github/workflows/nightly.yml', 'main', 'a', 'push', 'completed', 'success', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z'),
+					  ('bynk-lang/bynk', 106, 1, 'CI', '.github/workflows/nightly.yml', 'main', 'a', 'push', 'completed', 'success', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:00:00.000Z', '2026-11-04T09:30:00.000Z', '2026-11-04T09:30:00.000Z')
+				""",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
+					                           conclusion, created_at, started_at, completed_at, approval) VALUES
+					  (200, 'bynk-lang/bynk', 101, 1, 'CI', 'Build', 'ubuntu-latest', NULL, 'completed', 'success', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:01:00.000Z', 0),
+					  (201, 'bynk-lang/bynk', 102, 1, 'CI', 'Build', 'ubuntu-latest', NULL, 'completed', 'success', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:01:00.000Z', 0),
+					  (202, 'bynk-lang/bynk', 103, 1, 'CI', 'Build', 'ubuntu-latest', NULL, 'completed', 'success', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:01:00.000Z', 0),
+					  (203, 'bynk-lang/bynk', 104, 1, 'CI', 'Build', 'ubuntu-latest', NULL, 'completed', 'success', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:10:00.000Z', 0),
+					  (204, 'bynk-lang/bynk', 105, 1, 'CI', 'Build', 'ubuntu-latest', NULL, 'completed', 'success', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:10:00.000Z', 0),
+					  (205, 'bynk-lang/bynk', 106, 1, 'CI', 'Build', 'ubuntu-latest', NULL, 'completed', 'success', '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z', '2026-11-04T10:10:00.000Z', 0)
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let _ <- runnerFigures.schedule("37 * * * *", nowMs())
+	let r <- api.GET("/metrics/runners", RunnerQuery { repo: None, days: 7 }, viewer()) by Visitor
+	let Ok(m) = r else {
+		expect false
+	}
+	// Both are "CI / Build", but one is the nightly run's ten-minute build.
+	expect m.slowest.map(
+		(j) => "\(j.path.getOrElse("-")) \(j.name) \(j.p50_seconds.getOrElse(0))"
+	) == [".github/workflows/nightly.yml Build 600", ".github/workflows/ci.yml Build 60"]
+}

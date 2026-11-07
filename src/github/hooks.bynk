@@ -92,7 +92,7 @@ Cloudflare's edge cache for this Worker. Declaring it turns Workers Cache on,
 so the public metrics routes' `@cache(scope: public)` answers are kept at the
 edge for 30 seconds and served without running the Worker, and heavy viewing
 doesn't become D1 reads. Every other response is sent `no-store`. A live
-change purges `/metrics/` (see `purgeMetrics`), so pages can refetch at once.
+change purges the routes it affects (see `purgeFor`), so pages can refetch at once.
 Every `@cache` route here is served `by v: Visitor`: a cached answer is
 shared with every caller.
 ---
@@ -684,7 +684,7 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 			Effect.pure(nothing)
 		}
 		let Some(e) = changed else { Effect.pure(()) }
-		let purged <- if e.kind == "issue" { purgeIssues() } else { purgeMetrics() }
+		let purged <- purgeFor(e.kind)
 		let _ <- LiveFeed.publish(LiveEvent {
 			refetch_ms: if purged { PURGED_REFETCH_MS } else { EXPIRED_REFETCH_MS },
 			kind: e.kind,
@@ -777,67 +777,73 @@ fn recordPull(
 	Effect.pure(Some(pullEventOf(p)))
 }
 
-// Purges the metrics routes' edge cache for a change, if this Worker may
-// purge now: at most once per `PURGE_GAP`, claimed in D1 so every isolate
-// shares the count (Cloudflare allows a Worker 5 purges a minute). `true` when
-// Cloudflare accepted the purge, so a refetch shortly after sees the change.
-// It runs from the delivery's handler (after its answer), which is where a
-// purge reaches the cache.
-fn purgeMetrics() -> Effect[Bool] given Deliveries, Logger, Edge, Clock {
+// Purges the edge cache of the metrics routes a kind of change affects
+// (#62), if its slot may purge now: at most once per its gap, claimed in D1
+// so every isolate shares the count. `true` when Cloudflare accepted the
+// purge, so a refetch shortly after sees the change. It runs from the
+// delivery's handler (after its answer), which is where a purge reaches the
+// cache. Each kind has its own slot (`purgeSlotOf`), so a burst of one kind
+// never spends another's purges, and the gaps keep the Worker within
+// Cloudflare's 5 a minute.
+fn purgeFor(kind: String) -> Effect[Bool] given Deliveries, Logger, Edge, Clock {
+	let slot = purgeSlotOf(kind)
 	let now <- Clock.now()
 	let claimed <- Deliveries.run(
-		"UPDATE edge_purges SET at = ?1 WHERE id = 1 AND at <= ?2",
-		[Text(now.toIso()), Text((now - PURGE_GAP).toIso())]
+		"UPDATE edge_purge_slots SET at = ?1 WHERE slot = ?3 AND at <= ?2",
+		[Text(now.toIso()), Text((now - slot.gap).toIso()), Text(slot.name)]
 	)
 	let Ok(run) = claimed else match {
 		Err(e) => {
-			let _ <- Logger.error("could not claim an edge purge: \(sqlError(e))")
+			let _ <- Logger.error("could not claim the \(slot.name) edge purge: \(sqlError(e))")
 			Effect.pure(false)
 		},
 	}
 	let true = run.changes > 0 else { Effect.pure(false) }
-	let accepted <- Edge.purge(["/metrics/"])
+	let accepted <- Edge.purge(slot.prefixes)
 	let true = accepted else {
 		let _ <- Logger.warn(
-			"Cloudflare refused the edge purge (rate limited); pages wait for the cache to expire"
+			"Cloudflare refused the \(slot.name) edge purge (rate limited); pages wait for the cache to expire"
 		)
 		Effect.pure(false)
 	}
 	Effect.pure(true)
 }
 
-// How often the metrics cache may be purged: 4 a minute, under Cloudflare's 5.
-const PURGE_GAP: Duration = 15.seconds
-
-// Purges only the issue routes' edge cache for an issue's change (#48), with
-// its own throttle (`edge_purge_slots`), so issue traffic neither empties the
-// other routes' cache nor spends their purge slot. Otherwise as `purgeMetrics`.
-fn purgeIssues() -> Effect[Bool] given Deliveries, Logger, Edge, Clock {
-	let now <- Clock.now()
-	let claimed <- Deliveries.run(
-		"UPDATE edge_purge_slots SET at = ?1 WHERE slot = 'issues' AND at <= ?2",
-		[Text(now.toIso()), Text((now - ISSUE_PURGE_GAP).toIso())]
-	)
-	let Ok(run) = claimed else match {
-		Err(e) => {
-			let _ <- Logger.error("could not claim an issue edge purge: \(sqlError(e))")
-			Effect.pure(false)
-		},
-	}
-	let true = run.changes > 0 else { Effect.pure(false) }
-	let accepted <- Edge.purge(["/metrics/issues"])
-	let true = accepted else {
-		let _ <- Logger.warn(
-			"Cloudflare refused the issue edge purge (rate limited); the issues page waits for the cache to expire"
-		)
-		Effect.pure(false)
-	}
-	Effect.pure(true)
+// A purge slot (`edge_purge_slots`): its name, how often it may purge, and the
+// routes it empties.
+type PurgeSlot = {
+	name: String,
+	gap: Duration,
+	prefixes: List[String],
 }
 
-// How often the issue routes' cache may be purged: once a minute, so with the
-// shared slot's 4 the Worker stays within Cloudflare's 5 a minute.
-const ISSUE_PURGE_GAP: Duration = 60.seconds
+// Which slot a kind of change purges through (#62):
+// - a run changes only the CI figures, and is the busiest: every 20 seconds;
+// - a pull request or a release changes PR flow and releases (a merge waits to
+//   ship), and they share a slot: once a minute;
+// - an issue changes only the issue figures: once a minute (#48).
+// 3 + 1 + 1 a minute, within Cloudflare's 5.
+fn purgeSlotOf(kind: String) -> PurgeSlot {
+	if kind == "run" {
+		PurgeSlot {
+			name: "runs",
+			gap: 20.seconds,
+			prefixes: ["/metrics/ci"],
+		}
+	} else if kind == "issue" {
+		PurgeSlot {
+			name: "issues",
+			gap: 60.seconds,
+			prefixes: ["/metrics/issues"],
+		}
+	} else {
+		PurgeSlot {
+			name: "flow",
+			gap: 60.seconds,
+			prefixes: ["/metrics/prs", "/metrics/releases"],
+		}
+	}
+}
 
 // How long a page waits to refetch after a change: a moment when the cache was
 // purged for it; otherwise until any copy cached before it has expired (the
@@ -2993,36 +2999,37 @@ service runnerFigures from cron {
 					"""
 					WITH windows (days, since) AS (VALUES (7, ?1), (30, ?2), (90, ?3)),
 					counts AS (
-					  SELECT repo, workflow, name, took_seconds AS took,
-					    sum(started_at >= ?1) AS n7, sum(started_at >= ?2) AS n30, count(*) AS n90
-					  FROM workflow_jobs INDEXED BY workflow_jobs_took
-					  WHERE took_seconds IS NOT NULL AND conclusion = 'success'
-					    AND started_at >= ?3 AND started_at < ?4
-					  GROUP BY repo, workflow, name, took_seconds
+					  SELECT j.repo, r.path, j.workflow, j.name, j.took_seconds AS took,
+					    sum(j.started_at >= ?1) AS n7, sum(j.started_at >= ?2) AS n30, count(*) AS n90
+					  FROM workflow_jobs j INDEXED BY workflow_jobs_took
+					  LEFT JOIN workflow_runs r ON r.repo = j.repo AND r.run_id = j.run_id AND r.attempt = j.attempt
+					  WHERE j.took_seconds IS NOT NULL AND j.conclusion = 'success'
+					    AND j.started_at >= ?3 AND j.started_at < ?4
+					  GROUP BY j.repo, r.path, j.workflow, j.name, j.took_seconds
 					),
 					spread AS (
-					  SELECT w.days, c.repo, c.workflow, c.name, c.took,
+					  SELECT w.days, c.repo, c.path, c.workflow, c.name, c.took,
 					    CASE w.days WHEN 7 THEN c.n7 WHEN 30 THEN c.n30 ELSE c.n90 END AS n
 					  FROM counts c JOIN windows w
 					),
 					running AS (
-					  SELECT days, repo, workflow, name, took, n,
-					    sum(n) OVER (PARTITION BY days, repo, workflow, name ORDER BY took ROWS UNBOUNDED PRECEDING) AS upto,
-					    sum(n) OVER (PARTITION BY days, repo, workflow, name) AS total
+					  SELECT days, repo, path, workflow, name, took, n,
+					    sum(n) OVER (PARTITION BY days, repo, path, workflow, name ORDER BY took ROWS UNBOUNDED PRECEDING) AS upto,
+					    sum(n) OVER (PARTITION BY days, repo, path, workflow, name) AS total
 					  FROM spread WHERE n > 0
 					),
 					figures AS (
-					  SELECT days, repo, workflow, name, max(total) AS runs,
+					  SELECT days, repo, path, workflow, name, max(total) AS runs,
 					    min(CASE WHEN upto >= (50 * total + 99) / 100 THEN took END) AS p50,
 					    min(CASE WHEN upto >= (95 * total + 99) / 100 THEN took END) AS p95
-					  FROM running GROUP BY days, repo, workflow, name
+					  FROM running GROUP BY days, repo, path, workflow, name
 					  HAVING max(total) >= ?6
 					),
 					top AS (
 					  SELECT f.*, row_number() OVER (PARTITION BY days, repo ORDER BY p50 DESC, workflow, name) AS place FROM figures f
 					)
 					SELECT w.days,
-					  (SELECT coalesce(json_group_array(json_object('repo', t.repo, 'workflow', t.workflow, 'name', t.name,
+					  (SELECT coalesce(json_group_array(json_object('repo', t.repo, 'path', t.path, 'workflow', t.workflow, 'name', t.name,
 					      'runs', t.runs, 'p50_seconds', t.p50, 'p95_seconds', t.p95)), '[]')
 					   FROM (SELECT * FROM top t WHERE t.days = w.days AND t.place <= ?5 ORDER BY t.repo, t.place) t) AS items
 					FROM windows w
@@ -5009,9 +5016,9 @@ type RepositoryRow = {
 // again. Asked only past `forMaintainer`, so it never skips the membership
 // check, and kept in `Tokens`, KV, apart from installation tokens by prefix.
 //
-// The key carries the route's purge generation: when its last edge purge was
-// claimed (`edge_purges`, or `edge_purge_slots` for the issue routes, which
-// purge on their own). A live change that purges the public routes makes
+// The key carries the route's purge generation: when its slot last claimed
+// an edge purge (`edge_purge_slots`, by `purgeSlotOf`'s routes; the runner
+// routes, which no change purges, follow the CI slot). A live change that purges the public routes makes
 // every earlier answer unreachable, so a signed-in page's refetch after it
 // reads afresh, as the public one does at the edge. If the generation can't
 // be read, nothing is kept or reused.
@@ -5022,7 +5029,8 @@ fn sharedFigures[T: Codable](
 ) -> Effect[HttpResult[T]] given Tokens, Deliveries {
 	let purges <- Deliveries.first(
 		"""
-		SELECT (SELECT at FROM edge_purges WHERE id = 1) AS shared,
+		SELECT (SELECT at FROM edge_purge_slots WHERE slot = 'runs') AS runs,
+		  (SELECT at FROM edge_purge_slots WHERE slot = 'flow') AS flow,
 		  (SELECT at FROM edge_purge_slots WHERE slot = 'issues') AS issues
 		""",
 		[]
@@ -5035,7 +5043,13 @@ fn sharedFigures[T: Codable](
 		_ => None,
 	}
 	let Some(g) = generations else { compute() }
-	let purged = if route.startsWith("/metrics/issues") { g.issues } else { g.shared }
+	let purged = if route.startsWith("/metrics/issues") {
+		g.issues
+	} else if route.startsWith("/metrics/prs") || route.startsWith("/metrics/releases") {
+		g.flow
+	} else {
+		g.runs
+	}
 	let key = "figures:\(purged.getOrElse("never")):\(route):\(body)"
 	let kept <- Tokens.get(key)
 	let fromKept: Option[T] = match kept {
@@ -5060,7 +5074,8 @@ fn sharedFigures[T: Codable](
 
 // When each purge slot last purged the metrics routes' edge cache.
 type PurgeGenerations = {
-	shared: Option[String],
+	runs: Option[String],
+	flow: Option[String],
 	issues: Option[String],
 }
 

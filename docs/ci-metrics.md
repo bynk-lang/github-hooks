@@ -189,14 +189,20 @@ issues share the feed as `kind: "pull"`, `kind: "release"` and
 which this page ignores.
 
 **Purging, and when to refetch.** Before an event is sent, the Worker purges
-`/metrics/` from the edge cache, so a refetch shortly after sees the change.
-Cloudflare allows a Worker 5 purges a minute, so a purge first claims a row in
-D1 (`edge_purges`, migration `0008`) that allows one per 15 seconds across
-every isolate. `refetch_ms` tells the page how long to wait: 3 seconds when the
-purge went through, or 31 seconds (until any copy cached before the change has
-expired) when it was throttled or Cloudflare refused it. Issue events are the
-exception: they purge only `/metrics/issues`, on their own slot
-([issues.md](issues.md#live-feed)).
+the routes it changes from the edge cache, so a refetch shortly after sees the
+change. Each kind of change has its own slot in D1 (`edge_purge_slots`,
+migrations `0015` and `0019`, #62), claimed across every isolate, so a burst of
+one kind never spends another's purges. Cloudflare allows a Worker 5 purges a
+minute, so:
+- **runs** purge `/metrics/ci`, at most every 20 seconds;
+- **pull requests and releases** share a slot, purging `/metrics/prs` and
+  `/metrics/releases` (a merge changes both pages), at most once a minute;
+- **issues** purge `/metrics/issues`, at most once a minute
+  ([issues.md](issues.md#live-feed)).
+
+`refetch_ms` tells the page how long to wait: 3 seconds when the purge went
+through, or 31 seconds (until any copy cached before the change has expired)
+when it was throttled or Cloudflare refused it.
 
 The page treats an event as a nudge: after `refetch_ms` it refetches
 `/metrics/ci/now`, and `/metrics/ci` and `/metrics/ci/history` too if any run
