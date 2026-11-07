@@ -6,7 +6,9 @@
 // answers its own token for them. That token is kept in `sessionStorage`, so
 // it lasts as long as the tab, and sent as `Authorization: Bearer` to the
 // maintainer routes. Other scripts read the signed-in maintainer from
-// `window.bynkMaintainer`.
+// `window.bynkMaintainer`, fetch their figures with `window.bynkMetrics`
+// (the maintainers' twins when signed in), and mark the repositories only
+// maintainers see with `window.bynkRepoMark`. This script loads first.
 (() => {
   "use strict";
 
@@ -96,6 +98,8 @@
 
   // On a dashboard: the sign-in link, or who is signed in and a sign-out.
   function renderLink() {
+    // The page's wording follows: signed in, it covers every repository.
+    document.documentElement.classList.toggle("signed-in", Boolean(current()));
     const slot = document.getElementById("signin");
     if (!slot) return;
     const m = current();
@@ -118,10 +122,83 @@
     }
   }
 
+  // The dashboards' figures (#53, step 3). Signed in, each comes from the
+  // public route's maintainer twin: POSTed, with the public query as JSON
+  // and the token, over every repository, private and excluded ones too.
+  // Signed out, from the public route, as before. A token the Worker refuses
+  // (expired, or its holder has left the organisation) signs the page out,
+  // and the public figures are fetched instead.
+  async function metrics(path, query = {}) {
+    const m = current();
+    if (!m) {
+      const pairs = Object.entries(query).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]);
+      const qs = new URLSearchParams(pairs).toString();
+      // Always ask the edge, never the browser's own copy: a live change
+      // purges the edge, which the browser's cache wouldn't know about.
+      const res = await fetch(`${path}${qs ? `?${qs}` : ""}`, { cache: "no-cache", headers: { accept: "application/json" } });
+      if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
+      return res.json();
+    }
+    const res = await fetch(`/maintainers${path}`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${m.token}` },
+      body: JSON.stringify(query),
+    });
+    if (res.status === 401 || res.status === 403) {
+      console.warn(`Maintainer figures refused (HTTP ${res.status}); signing out.`);
+      forget();
+      return metrics(path, query);
+    }
+    if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
+    return res.json();
+  }
+
+  // Which repositories only maintainers see (#53, step 3), by lower-cased
+  // name, from `/maintainers/repositories`: loaded once a page opens signed
+  // in, then the page is told to redraw (`bynk:repositories`).
+  let shown = new Map();
+  async function loadRepositories() {
+    const m = current();
+    if (!m) return;
+    try {
+      const listed = await getJson("/maintainers/repositories", { headers: { authorization: `Bearer ${m.token}` } });
+      shown = new Map(listed.map((r) => [r.repo.toLowerCase(), r]));
+      document.dispatchEvent(new CustomEvent("bynk:repositories"));
+    } catch (e) {
+      console.warn("Couldn't load which repositories are private:", e.message);
+    }
+  }
+
+  // The mark beside a repository's name on a signed-in page: "private", or
+  // "not public" for one `DASHBOARD_EXCLUDE` keeps off the public pages, or
+  // nothing for one everyone sees.
+  function repoMark(name) {
+    const r = shown.get(String(name).toLowerCase());
+    if (!r || (r.public && !r.excluded)) return null;
+    const mark = document.createElement("span");
+    mark.className = "repo-mark";
+    mark.textContent = r.public ? "not public" : "private";
+    mark.title = r.public
+      ? "Kept off the public pages (DASHBOARD_EXCLUDE): only maintainers see it"
+      : "A private repository: only maintainers see it";
+    return mark;
+  }
+
+  // Signing out, or a token refused: forget it, and redraw the link.
+  function forget() {
+    store.drop(KEY);
+    shown = new Map();
+    renderLink();
+    document.dispatchEvent(new CustomEvent("bynk:repositories"));
+  }
+
   window.bynkMaintainer = current;
+  window.bynkMetrics = metrics;
+  window.bynkRepoMark = repoMark;
 
   document.addEventListener("DOMContentLoaded", () => {
     if (location.pathname === CALLBACK) finish();
-    else renderLink();
+    else { renderLink(); loadRepositories(); }
   });
 })();

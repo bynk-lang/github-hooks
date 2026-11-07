@@ -43,6 +43,21 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 6, step 3 (#53): the signed-in pages.
+  - **Figures:** signed in, the four dashboards read the maintainer twins
+    (`window.bynkMetrics` in `signin.js`, which now loads first), so they
+    include private and `DASHBOARD_EXCLUDE`'d repositories. Signed out,
+    nothing changes.
+  - **Marks:** a repository only maintainers see is marked **private** or
+    **not public** beside its name, from `GET /maintainers/repositories`. Each
+    page's subtitle says it covers every repository.
+  - **Freshness:** signed in, polling no longer slows while the live feed is
+    up, as the feed carries only public repositories, and the freshness line
+    says the rest are polled.
+  - **Shared figures:** each twin's answer is kept in KV for 60 seconds
+    (`sharedFigures`), keyed by route and query, so every signed-in tab
+    shares one D1 read a minute. It's asked only past the membership check.
+  - **A refused token** signs the page out, back to the public figures.
 - Phase 4, slice 6, step 2 (#53): the maintainers' figures.
   - **Eleven twins:** each public metrics route has a maintainer twin,
     `POST /maintainers/metrics/…`, with the same figures over every

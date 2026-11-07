@@ -47,18 +47,16 @@
     d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" });
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-  async function getJson(path) {
-    // Always ask the edge, never the browser's own copy: a live change purges
-    // the edge, which the browser's cache wouldn't know about.
-    const res = await fetch(path, { cache: "no-cache", headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
-    return res.json();
-  }
+  // Signed in (#53), the maintainers' twin of each route, private and
+  // excluded repositories included; otherwise the public route (signin.js).
+  const figures = (path, query) => window.bynkMetrics(path, query);
+  const signedIn = () => Boolean(window.bynkMaintainer && window.bynkMaintainer());
+  const repoMark = (name) => (window.bynkRepoMark ? window.bynkRepoMark(name) : null);
 
   async function refreshFlow() {
     const asked = days;
     try {
-      const f = await getJson(`/metrics/releases?days=${asked}`);
+      const f = await figures("/metrics/releases", { days: asked });
       if (asked !== days) return; // the window changed while this was in flight
       flow = f;
       ok("flow");
@@ -71,7 +69,7 @@
 
   async function refreshRecent() {
     try {
-      recent = await getJson("/metrics/releases/recent");
+      recent = await figures("/metrics/releases/recent");
       ok("recent");
     } catch (e) {
       failed("recent", e);
@@ -98,7 +96,7 @@
     if (problems.length > 0) f.textContent = `${problems.join("; ")}.`;
     else if (latest) {
       f.textContent = live
-        ? `Live · updated ${clock(latest)} UTC as releases and merges happen`
+        ? `${signedIn() ? "Public repositories live, private and not-public ones polled" : "Live"} · updated ${clock(latest)} UTC as releases and merges happen`
         : `Updated ${clock(latest)} UTC · refreshes every minute`;
     } else f.textContent = "Loading…";
     f.classList.toggle("stale", problems.length > 0);
@@ -264,7 +262,7 @@
       const section = el("section", { class: "repo", "aria-labelledby": `repo-${name}` });
       section.append(el("div", { class: "repo-head" },
         el("h2", { id: `repo-${name}` },
-          el("a", { href: `https://github.com/${name}/releases`, "data-key": `link:${name}` }, name)),
+          el("a", { href: `https://github.com/${name}/releases`, "data-key": `link:${name}` }, name), repoMark(name)),
         el("span", { class: "running" }, r.flow
           ? `Latest ${r.flow.last_tag}, ${since(r.flow.last_at)} ago`
           : "No final release yet")));
@@ -299,7 +297,7 @@
   let timers = [];
   function poll() {
     timers.forEach(clearInterval);
-    timers = live
+    timers = live && !signedIn()
       ? [setInterval(refreshFlow, LIVE_POLL_MS), setInterval(refreshRecent, LIVE_POLL_MS)]
       : [setInterval(refreshFlow, FLOW_EVERY_MS), setInterval(refreshRecent, RECENT_EVERY_MS)];
   }
@@ -390,6 +388,10 @@
     live = false;
     if (ws) ws.close();
   }
+
+  // Signed in, the repository marks arrive after the first figures; signed
+  // out (a refused token), they go. Redraw either way.
+  document.addEventListener("bynk:repositories", () => render());
 
   document.addEventListener("DOMContentLoaded", () => {
     for (const input of document.querySelectorAll('input[name="days"]')) {

@@ -109,6 +109,12 @@ h2 { font-size: 1.15rem; margin: 0; }
   padding: 16px; margin-bottom: 20px;
 }
 .repo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+/* Signed in (#53), the page says it covers every repository (signin.js sets `signed-in`). */
+.for-maintainers { display: none; }
+.signed-in .for-maintainers { display: block; }
+.signed-in .for-public { display: none; }
+/* A repository only maintainers see (#53): private, or kept off the public pages. Text, not colour alone. */
+.repo-mark { margin-left: 8px; padding: 1px 8px; border: 1px solid var(--rule); border-radius: 999px; font-size: 0.75rem; font-weight: 500; color: var(--ink-2); vertical-align: middle; letter-spacing: 0.02em; }
 .running { color: var(--ink-2); font-size: 0.9rem; }
 
 .table-wrap { overflow-x: auto; }
