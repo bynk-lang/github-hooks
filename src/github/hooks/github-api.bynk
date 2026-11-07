@@ -1,0 +1,347 @@
+context github.hooks
+
+---
+The GitHub REST calls the service makes, each as the App's installation.
+---
+capability GitHubApi {
+	fn comment(
+		installation: Int,
+		repo: String,
+		number: Int,
+		body: String
+	) -> Effect[Result[(), String]]
+	--- A repository's open pull requests, every page (at most `MAX_PULL_PAGES`).
+	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]]
+	--- One pull request, whatever its state.
+	fn pull(installation: Int, repo: String, number: Int) -> Effect[Result[PullPayload, ApiFailure]]
+	--- One page of a repository's releases, newest first, `RELEASE_PAGE` to a page.
+	fn releases(
+		installation: Int,
+		repo: String,
+		page: Int
+	) -> Effect[Result[List[ReleasePayload], ApiFailure]]
+	--- The commits from `base` to `head`, oldest first (at most `MAX_COMPARE_PAGES` pages).
+	fn compare(
+		installation: Int,
+		repo: String,
+		base: String,
+		head: String
+	) -> Effect[Result[Comparison, ApiFailure]]
+	---
+	Whether `login` belongs to `org` (the App's Members read permission), from
+	their membership's state: `active` is a member, private or public; `pending`
+	(invited) and 404 are not. A 403 means the App can't see members, which is
+	an error, never "not a member".
+	---
+	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]]
+	---
+	A repository's open issues, every page (at most `MAX_ISSUE_PAGES`), and
+	whether that was all of them. GitHub lists open pull requests among them,
+	with `pull_request` set.
+	---
+	fn openIssues(installation: Int, repo: String) -> Effect[Result[IssueListing, ApiFailure]]
+	--- One issue, whatever its state; after a transfer, the issue where it now is.
+	fn issue(
+		installation: Int,
+		repo: String,
+		number: Int
+	) -> Effect[Result[IssuePayload, ApiFailure]]
+}
+
+provides GitHubApi = GitHubRest given AppAuth, GitHubHttp {
+	fn openPulls(installation: Int, repo: String) -> Effect[Result[List[PullPayload], ApiFailure]] {
+		openPullsFrom(installation, repo, 1, [])
+	}
+
+	fn openIssues(installation: Int, repo: String) -> Effect[Result[IssueListing, ApiFailure]] {
+		openIssuesFrom(installation, repo, 1, [])
+	}
+
+	fn issue(
+		installation: Int,
+		repo: String,
+		number: Int
+	) -> Effect[Result[IssuePayload, ApiFailure]] {
+		let url = "https://api.github.com/repos/\(repo)/issues/\(number)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused \(repo) issue #\(number): \(refusal(res.status, res.body))",
+			}))
+		}
+		match Json.decode[IssuePayload](res.body) {
+			Ok(i) => Effect.pure(Ok(i)),
+			Err(e) => Effect.pure(Err(ApiFailure {
+				status: None,
+				message: "\(repo) issue #\(number) did not decode: \(e.kind) at \(e.path)",
+			})),
+		}
+	}
+
+	fn isMember(installation: Int, org: String, login: String) -> Effect[Result[Bool, ApiFailure]] {
+		// The membership itself, not the "check membership" endpoint: that one
+		// answers 404 both for a non-member and when it won't show the asker a
+		// private membership (redirecting to the public-members check), so a
+		// private member read as an outsider. This one answers the state, 404
+		// only for someone outside the organisation, and 403 when the App
+		// can't see members at all.
+		let url = "https://api.github.com/orgs/\(org)/memberships/\(login)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		// An invitation not yet accepted (`pending`) isn't membership.
+		if res.status == 200 {
+			match Json.decode[OrgMembership](res.body) {
+				Ok(m) => Effect.pure(Ok(m.state == "active")),
+				Err(_) => Effect.pure(Err(ApiFailure {
+					status: Some(200),
+					message: "GitHub's membership of \(login) in \(org) did not decode",
+				})),
+			}
+		} else if res.status == 404 {
+			Effect.pure(Ok(false))
+		} else if res.status == 403 {
+			Effect.pure(Err(ApiFailure {
+				status: Some(403),
+				message: "GitHub won't show \(org)'s members to the App (is the Members: Read permission granted and accepted on the installation?): \(refusal(res.status, res.body))",
+			}))
+		} else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused whether \(login) belongs to \(org): \(refusal(res.status, res.body))",
+			}))
+		}
+	}
+
+	fn pull(
+		installation: Int,
+		repo: String,
+		number: Int
+	) -> Effect[Result[PullPayload, ApiFailure]] {
+		let url = "https://api.github.com/repos/\(repo)/pulls/\(number)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused \(repo)#\(number): \(refusal(res.status, res.body))",
+			}))
+		}
+		match Json.decode[PullPayload](res.body) {
+			Ok(pr) => Effect.pure(Ok(pr)),
+			Err(e) => Effect.pure(Err(ApiFailure {
+				status: None,
+				message: "\(repo)#\(number) did not decode: \(e.kind) at \(e.path)",
+			})),
+		}
+	}
+
+	fn releases(
+		installation: Int,
+		repo: String,
+		page: Int
+	) -> Effect[Result[List[ReleasePayload], ApiFailure]] {
+		let url = "https://api.github.com/repos/\(repo)/releases?per_page=\(RELEASE_PAGE)&page=\(page)"
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+			Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err(ApiFailure {
+				status: Some(res.status),
+				message: "GitHub refused \(repo)'s releases: \(refusal(res.status, res.body))",
+			}))
+		}
+		match Json.decode[List[ReleasePayload]](res.body) {
+			Ok(listed) => Effect.pure(Ok(listed)),
+			Err(e) => Effect.pure(Err(ApiFailure {
+				status: None,
+				message: "\(repo)'s releases did not decode: \(e.kind) at \(e.path)",
+			})),
+		}
+	}
+
+	fn compare(
+		installation: Int,
+		repo: String,
+		base: String,
+		head: String
+	) -> Effect[Result[Comparison, ApiFailure]] {
+		compareFrom(installation, repo, base, head, 1, [])
+	}
+
+	fn comment(
+		installation: Int,
+		repo: String,
+		number: Int,
+		body: String
+	) -> Effect[Result[(), String]] {
+		let url = "https://api.github.com/repos/\(repo)/issues/\(number)/comments"
+		let payload = Json.encode(NewComment { body: body })
+		let Ok(res) <- asApp(installation, (token) => GitHubHttp.post(token, url, payload)) else match {
+			Err(why) => Effect.pure(Err(why)),
+		}
+		Effect.pure(answered(res, repo, number))
+	}
+}
+
+// One page of open pull requests after another, until a short page says it
+// was the last, or `MAX_PULL_PAGES` have been read.
+fn openPullsFrom(
+	installation: Int,
+	repo: String,
+	page: Int,
+	sofar: List[PullPayload]
+) -> Effect[Result[List[PullPayload], ApiFailure]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/pulls?state=open&per_page=\(PULL_PAGE)&page=\(page)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err(ApiFailure {
+			status: Some(res.status),
+			message: "GitHub refused \(repo)'s open pull requests: \(refusal(res.status, res.body))",
+		}))
+	}
+	let Ok(pulls) = Json.decode[List[PullPayload]](res.body) else match {
+		Err(e) => Effect.pure(Err(ApiFailure {
+			status: None,
+			message: "\(repo)'s open pull requests did not decode: \(e.kind) at \(e.path)",
+		})),
+	}
+	let all = sofar.concat(pulls)
+	if pulls.length() < PULL_PAGE || page >= MAX_PULL_PAGES {
+		Effect.pure(Ok(all))
+	} else {
+		openPullsFrom(installation, repo, page + 1, all)
+	}
+}
+
+// One page of open issues after another, until a short page says it was the
+// last (the listing is complete), or `MAX_ISSUE_PAGES` have been read (it may
+// not be). GitHub lists open pull requests here too (with `pull_request`
+// set); the caller leaves them out.
+fn openIssuesFrom(
+	installation: Int,
+	repo: String,
+	page: Int,
+	sofar: List[IssuePayload]
+) -> Effect[Result[IssueListing, ApiFailure]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/issues?state=open&per_page=\(ISSUE_PAGE)&page=\(page)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err(ApiFailure {
+			status: Some(res.status),
+			message: "GitHub refused \(repo)'s open issues: \(refusal(res.status, res.body))",
+		}))
+	}
+	let Ok(issues) = Json.decode[List[IssuePayload]](res.body) else match {
+		Err(e) => Effect.pure(Err(ApiFailure {
+			status: None,
+			message: "\(repo)'s open issues did not decode: \(e.kind) at \(e.path)",
+		})),
+	}
+	let all = sofar.concat(issues)
+	let last = issues.length() < ISSUE_PAGE
+	if last || page >= MAX_ISSUE_PAGES {
+		Effect.pure(Ok(IssueListing { issues: all, complete: last }))
+	} else {
+		openIssuesFrom(installation, repo, page + 1, all)
+	}
+}
+
+// GitHub's largest page, and how many the issue sync reads: 500 open issues
+// and pull requests together in one repository, against `bynk`'s few dozen.
+const ISSUE_PAGE: Int = 100
+
+const MAX_ISSUE_PAGES: Int = 5
+
+// One page of a comparison's commits after another, until every commit GitHub
+// counted has been read, or `MAX_COMPARE_PAGES` have been.
+fn compareFrom(
+	installation: Int,
+	repo: String,
+	base: String,
+	head: String,
+	page: Int,
+	sofar: List[ComparedCommit]
+) -> Effect[Result[Comparison, ApiFailure]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/compare/\(base)...\(head)?per_page=\(COMPARE_PAGE)&page=\(page)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(ApiFailure { status: None, message: why })),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err(ApiFailure {
+			status: Some(res.status),
+			message: "GitHub refused to compare \(repo) \(base)...\(head): \(refusal(res.status, res.body))",
+		}))
+	}
+	let Ok(c) = Json.decode[Comparison](res.body) else match {
+		Err(e) => Effect.pure(Err(ApiFailure {
+			status: None,
+			message: "\(repo) \(base)...\(head) did not decode: \(e.kind) at \(e.path)",
+		})),
+	}
+	let all = sofar.concat(c.commits)
+	if c.commits.length() < COMPARE_PAGE
+		|| all.length() >= c.total_commits
+		|| page >= MAX_COMPARE_PAGES {
+		Effect.pure(Ok(Comparison { total_commits: c.total_commits, commits: all }))
+	} else {
+		compareFrom(installation, repo, base, head, page + 1, all)
+	}
+}
+
+// The release before a new one is looked for 30 releases a page, up to 90 (a
+// run of pre-releases can push it off the first page). A comparison is read
+// 100 commits a page, up to 500: `bynk` ships about 30 between releases.
+const RELEASE_PAGE: Int = 30
+
+const MAX_RELEASE_PAGES: Int = 3
+
+const COMPARE_PAGE: Int = 100
+
+const MAX_COMPARE_PAGES: Int = 5
+
+// One call to GitHub as the App's installation, given the token. An
+// installation token carries the permissions the installation had when it was
+// minted, so a 401 or 403 may only mean the cached one predates a change
+// (write access just approved, a token revoked): it is dropped and the call
+// made once more with a fresh one before giving up. Every GitHubApi call goes
+// through here.
+fn asApp(
+	installation: Int,
+	call: String -> Effect[Result[Response, String]]
+) -> Effect[Result[Response, String]] given AppAuth {
+	let Ok(token) <- AppAuth.token(installation) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let Ok(first) <- call(token) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let true = first.status == 401 || first.status == 403 else { Effect.pure(Ok(first)) }
+	let _ <- AppAuth.forget(installation)
+	let Ok(fresh) <- AppAuth.token(installation) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	call(fresh)
+}
+
+// GitHub's largest page, and how many the sync reads: 500 open pull requests
+// in one repository is far past anything bynk-lang has.
+const PULL_PAGE: Int = 100
+
+const MAX_PULL_PAGES: Int = 5
+
+fn answered(res: Response, repo: String, number: Int) -> Result[(), String] {
+	if res.status == 201 {
+		Ok(())
+	} else {
+		Err("GitHub refused the comment on \(repo)#\(number): \(refusal(res.status, res.body))")
+	}
+}

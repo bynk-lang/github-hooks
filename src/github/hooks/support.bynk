@@ -1,0 +1,72 @@
+context github.hooks
+
+// `DASHBOARD_EXCLUDE` for SQL, as `allows` reads it (names compared trimmed and
+// without case): `,owner/a,owner/b,`, matched with `instr(?, ',' || lower(repo) || ',')`.
+// `instr` rather than `LIKE`, whose `_` is a wildcard and may be in a name.
+fn excludedNames(list: Option[String]) -> String {
+	let names = list.getOrElse("").split(",").map((n) => n.trim().toLower()).filter((n) => n != "")
+	",\(joined(names, ",")),"
+}
+
+// Why one of a route's concurrent reads gave no rows.
+fn readError(r: Option[Result[String, SqlError]]) -> String {
+	match r {
+		Some(Err(e)) => sqlError(e),
+		_ => "no result",
+	}
+}
+
+// Counts one metrics request against the caller's address. A request with
+// no address (not through Cloudflare's edge) shares one bucket.
+fn withinMetricsLimit(headers: RequestHeaders) -> Effect[Bool] given MetricsLimit {
+	MetricsLimit.allow("metrics:\(headers.clientIp().getOrElse("unknown"))")
+}
+
+// A function with `given` (bynk-lang/bynk#2868): the three deletes share it.
+fn retentionFailed(what: String, e: SqlError) -> Effect[Result[(), String]] given Logger {
+	let why = "retention could not delete \(what): \(sqlError(e))"
+	let _ <- Logger.error(why)
+	Err(why)
+}
+
+---
+Why rows did not decode, for the log: `StructuralMismatch at $[0].size:
+expected number, got string`.
+---
+fn jsonError(e: JsonError) -> String {
+	"\(e.kind) at \(e.path): \(e.message)"
+}
+
+fn sqlError(e: SqlError) -> String {
+	match e {
+		Constraint(m) => "constraint: \(m)",
+		Failed(m) => m,
+		_ => "unrecognised D1 error",
+	}
+}
+
+fn text(s: Option[String]) -> SqlValue {
+	match s {
+		Some(v) => Text(v),
+		None => Null,
+	}
+}
+
+fn integer(n: Option[Int]) -> SqlValue {
+	match n {
+		Some(v) => Integer(v),
+		None => Null,
+	}
+}
+
+fn boolean(b: Option[Bool]) -> SqlValue {
+	match b {
+		Some(v) => Boolean(v),
+		None => Null,
+	}
+}
+
+--- A repository the public pages may show.
+type ShownRepo = {
+	repo: String,
+}

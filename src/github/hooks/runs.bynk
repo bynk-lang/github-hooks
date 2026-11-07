@@ -1,0 +1,156 @@
+context github.hooks
+
+// Records a job from a `workflow_job` delivery (#42). The row only moves
+// forward: a delivery replaces it when its status is further along
+// (queued/waiting < in_progress < completed), or equally far (filling in what
+// it knows, such as the runner group). So a late `in_progress` never undoes
+// `completed`, and a redelivery changes nothing. A `waiting` delivery marks
+// the job as having waited for an approval, whenever it arrives, and nothing
+// clears that: its wait isn't a wait for a runner. Open pages aren't told:
+// jobs change constantly, and the section that shows them polls.
+fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(j) = jobOf(body) else match {
+		Err(why) => Logger.error("could not read workflow job from \(d.id): \(why)"),
+	}
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
+		                           conclusion, created_at, started_at, completed_at, approval, path)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+		        (SELECT path FROM workflow_runs WHERE repo = ?2 AND run_id = ?3 AND attempt = ?4))
+		ON CONFLICT (job_id) DO UPDATE SET
+		  runner = excluded.runner,
+		  path = coalesce(workflow_jobs.path, excluded.path),
+		  runner_group = coalesce(excluded.runner_group, workflow_jobs.runner_group),
+		  status = excluded.status, conclusion = excluded.conclusion,
+		  started_at = coalesce(excluded.started_at, workflow_jobs.started_at),
+		  completed_at = coalesce(excluded.completed_at, workflow_jobs.completed_at)
+		WHERE (CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		   >= (CASE workflow_jobs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		""",
+		[
+			Integer(j.jobId),
+			Text(j.repo),
+			Integer(j.runId),
+			Integer(j.attempt),
+			Text(j.workflow),
+			Text(j.name),
+			Text(j.runner),
+			text(j.runnerGroup),
+			Text(j.status),
+			text(j.conclusion),
+			Text(j.createdAt),
+			text(j.startedAt),
+			text(j.completedAt),
+			Boolean(j.approval),
+		]
+	) else match {
+		Err(e) => Logger.error("could not record \(j.repo) job \(j.jobId): \(sqlError(e))"),
+	}
+	// A `waiting` delivery that arrives after a later one changes nothing
+	// above (the row doesn't move back), so the mark is set on its own.
+	let true = j.approval else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"UPDATE workflow_jobs SET approval = 1 WHERE job_id = ?1",
+		[Integer(j.jobId)]
+	) else match {
+		Err(e) => Logger.error(
+			"could not mark \(j.repo) job \(j.jobId) as waiting for approval: \(sqlError(e))"
+		),
+	}
+	Effect.pure(())
+}
+
+// Records the run, and answers the event to push to open dashboards: `None`
+// unless a public, non-excluded run's row actually changed.
+fn recordRun(
+	d: Delivery,
+	body: Bytes
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets {
+	let nothing: Option[LiveEvent] = None
+	let Ok(r) = runOf(body) else match {
+		Err(why) => {
+			let _ <- Logger.error("could not read workflow run from \(d.id): \(why)")
+			Effect.pure(nothing)
+		},
+	}
+	// The row only moves forward: a delivery replaces it when its status is
+	// further along (requested/queued/waiting < in_progress < completed), or
+	// equally far and newer. So a late `in_progress` never undoes `completed`.
+	let Ok(written) <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status,
+		                           conclusion, created_at, queued_at, started_at, completed_at, updated_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+		ON CONFLICT (repo, run_id, attempt) DO UPDATE SET
+		  workflow = excluded.workflow, path = excluded.path, branch = excluded.branch,
+		  sha = excluded.sha, event = excluded.event,
+		  status = excluded.status, conclusion = excluded.conclusion,
+		  created_at = excluded.created_at,
+		  started_at = coalesce(excluded.started_at, workflow_runs.started_at),
+		  completed_at = excluded.completed_at, updated_at = excluded.updated_at
+		WHERE (CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		    > (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		   OR ((CASE excluded.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		    = (CASE workflow_runs.status WHEN 'completed' THEN 3 WHEN 'in_progress' THEN 2 ELSE 1 END)
+		   AND excluded.updated_at > workflow_runs.updated_at)
+		""",
+		[
+			Text(r.repo),
+			Integer(r.runId),
+			Integer(r.attempt),
+			Text(r.workflow),
+			Text(r.path),
+			text(r.branch),
+			Text(r.sha),
+			Text(r.event),
+			Text(r.status),
+			text(r.conclusion),
+			Text(r.createdAt),
+			Text(r.queuedAt),
+			text(r.startedAt),
+			text(r.completedAt),
+			Text(r.updatedAt),
+		]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not record \(r.repo) run \(r.runId) attempt \(r.attempt): \(sqlError(e))"
+			)
+			Effect.pure(nothing)
+		},
+	}
+	// A job delivery doesn't name its workflow's file, so the run's jobs
+	// recorded before it take it from the run (#62).
+	let Ok(_) <- Deliveries.run(
+		"UPDATE workflow_jobs SET path = ?4 WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND path IS NULL",
+		[Text(r.repo), Integer(r.runId), Integer(r.attempt), Text(r.path)]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not give \(r.repo) run \(r.runId) attempt \(r.attempt)'s jobs their workflow's file: \(sqlError(e))"
+			)
+			Effect.pure(nothing)
+		},
+	}
+	// An attempt was queued no later than its earliest delivery, whichever
+	// order they arrive in, so `queued_at` only ever moves earlier.
+	let Ok(_) <- Deliveries.run(
+		"UPDATE workflow_runs SET queued_at = ?4 WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND queued_at > ?4",
+		[Text(r.repo), Integer(r.runId), Integer(r.attempt), Text(r.queuedAt)]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not record when \(r.repo) run \(r.runId) attempt \(r.attempt) was queued: \(sqlError(e))"
+			)
+			Effect.pure(nothing)
+		},
+	}
+	// Tell open dashboards, but only of a change (a redelivery or a late
+	// delivery that moved nothing says nothing), and only for a repository the
+	// public page may show.
+	let true = written.changes > 0 else { Effect.pure(nothing) }
+	let shown <- shownLive(r.repo)
+	let true = shown else { Effect.pure(nothing) }
+	Effect.pure(Some(liveEventOf(r)))
+}

@@ -1,0 +1,129 @@
+context github.hooks
+
+// `GET /maintainers/mine`'s lists, for `login`, read one after another: each
+// is small, and a failure in any is the answer's.
+//
+// A pull request's CI counts an attempt still going only if it was queued
+// in the last day, as `/metrics/ci/now` does: one whose `completed` delivery
+// was lost would otherwise pin it at "running". Such an attempt is unknown,
+// so a commit with nothing else is `None`.
+fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clock {
+	let now <- Clock.now()
+	let Ok(pullRows) <- Deliveries.all(
+		"""
+		WITH mine AS (
+		  SELECT * FROM pull_requests WHERE state = 'open' AND author = ?1 COLLATE NOCASE
+		),
+		latest AS (
+		  SELECT w.repo, w.sha, w.status, w.conclusion, w.queued_at,
+		    row_number() OVER (PARTITION BY w.repo, w.sha, w.path ORDER BY w.run_id DESC, w.attempt DESC) AS rn
+		  FROM workflow_runs w JOIN mine p ON p.repo = w.repo AND p.head_sha = w.sha
+		),
+		ci AS (
+		  SELECT repo, sha,
+		    CASE
+		      WHEN sum(status = 'completed' AND conclusion IN ('failure', 'timed_out', 'startup_failure')) > 0 THEN 'failing'
+		      WHEN sum(status != 'completed' AND queued_at >= ?4) > 0 THEN 'running'
+		      WHEN sum(status = 'completed') > 0 THEN 'passing'
+		    END AS state
+		  FROM latest WHERE rn = 1 GROUP BY repo, sha
+		),
+		staged AS (
+		  SELECT p.repo, p.number, p.title, p.draft, p.opened_at, p.head_sha,
+		    coalesce(
+		      (SELECT max(e.at) FROM pull_request_events e
+		       WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'),
+		      p.ready_at) AS ready_since,
+		    (SELECT CASE WHEN e.action = 'enqueued' AND e.at >= ?2 THEN 1 ELSE 0 END FROM pull_request_events e
+		     WHERE e.repo = p.repo AND e.number = p.number AND e.action IN ('enqueued', 'dequeued')
+		     ORDER BY e.at DESC LIMIT 1) AS queued
+		  FROM mine p
+		)
+		SELECT s.repo, s.number, s.title,
+		  CASE WHEN s.draft = 1 THEN 'draft' WHEN s.queued = 1 THEN 'queued' ELSE 'ready' END AS stage,
+		  s.opened_at, s.ready_since, c.state AS ci
+		FROM staged s LEFT JOIN ci c ON c.repo = s.repo AND c.sha = s.head_sha
+		ORDER BY s.draft, coalesce(s.ready_since, s.opened_at), s.repo, s.number
+		LIMIT ?3
+		""",
+		[
+			Text(login),
+			Text((now - QUEUE_TIMEOUT).toIso()),
+			Integer(MAX_MINE),
+			Text((now - 1.days).toIso()),
+		]
+	) else match {
+		Err(e) => mineFailed("pull requests", login, sqlError(e)),
+	}
+	let Ok(reviewRows) <- Deliveries.all(
+		"""
+		SELECT p.repo, p.number, p.title, p.author, p.draft = 1 AS draft, p.opened_at,
+		  coalesce(
+		    (SELECT max(e.at) FROM pull_request_events e
+		     WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'),
+		    p.ready_at) AS ready_since
+		FROM pull_request_review_requests q
+		JOIN pull_requests p ON p.repo = q.repo AND p.number = q.number
+		WHERE q.team = 0 AND q.reviewer = ?1 COLLATE NOCASE AND p.state = 'open'
+		ORDER BY p.draft, coalesce(ready_since, p.opened_at), p.repo, p.number
+		LIMIT ?2
+		""",
+		[Text(login), Integer(MAX_MINE)]
+	) else match {
+		Err(e) => mineFailed("review requests", login, sqlError(e)),
+	}
+	let Ok(issueRows) <- Deliveries.all(
+		"""
+		SELECT repo, number, title, opened_at, updated_at, updated_at < ?2 AS stale
+		FROM issues
+		WHERE state = 'open' AND author = ?1 COLLATE NOCASE
+		ORDER BY stale DESC, updated_at, repo, number
+		LIMIT ?3
+		""",
+		[Text(login), Text((now - ISSUE_STALE).toIso()), Integer(MAX_MINE)]
+	) else match {
+		Err(e) => mineFailed("issues", login, sqlError(e)),
+	}
+	let Ok(mergeRows) <- Deliveries.all(
+		"""
+		WITH latest AS (
+		  SELECT repo, max(published_at) AS at FROM releases
+		  WHERE draft = 0 AND prerelease = 0 AND deleted_at IS NULL AND published_at IS NOT NULL
+		  GROUP BY repo
+		)
+		SELECT p.repo, p.number, p.title, p.merged_at
+		FROM pull_requests p JOIN latest l ON l.repo = p.repo
+		WHERE p.state = 'merged' AND p.author = ?1 COLLATE NOCASE AND p.merged_at > l.at AND p.released_in IS NULL
+		ORDER BY p.merged_at, p.repo, p.number
+		LIMIT ?2
+		""",
+		[Text(login), Integer(MAX_MINE)]
+	) else match {
+		Err(e) => mineFailed("merges waiting to ship", login, sqlError(e)),
+	}
+	let Ok(pulls) = Json.decodeSql[List[MyPull]](pullRows) else match {
+		Err(e) => mineFailed("pull requests", login, jsonError(e)),
+	}
+	let Ok(reviews) = Json.decodeSql[List[ReviewWaiting]](reviewRows) else match {
+		Err(e) => mineFailed("review requests", login, jsonError(e)),
+	}
+	let Ok(issues) = Json.decodeSql[List[MyIssue]](issueRows) else match {
+		Err(e) => mineFailed("issues", login, jsonError(e)),
+	}
+	let Ok(unreleased) = Json.decodeSql[List[MyMerge]](mergeRows) else match {
+		Err(e) => mineFailed("merges waiting to ship", login, jsonError(e)),
+	}
+	Ok(Mine {
+		login: login,
+		pulls: pulls,
+		reviews: reviews,
+		issues: issues,
+		unreleased: unreleased,
+	})
+}
+
+// Why `GET /maintainers/mine` couldn't answer.
+fn mineFailed(what: String, login: String, why: String) -> Effect[HttpResult[Mine]] given Logger {
+	let _ <- Logger.error("could not read \(login)'s \(what): \(why)")
+	ServerError("could not read your \(what)")
+}

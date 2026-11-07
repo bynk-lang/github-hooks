@@ -1,0 +1,88 @@
+context github.hooks
+
+// Purges the edge cache of the metrics routes a kind of change affects
+// (#62), if its slot may purge now: at most once per its gap, claimed in D1
+// so every isolate shares the count. `true` when Cloudflare accepted the
+// purge, so a refetch shortly after sees the change. It runs from the
+// delivery's handler (after its answer), which is where a purge reaches the
+// cache. Each kind has its own slot (`purgeSlotOf`), so a burst of one kind
+// never spends another's purges, and the gaps keep the Worker within
+// Cloudflare's 5 a minute.
+fn purgeFor(kind: String) -> Effect[Bool] given Deliveries, Logger, Edge, Clock {
+	let slot = purgeSlotOf(kind)
+	let now <- Clock.now()
+	let claimed <- Deliveries.run(
+		"UPDATE edge_purge_slots SET at = ?1 WHERE slot = ?3 AND at <= ?2",
+		[Text(now.toIso()), Text((now - slot.gap).toIso()), Text(slot.name)]
+	)
+	let Ok(run) = claimed else match {
+		Err(e) => {
+			let _ <- Logger.error("could not claim the \(slot.name) edge purge: \(sqlError(e))")
+			Effect.pure(false)
+		},
+	}
+	let true = run.changes > 0 else { Effect.pure(false) }
+	let accepted <- Edge.purge(slot.prefixes)
+	let true = accepted else {
+		let _ <- Logger.warn(
+			"Cloudflare refused the \(slot.name) edge purge (rate limited); pages wait for the cache to expire"
+		)
+		Effect.pure(false)
+	}
+	Effect.pure(true)
+}
+
+// A purge slot (`edge_purge_slots`): its name, how often it may purge, and the
+// routes it empties.
+type PurgeSlot = {
+	name: String,
+	gap: Duration,
+	prefixes: List[String],
+}
+
+// Which slot a kind of change purges through (#62):
+// - a run changes only the CI figures, and is the busiest: every 20 seconds;
+// - a pull request or a release changes PR flow and releases (a merge waits to
+//   ship), and they share a slot: once a minute;
+// - an issue changes only the issue figures: once a minute (#48).
+// 3 + 1 + 1 a minute, within Cloudflare's 5.
+fn purgeSlotOf(kind: String) -> PurgeSlot {
+	if kind == "run" {
+		PurgeSlot {
+			name: "runs",
+			gap: 20.seconds,
+			prefixes: ["/metrics/ci"],
+		}
+	} else if kind == "issue" {
+		PurgeSlot {
+			name: "issues",
+			gap: 60.seconds,
+			prefixes: ["/metrics/issues"],
+		}
+	} else {
+		PurgeSlot {
+			name: "flow",
+			gap: 60.seconds,
+			prefixes: ["/metrics/prs", "/metrics/releases"],
+		}
+	}
+}
+
+// How long a page waits to refetch after a change: a moment when the cache was
+// purged for it; otherwise until any copy cached before it has expired (the
+// routes' 30 seconds, and a second's margin).
+const PURGED_REFETCH_MS: Int = 3000
+
+const EXPIRED_REFETCH_MS: Int = 31000
+
+// Whether the public pages may show a repository: public by its latest
+// delivery, and not in `DASHBOARD_EXCLUDE`.
+fn shownLive(repo: String) -> Effect[Bool] given Deliveries, Secrets {
+	let shown <- Deliveries.first(
+		"SELECT public FROM repositories WHERE repo = ?1 AND public = 1",
+		[Text(repo)]
+	)
+	let Ok(Some(_)) = shown else { Effect.pure(false) }
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Effect.pure(!allows(excluded, repo))
+}

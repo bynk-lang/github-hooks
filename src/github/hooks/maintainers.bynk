@@ -1,0 +1,182 @@
+context github.hooks
+
+// Lets a maintainer request through (#53), within their per-login limit,
+// with a session that hasn't been signed out (checked, or refused if it
+// can't be), once GitHub still counts them a
+// member of the organisation (a kept answer first), else answers why not.
+// `who` is the token's subject, `login:version` (see `sessionOf`); `answer`
+// is given the login.
+fn forMaintainer[T](
+	who: String,
+	answer: String -> Effect[HttpResult[T]]
+) -> Effect[HttpResult[T]] given Deliveries, GitHubApi, Clock, Logger, MaintainerLimit {
+	let session = sessionOf(who)
+	let login = session.login
+	let allowed <- MaintainerLimit.allow("maintainer:\(login.toLower())")
+	let true = allowed else {
+		TooManyRequests("too many requests for your figures; try again in a minute")
+	}
+	let Ok(current) <- sessionVersion(login) else match {
+		Err(why) => {
+			let _ <- Logger.error("could not read \(login)'s session: \(why)")
+			ServiceUnavailable("could not check your sign-in; try again")
+		},
+	}
+	let true = session.version == current else {
+		RawError(
+			Forbidden,
+			refusal403("signed_out", "this sign-in has ended; sign in again"),
+			"application/json"
+		)
+	}
+	let Ok(member) <- maintainerMember(login, false) else match {
+		Err(why) => {
+			let _ <- Logger.error(
+				"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
+			)
+			ServiceUnavailable("GitHub could not say whether you belong to \(MAINTAINER_ORG)")
+		},
+	}
+	let true = member else {
+		RawError(
+			Forbidden,
+			refusal403("not_a_member", "\(login) doesn't belong to \(MAINTAINER_ORG)"),
+			"application/json"
+		)
+	}
+	answer(login)
+}
+
+// A login's current session version (#53, step 5): 0 until they first sign
+// out. A read that fails is an error, never 0: 0 would let a signed-out
+// token back in, so callers refuse rather than guess (fail closed).
+fn sessionVersion(login: String) -> Effect[Result[Int, String]] given Deliveries {
+	let stored <- Deliveries.first(
+		"SELECT version FROM maintainer_sessions WHERE login = ?1",
+		[Text(login)]
+	)
+	match stored {
+		Ok(None) => Effect.pure(Ok(0)),
+		Ok(Some(row)) => match Json.decodeSql[SessionRow](row) {
+			Ok(r) => Effect.pure(Ok(r.version)),
+			Err(e) => Effect.pure(Err(jsonError(e))),
+		},
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+}
+
+type SessionRow = {
+	version: Int,
+}
+
+// The exclusion list a metrics query is given: `DASHBOARD_EXCLUDE`'s names,
+// or for a maintainer `ALL_REPOSITORIES`, which each query reads as "every
+// repository, private ones too" and which matches no repository's name.
+fn shownNames(excluded: Option[String], everything: Bool) -> String {
+	if everything { ALL_REPOSITORIES } else { excludedNames(excluded) }
+}
+
+const ALL_REPOSITORIES: String = "*"
+
+// The repositories behind `GET /maintainers/repositories`, by name.
+fn shownRepositories() -> Effect[HttpResult[List[ShownRepository]]] given Deliveries, Logger, Secrets {
+	let Ok(rows) <- Deliveries.all("SELECT repo, public FROM repositories ORDER BY repo", []) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not list repositories: \(sqlError(e))")
+			ServerError("could not list repositories")
+		},
+	}
+	let Ok(listed) = Json.decodeSql[List[RepositoryRow]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode repositories: \(jsonError(e))")
+			ServerError("repositories did not decode")
+		},
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	Ok(listed.map((r) => ShownRepository {
+		repo: r.repo,
+		public: r.public == 1,
+		excluded: allows(excluded, r.repo),
+	}))
+}
+
+type RepositoryRow = {
+	repo: String,
+	public: Int,
+}
+
+// A maintainer's figures (#53), shared: the same for every maintainer, so one
+// answer per route and query (`body`, the request as JSON) serves them all
+// for `FIGURES_CACHE_SECONDS`, and signed-in pages polling them don't each
+// become D1 reads. Only a success is kept. A kept answer is never decoded
+// into anything but the route's own type; one that won't decode is computed
+// again. Asked only past `forMaintainer`, so it never skips the membership
+// check, and kept in `Tokens`, KV, apart from installation tokens by prefix.
+//
+// The key carries the route's purge generation: when its slot last claimed
+// an edge purge (`edge_purge_slots`, by `purgeSlotOf`'s routes; the runner
+// routes, which no change purges, follow the CI slot). A live change that purges the public routes makes
+// every earlier answer unreachable, so a signed-in page's refetch after it
+// reads afresh, as the public one does at the edge. If the generation can't
+// be read, nothing is kept or reused.
+fn sharedFigures[T: Codable](
+	route: String,
+	body: String,
+	compute: () -> Effect[HttpResult[T]]
+) -> Effect[HttpResult[T]] given Tokens, Deliveries {
+	let purges <- Deliveries.first(
+		"""
+		SELECT (SELECT at FROM edge_purge_slots WHERE slot = 'runs') AS runs,
+		  (SELECT at FROM edge_purge_slots WHERE slot = 'flow') AS flow,
+		  (SELECT at FROM edge_purge_slots WHERE slot = 'issues') AS issues
+		""",
+		[]
+	)
+	let generations: Option[PurgeGenerations] = match purges {
+		Ok(Some(row)) => match Json.decodeSql[PurgeGenerations](row) {
+			Ok(g) => Some(g),
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let Some(g) = generations else { compute() }
+	let purged = if route.startsWith("/metrics/issues") {
+		g.issues
+	} else if route.startsWith("/metrics/prs") || route.startsWith("/metrics/releases") {
+		g.flow
+	} else {
+		g.runs
+	}
+	let key = "figures:\(purged.getOrElse("never")):\(route):\(body)"
+	let kept <- Tokens.get(key)
+	let fromKept: Option[T] = match kept {
+		Some(text) => match Json.decode[T](text) {
+			Ok(v) => Some(v),
+			Err(_) => None,
+		},
+		None => None,
+	}
+	match fromKept {
+		Some(v) => Ok(v),
+		None => {
+			let answer <- compute()
+			let _ <- match answer {
+				Ok(v) => Tokens.putTtl(key, Json.encode(v), FIGURES_CACHE_SECONDS),
+				_ => Effect.pure(()),
+			}
+			Effect.pure(answer)
+		},
+	}
+}
+
+// When each purge slot last purged the metrics routes' edge cache.
+type PurgeGenerations = {
+	runs: Option[String],
+	flow: Option[String],
+	issues: Option[String],
+}
+
+// How long a maintainer's figures are shared: KV's shortest expiry. A live
+// change that purges the public routes moves on to a fresh key (see
+// `sharedFigures`), so this bounds only how long an unchanged answer is reused.
+const FIGURES_CACHE_SECONDS: Int = 60

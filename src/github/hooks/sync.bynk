@@ -1,0 +1,525 @@
+context github.hooks
+
+---
+The open-PR sync, daily (#26): for each public repository, every pull request
+GitHub lists as open is saved (filling in those opened before the service saw
+them), and each one the table still holds open that GitHub no longer lists is
+read on its own and saved as it is now (a `closed` delivery that was lost).
+Repositories in `DASHBOARD_EXCLUDE` are skipped. One repository failing
+doesn't stop the others; the run then fails, naming each.
+---
+service pullSync from cron {
+	on schedule("41 4 * * *") (
+		at: Int
+	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, GitHubApi {
+		let Ok(targets) <- syncTargets() else match {
+			Err(why) => syncFailed(why),
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let results <- targets.filter((t) => !allows(excluded, t.repo)).traverseAll((t) => syncRepo(
+			t
+		))
+		let failures = errorsOf(results)
+		let true = failures.length() > 0 else { Effect.pure(Ok(())) }
+		Effect.pure(Err(joined(failures, "; ")))
+	}
+}
+
+---
+The open-issue sync, daily (#48): for each public repository, every issue
+GitHub lists as open is saved (filling in those opened before the service saw
+them, and correcting any a lost delivery left behind), and each one the table
+still holds open that GitHub no longer lists is read on its own and saved as
+it is now. Repositories in `DASHBOARD_EXCLUDE` are skipped. One repository
+failing doesn't stop the others; the run then fails, naming each. Six minutes
+after the release sync.
+---
+service issueSync from cron {
+	on schedule("53 4 * * *") (
+		at: Int
+	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, GitHubApi, Clock {
+		let Ok(targets) <- syncTargets() else match {
+			Err(why) => syncFailed(why),
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let results <- targets
+			.filter((t) => !allows(excluded, t.repo))
+			.traverseAll((t) => syncIssues(t))
+		let failures = errorsOf(results)
+		let true = failures.length() > 0 else { Effect.pure(Ok(())) }
+		Effect.pure(Err(joined(failures, "; ")))
+	}
+}
+
+---
+The daily release sync (#36): for each public repository (not in
+`DASHBOARD_EXCLUDE`), as the installation that last delivered for it, it
+records every release GitHub lists (up to `MAX_RELEASE_PAGES` pages), so
+release history is there from the first run and a lost delivery is repaired;
+marks deleted any release a complete listing no longer has; and matches each
+final release not yet matched to the pull requests it shipped (oldest first,
+at most `MAX_RELEASE_REPAIRS` a run), as a `released` delivery would have.
+Six minutes after the pull request sync, so its merges are in.
+---
+service releaseSync from cron {
+	on schedule("47 4 * * *") (
+		at: Int
+	) -> Effect[Result[(), String]] given Deliveries, Logger, Secrets, Clock, GitHubApi {
+		let Ok(targets) <- syncTargets() else match {
+			Err(why) => syncFailed(why),
+		}
+		let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+		let results <- targets
+			.filter((t) => !allows(excluded, t.repo))
+			.traverseAll((t) => syncReleases(t))
+		let failures = errorsOf(results)
+		let true = failures.length() > 0 else { Effect.pure(Ok(())) }
+		Effect.pure(Err(joined(failures, "; ")))
+	}
+}
+
+// The public repositories the daily syncs visit, each with the installation
+// that last delivered for it: the one whose token can read it. Compared
+// without case, as GitHub names are, so `deliveries_by_repo_nocase` answers
+// each lookup.
+fn syncTargets() -> Effect[Result[List[SyncTarget], String]] given Deliveries {
+	let Ok(rows) <- Deliveries.all(
+		"""
+		SELECT r.repo,
+		  (SELECT d.installation FROM deliveries d
+		   WHERE d.repo = r.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		   ORDER BY d.received_at DESC LIMIT 1) AS installation
+		FROM repositories r WHERE r.public = 1
+		ORDER BY r.repo
+		""",
+		[]
+	) else match {
+		Err(e) => Effect.pure(Err("could not list repositories to sync: \(sqlError(e))")),
+	}
+	match Json.decodeSql[List[SyncTarget]](rows) {
+		Ok(targets) => Effect.pure(Ok(targets)),
+		Err(e) => Effect.pure(Err("repositories to sync did not decode: \(jsonError(e))")),
+	}
+}
+
+// Syncs one repository's releases: records each one GitHub lists, in one
+// batch (with, when the listing was complete, the deletion of any it no
+// longer has), then matches the final releases not yet matched. A repository
+// that can't be synced for good is skipped with a warning, as the pull
+// request sync does.
+fn syncReleases(
+	t: SyncTarget
+) -> Effect[Result[(), String]] given Deliveries, Logger, Clock, GitHubApi {
+	let Some(installation) = t.installation else {
+		syncSkipped("\(t.repo): no installation has delivered for it; releases skipped")
+	}
+	let Ok(listing) <- listReleases(installation, t.repo, 1, []) else match {
+		Err(f) => if isGone(f) {
+			syncSkipped("\(t.repo): GitHub no longer has it; releases skipped (\(f.message))")
+		} else {
+			syncFailed("\(t.repo): \(f.message)")
+		},
+	}
+	// GitHub redirects a renamed repository's old name: its releases belong
+	// to the new name, which syncs under its own `repositories` row.
+	let current = listing.releases.first().andThen((r) => repoOfRelease(r)).getOrElse(t.repo)
+	let true = current == t.repo else {
+		syncSkipped("\(t.repo): GitHub now calls it \(current); releases skipped")
+	}
+	let facts = listing.releases.map((r) => releaseFact(t.repo, "sync", r))
+	let none: List[SqlStatement] = []
+	let saves = facts.fold(none, (all, f) => match f {
+		Ok(r) => all.append(releaseStatement(r)),
+		Err(_) => all,
+	})
+	let unread = errorsOf(facts.map((f) => f.map((_) => ())))
+	let now <- Clock.now()
+	// GitHub lists drafts only to those who can push, which the App can't, so
+	// a draft missing from the listing isn't gone.
+	let deletions = if listing.complete {
+		[
+			SqlStatement {
+				sql: """
+					UPDATE releases SET deleted_at = ?3
+					WHERE repo = ?1 AND deleted_at IS NULL AND draft = 0
+					  AND tag NOT IN (SELECT value FROM json_each(?2))
+				""",
+				params: [
+					Text(t.repo),
+					Text(Json.encode(listing.releases.map((r) => r.tag_name))),
+					Text(now.toIso()),
+				],
+			},
+		]
+	} else {
+		none
+	}
+	let Ok(_) <- Deliveries.batch(saves.concat(deletions)) else match {
+		Err(e) => syncFailed("\(t.repo): could not save its releases: \(sqlError(e))"),
+	}
+	let Ok(since) <- recordingSince(t.repo) else match {
+		Err(why) => syncFailed("\(t.repo): \(why)"),
+	}
+	let Some(start) = since else {
+		let _ <- Logger.info(
+			"release sync: \(t.repo) has \(listing.releases.length()) releases, none to match before pull requests are recorded"
+		)
+		Effect.pure(Ok(()))
+	}
+	let Ok(rows) <- Deliveries.all(
+		"""
+		SELECT tag FROM releases
+		WHERE repo = ?1 AND draft = 0 AND prerelease = 0 AND deleted_at IS NULL
+		  AND previous_tag IS NULL AND published_at >= ?2
+		ORDER BY published_at LIMIT ?3
+		""",
+		[Text(t.repo), Text(start), Integer(MAX_RELEASE_REPAIRS)]
+	) else match {
+		Err(e) => syncFailed("\(t.repo): could not read its unmatched releases: \(sqlError(e))"),
+	}
+	let Ok(unmatched) = Json.decodeSql[List[ReleaseTag]](rows) else match {
+		Err(e) => syncFailed("\(t.repo): its unmatched releases did not decode: \(jsonError(e))"),
+	}
+	let noFacts: List[ReleaseFact] = []
+	let readable = facts.fold(noFacts, (all, f) => match f {
+		Ok(r) => all.append(r),
+		Err(_) => all,
+	})
+	let matches <- unmatched.traverseAll((u) => matchUnmatched(
+		installation,
+		t.repo,
+		u.tag,
+		readable,
+		listing.releases
+	))
+	let matched = matches.filter((m) => m == Ok(true)).length()
+	let failed = unread.concat(errorsOf(matches.map((m) => m.map((_) => ()))))
+	let _ <- Logger.info(
+		"release sync: \(t.repo) has \(listing.releases.length()) releases, \(matched) matched\(if failed.length() > 0 { ", \(failed.length()) failed" } else { "" })"
+	)
+	let true = failed.length() == 0 else { Effect.pure(Err("\(t.repo): \(joined(failed, "; "))")) }
+	Effect.pure(Ok(()))
+}
+
+// Matches one release the sync found unmatched, from the releases it listed.
+// `false` when there is nothing to match it against (a first release, or one
+// whose previous final release is past the listing, or that wasn't listed),
+// which is recorded so it isn't tried again.
+fn matchUnmatched(
+	installation: Int,
+	repo: String,
+	tag: String,
+	readable: List[ReleaseFact],
+	listed: List[ReleasePayload]
+) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi {
+	let Some(r) = readable.filter((f) => f.tag == tag).first() else { noPrevious(repo, tag) }
+	let Some(previous) = previousFinalAt(r, listed) else { noPrevious(repo, tag) }
+	let Ok(matched) <- matchRelease(installation, r, previous) else match {
+		Err(why) => Effect.pure(Err("\(tag): \(why)")),
+	}
+	Effect.pure(Ok(matched))
+}
+
+fn noPrevious(repo: String, tag: String) -> Effect[Result[Bool, String]] given Deliveries {
+	let Ok(_) <- markNoPrevious(repo, tag) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	Effect.pure(Ok(false))
+}
+
+// A repository's releases, a page at a time, until a short page says every
+// one has been read, or `MAX_RELEASE_PAGES` have been.
+fn listReleases(
+	installation: Int,
+	repo: String,
+	page: Int,
+	sofar: List[ReleasePayload]
+) -> Effect[Result[ReleaseListing, ApiFailure]] given GitHubApi {
+	let Ok(listed) <- GitHubApi.releases(installation, repo, page) else match {
+		Err(f) => Effect.pure(Err(f)),
+	}
+	let all = sofar.concat(listed)
+	if listed.length() < RELEASE_PAGE {
+		Effect.pure(Ok(ReleaseListing { releases: all, complete: true }))
+	} else if page >= MAX_RELEASE_PAGES {
+		Effect.pure(Ok(ReleaseListing { releases: all, complete: false }))
+	} else {
+		listReleases(installation, repo, page + 1, all)
+	}
+}
+
+// An open issue with no update for this long is stale (#48).
+const ISSUE_STALE: Duration = 14.days
+
+// How many stale issues `/metrics/issues/open` lists for each repository,
+// least recently updated first; its backlog row counts them all.
+const MAX_STALE_ISSUES: Int = 20
+
+--- The stale issues, as one JSON list.
+type StaleList = {
+	items: String,
+}
+
+// How many releases one run matches, per repository: each costs a comparison.
+// The first run after deploy matches every final release since pull requests
+// began to be recorded; `bynk` releases about one a day.
+const MAX_RELEASE_REPAIRS: Int = 10
+
+type ReleaseTag = {
+	tag: String,
+}
+
+// Syncs one repository: saves every open pull request GitHub lists, in one
+// batch, then reads each one still open here that GitHub didn't list (oldest
+// first, at most `MAX_REPAIRS` a run) and saves it as it now is. A repository
+// that can't be synced for good (no installation known, GitHub no longer has
+// it, or renamed) is skipped with a warning rather than failing every run.
+fn syncRepo(t: SyncTarget) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+	let Some(installation) = t.installation else {
+		syncSkipped("\(t.repo): no installation has delivered for it; skipped")
+	}
+	let Ok(open) <- GitHubApi.openPulls(installation, t.repo) else match {
+		Err(f) => if isGone(f) {
+			syncSkipped("\(t.repo): GitHub no longer has it; skipped (\(f.message))")
+		} else {
+			syncFailed("\(t.repo): \(f.message)")
+		},
+	}
+	// GitHub redirects a renamed repository's old name. Its pull requests
+	// belong to the new name, which syncs under its own `repositories` row.
+	let current = open
+		.first()
+		.andThen((pr) => pr.base.repo)
+		.map((r) => r.full_name)
+		.getOrElse(t.repo)
+	let true = current == t.repo else {
+		syncSkipped("\(t.repo): GitHub now calls it \(current); skipped")
+	}
+	let facts = open.map((pr) => pullFact(t.repo, "sync", None, pr))
+	let none: List[SqlStatement] = []
+	let statements = facts.fold(none, (all, f) => match f {
+		Ok(p) => all.concat(pullStatements(p)),
+		Err(_) => all,
+	})
+	let unread = errorsOf(facts.map((f) => f.map((_) => ())))
+	let Ok(_) <- Deliveries.batch(statements) else match {
+		Err(e) => syncFailed("\(t.repo): could not save its open pull requests: \(sqlError(e))"),
+	}
+	let Ok(held) <- Deliveries.all(
+		"SELECT repo, number FROM pull_requests WHERE repo = ?1 COLLATE NOCASE AND state = 'open' ORDER BY updated_at, number",
+		[Text(t.repo)]
+	) else match {
+		Err(e) => syncFailed(
+			"\(t.repo): could not read the pull requests held open: \(sqlError(e))"
+		),
+	}
+	let Ok(heldOpen) = Json.decodeSql[List[PullNumber]](held) else match {
+		Err(e) => syncFailed(
+			"\(t.repo): the pull requests held open did not decode: \(jsonError(e))"
+		),
+	}
+	let gone = heldOpen.filter((h) => !open.any((pr) => pr.number == h.number)).take(MAX_REPAIRS)
+	// Each is saved under the name its row has, so a difference in case can't
+	// make a second row.
+	let repairs <- gone.traverseAll((h) => repair(installation, h.repo, h.number))
+	let repaired = repairs.filter((r) => r == Ok(true)).length()
+	let failed = unread.concat(errorsOf(repairs.map((r) => r.map((_) => ()))))
+	let _ <- Logger.info(
+		"pull request sync: \(t.repo) has \(open.length()) open, \(repaired) repaired\(if failed.length() > 0 { ", \(failed.length()) failed" } else { "" })"
+	)
+	let true = failed.length() == 0 else { Effect.pure(Err("\(t.repo): \(joined(failed, "; "))")) }
+	Effect.pure(Ok(()))
+}
+
+// A pull request held open here that GitHub no longer lists as open: read it
+// on its own and save it as it now is. `true` when that moved it out of
+// `open`. One GitHub no longer has (moved with a transferred repository, or
+// removed) is marked `gone`, so it leaves the open set and the repair window.
+fn repair(
+	installation: Int,
+	repo: String,
+	number: Int
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi {
+	let Ok(pr) <- GitHubApi.pull(installation, repo, number) else match {
+		Err(f) => if isGone(f) { markGone(repo, number) } else { Effect.pure(Err(f.message)) },
+	}
+	let Ok(p) = pullFact(repo, "sync", None, pr) else match {
+		Err(why) => Effect.pure(Err("\(repo)#\(number): \(why)")),
+	}
+	let Ok(_) <- savePull(p) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	Effect.pure(Ok(p.state != "open"))
+}
+
+fn markGone(repo: String, number: Int) -> Effect[Result[Bool, String]] given Deliveries {
+	let Ok(_) <- Deliveries.run(
+		"UPDATE pull_requests SET state = 'gone' WHERE repo = ?1 AND number = ?2 AND state = 'open'",
+		[Text(repo), Integer(number)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not mark \(repo)#\(number) gone: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(true))
+}
+
+// Syncs one repository's issues: saves every open issue GitHub lists, in one
+// batch, then reads each one still open here that GitHub didn't list (oldest
+// first, at most `MAX_REPAIRS` a run) and saves it as it now is. A saved issue
+// follows the same rules as a delivery (`issueStatements`): a listing older
+// than the row changes nothing. A repository that can't be synced for good is
+// skipped with a warning, as the pull request sync does.
+fn syncIssues(
+	t: SyncTarget
+) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi, Clock {
+	let Some(installation) = t.installation else {
+		syncSkipped("\(t.repo): no installation has delivered for it; issues skipped")
+	}
+	let Ok(listing) <- GitHubApi.openIssues(installation, t.repo) else match {
+		Err(f) => if isGone(f) {
+			syncSkipped("\(t.repo): GitHub no longer has it; issues skipped (\(f.message))")
+		} else {
+			syncFailed("\(t.repo): \(f.message)")
+		},
+	}
+	let listed = listing.issues
+	// GitHub redirects a renamed repository's old name. Its issues belong to
+	// the new name, which syncs under its own `repositories` row.
+	let current = listed.first().andThen((i) => repoOfIssue(i)).getOrElse(t.repo)
+	let true = current == t.repo else {
+		syncSkipped("\(t.repo): GitHub now calls it \(current); issues skipped")
+	}
+	let open = listed.filter((i) => i.pull_request.isNone())
+	let facts = open.map((i) => issueFact(t.repo, "sync", None, None, i))
+	let noFacts: List[IssueFact] = []
+	let readable = facts.fold(noFacts, (all, f) => match f {
+		Ok(i) => all.append(i),
+		Err(_) => all,
+	})
+	let settled <- readable.traverseAll((f) => confirmAuthor(Some(installation), f))
+	let none: List[SqlStatement] = []
+	let statements = settled.fold(none, (all, r) => match r {
+		Ok(i) => all.concat(issueStatements(i)),
+		Err(_) => all,
+	})
+	let unread = errorsOf(facts.map((f) => f.map((_) => ())))
+	let Ok(_) <- Deliveries.batch(statements) else match {
+		Err(e) => syncFailed("\(t.repo): could not save its open issues: \(sqlError(e))"),
+	}
+	let Ok(held) <- Deliveries.all(
+		"SELECT repo, number FROM issues WHERE repo = ?1 COLLATE NOCASE AND state = 'open' ORDER BY updated_at, number",
+		[Text(t.repo)]
+	) else match {
+		Err(e) => syncFailed("\(t.repo): could not read the issues held open: \(sqlError(e))"),
+	}
+	let Ok(heldOpen) = Json.decodeSql[List[PullNumber]](held) else match {
+		Err(e) => syncFailed("\(t.repo): the issues held open did not decode: \(jsonError(e))"),
+	}
+	// An issue the listing didn't include is only known to have left `open`
+	// when the listing was complete: past `MAX_ISSUE_PAGES`, the rest are
+	// simply unread, and repairing them would re-read the same open issues
+	// every day.
+	let unlisted = heldOpen.filter((h) => !open.any((i) => i.number == h.number))
+	let gone: List[PullNumber] = if listing.complete { unlisted.take(MAX_REPAIRS) } else { [] }
+	let _ <- if listing.complete {
+		Effect.pure(())
+	} else {
+		Logger.warn(
+			"\(t.repo): more open issues and pull requests than the sync reads (\(ISSUE_PAGE * MAX_ISSUE_PAGES)); repairs skipped"
+		)
+	}
+	// Each is saved under the name its row has, so a difference in case can't
+	// make a second row.
+	let repairs <- gone.traverseAll((h) => repairIssue(installation, h.repo, h.number))
+	let repaired = repairs.filter((r) => r == Ok(true)).length()
+	let failed = unread.concat(errorsOf(repairs.map((r) => r.map((_) => ()))))
+	let _ <- Logger.info(
+		"issue sync: \(t.repo) has \(open.length()) open, \(repaired) repaired\(if failed.length() > 0 { ", \(failed.length()) failed" } else { "" })"
+	)
+	let true = failed.length() == 0 else { Effect.pure(Err("\(t.repo): \(joined(failed, "; "))")) }
+	Effect.pure(Ok(()))
+}
+
+// An issue held open here that GitHub no longer lists as open: read it on its
+// own and save it as it now is. `true` when that moved it out of `open`.
+// GitHub follows an old address to where the issue now is. A transfer gives
+// the issue a new number in its new repository, so an answer under another
+// number makes it a `transferred` tombstone; a rename keeps the number, so an
+// answer under the same number from a differently named repository is a
+// rename, left for the new name's own sync (a renamed repository with nothing
+// open gets this far, as its empty listing names no repository). One GitHub
+// no longer has at all (404 or 410: deleted) becomes a `deleted` tombstone.
+fn repairIssue(
+	installation: Int,
+	repo: String,
+	number: Int
+) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi, Clock {
+	let Ok(i) <- GitHubApi.issue(installation, repo, number) else match {
+		Err(f) => if isGone(f) {
+			removeIssue(repo, number, "deleted")
+		} else {
+			Effect.pure(Err(f.message))
+		},
+	}
+	let true = i.number == number else { removeIssue(repo, number, "transferred") }
+	let now = repoOfIssue(i).getOrElse(repo)
+	let true = now.toLower() == repo.toLower() else { Effect.pure(Ok(false)) }
+	let Ok(read) = issueFact(repo, "sync", None, None, i) else match {
+		Err(why) => Effect.pure(Err("\(repo) issue #\(number): \(why)")),
+	}
+	let Ok(fact) <- confirmAuthor(Some(installation), read) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let Ok(_) <- Deliveries.batch(issueStatements(fact)) else match {
+		Err(e) => Effect.pure(Err("could not record \(repo) issue #\(number): \(sqlError(e))")),
+	}
+	Effect.pure(Ok(fact.state != "open"))
+}
+
+// Makes an open issue a tombstone (`deleted` or `transferred`), with no labels,
+// as the delivery saying so would have.
+fn removeIssue(
+	repo: String,
+	number: Int,
+	how: String
+) -> Effect[Result[Bool, String]] given Deliveries {
+	let Ok(_) <- Deliveries.batch([
+		SqlStatement {
+			sql: "UPDATE issues SET state = ?3 WHERE repo = ?1 AND number = ?2 AND state = 'open'",
+			params: [Text(repo), Integer(number), Text(how)],
+		},
+		SqlStatement {
+			sql: "DELETE FROM issue_labels WHERE repo = ?1 AND number = ?2",
+			params: [Text(repo), Integer(number)],
+		},
+	]) else match {
+		Err(e) => Effect.pure(Err("could not mark \(repo) issue #\(number) \(how): \(sqlError(e))")),
+	}
+	Effect.pure(Ok(true))
+}
+
+fn syncSkipped(why: String) -> Effect[Result[(), String]] given Logger {
+	let _ <- Logger.warn(why)
+	Effect.pure(Ok(()))
+}
+
+// The reasons in a list of results, in order.
+fn errorsOf(results: List[Result[(), String]]) -> List[String] {
+	let none: List[String] = []
+	results.fold(none, (all, r) => match r {
+		Ok(_) => all,
+		Err(why) => all.append(why),
+	})
+}
+
+fn syncFailed(why: String) -> Effect[Result[(), String]] given Logger {
+	let _ <- Logger.error(why)
+	Effect.pure(Err(why))
+}
+
+// How many of each repository's releases `/metrics/releases/recent` lists.
+const MAX_RECENT_RELEASES: Int = 20
+
+// How many pull requests one run reads on their own, per repository: enough
+// for any realistic run of lost deliveries, and bounded so one run can't make
+// hundreds of calls.
+const MAX_REPAIRS: Int = 50

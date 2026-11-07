@@ -1,0 +1,214 @@
+context github.hooks
+
+---
+The runner-wait figures, hourly (#42): each repository's waits by runner,
+longest waits and slowest jobs over the 7, 30 and 90-day windows, computed
+from `workflow_jobs` and stored in `runner_windows` for `/metrics/runners`
+to read. D1 runs one query at a time, so a slow run would hold up
+deliveries: each query reads its own partial index in order (migration
+`0012`), counting jobs by wait or duration rather than ranking them, so
+nothing is sorted. At 90 days' volume (440,000 jobs) the three take about
+0.2 s together. All repositories in `repositories` are computed; the route
+decides which are shown.
+---
+service runnerFigures from cron {
+	on schedule("37 * * * *") (at: Int) -> Effect[Result[(), String]] given Deliveries, Logger {
+		let now = Instant.fromEpochMillis(at)
+		// D1 refuses a statement given more parameters than it uses, so the
+		// waits, which keep no list, get the window alone.
+		let window = [
+			Text((now - 7.days).toIso()),
+			Text((now - 30.days).toIso()),
+			Text((now - 90.days).toIso()),
+			Text(now.toIso()),
+		]
+		let listed = window.append(Integer(RUNNER_LIST))
+		let ranked = listed.append(Integer(SLOWEST_MIN_RUNS))
+		// Each read is a literal, chosen by position: 0 waits by runner, 1 the
+		// longest waits, 2 the slowest jobs, 3 when the first job was recorded.
+		let reads <- [0, 1, 2, 3].parTraverseAll(
+			(read) => match read {
+				0 => Deliveries.all(
+					"""
+					WITH windows (days, since) AS (VALUES (7, ?1), (30, ?2), (90, ?3)),
+					counts AS (
+					  SELECT repo, runner, wait_seconds AS wait,
+					    sum(started_at >= ?1) AS n7, sum(started_at >= ?2) AS n30, count(*) AS n90
+					  FROM workflow_jobs INDEXED BY workflow_jobs_waits
+					  WHERE wait_seconds IS NOT NULL AND approval = 0 AND conclusion IS NOT 'skipped'
+					    AND started_at >= ?3 AND started_at < ?4
+					  GROUP BY repo, runner, wait_seconds
+					),
+					spread AS (
+					  SELECT w.days, c.repo, c.runner, c.wait,
+					    CASE w.days WHEN 7 THEN c.n7 WHEN 30 THEN c.n30 ELSE c.n90 END AS n
+					  FROM counts c JOIN windows w
+					),
+					running AS (
+					  SELECT days, repo, runner, wait, n,
+					    sum(n) OVER (PARTITION BY days, repo, runner ORDER BY wait ROWS UNBOUNDED PRECEDING) AS upto,
+					    sum(n) OVER (PARTITION BY days, repo, runner) AS total
+					  FROM spread WHERE n > 0
+					),
+					figures AS (
+					  SELECT days, repo, runner, max(total) AS jobs,
+					    min(CASE WHEN upto >= (50 * total + 99) / 100 THEN wait END) AS p50,
+					    min(CASE WHEN upto >= (95 * total + 99) / 100 THEN wait END) AS p95,
+					    max(wait) AS longest
+					  FROM running GROUP BY days, repo, runner
+					)
+					SELECT w.days,
+					  (SELECT coalesce(json_group_array(json_object('repo', f.repo, 'runner', f.runner, 'jobs', f.jobs,
+					      'p50_seconds', f.p50, 'p95_seconds', f.p95, 'longest_seconds', f.longest)), '[]')
+					   FROM (SELECT * FROM figures f WHERE f.days = w.days ORDER BY f.repo, f.jobs DESC, f.runner) f) AS items
+					FROM windows w
+					ORDER BY w.days
+					""",
+					window
+				),
+				1 => Deliveries.all(
+					"""
+					WITH windows (days, since) AS (VALUES (7, ?1), (30, ?2), (90, ?3)),
+					repos AS (SELECT repo FROM repositories),
+					lists AS (
+					  SELECT w.days, r.repo,
+					    (SELECT json_group_array(json(x.item)) FROM (
+					       SELECT json_object('repo', j.repo, 'workflow', j.workflow, 'name', j.name, 'runner', j.runner,
+					         'wait_seconds', j.wait_seconds, 'queued_at', j.created_at,
+					         'url', 'https://github.com/' || j.repo || '/actions/runs/' || j.run_id || '/job/' || j.job_id) AS item
+					       FROM workflow_jobs j INDEXED BY workflow_jobs_longest
+					       WHERE j.repo = r.repo AND j.wait_seconds IS NOT NULL AND j.approval = 0 AND j.conclusion IS NOT 'skipped'
+					         AND +j.started_at >= w.since AND +j.started_at < ?4
+					       ORDER BY j.wait_seconds DESC, j.job_id DESC
+					       LIMIT ?5) x) AS items
+					  FROM windows w JOIN repos r
+					)
+					SELECT w.days,
+					  (SELECT coalesce(json_group_array(json(e.value)), '[]')
+					   FROM (SELECT l.repo, e.key, e.value FROM lists l, json_each(l.items) e WHERE l.days = w.days ORDER BY l.repo, e.key) e) AS items
+					FROM windows w
+					ORDER BY w.days
+					""",
+					listed
+				),
+				2 => Deliveries.all(
+					"""
+					WITH windows (days, since) AS (VALUES (7, ?1), (30, ?2), (90, ?3)),
+					counts AS (
+					  SELECT j.repo, j.path, j.workflow, j.name, j.took_seconds AS took,
+					    sum(j.started_at >= ?1) AS n7, sum(j.started_at >= ?2) AS n30, count(*) AS n90
+					  FROM workflow_jobs j INDEXED BY workflow_jobs_took
+					  WHERE j.took_seconds IS NOT NULL AND j.conclusion = 'success'
+					    AND j.started_at >= ?3 AND j.started_at < ?4
+					  GROUP BY j.repo, j.workflow, j.name, j.path, j.took_seconds
+					),
+					spread AS (
+					  SELECT w.days, c.repo, c.path, c.workflow, c.name, c.took,
+					    CASE w.days WHEN 7 THEN c.n7 WHEN 30 THEN c.n30 ELSE c.n90 END AS n
+					  FROM counts c JOIN windows w
+					),
+					running AS (
+					  SELECT days, repo, path, workflow, name, took, n,
+					    sum(n) OVER (PARTITION BY days, repo, path, workflow, name ORDER BY took ROWS UNBOUNDED PRECEDING) AS upto,
+					    sum(n) OVER (PARTITION BY days, repo, path, workflow, name) AS total
+					  FROM spread WHERE n > 0
+					),
+					figures AS (
+					  SELECT days, repo, path, workflow, name, max(total) AS runs,
+					    min(CASE WHEN upto >= (50 * total + 99) / 100 THEN took END) AS p50,
+					    min(CASE WHEN upto >= (95 * total + 99) / 100 THEN took END) AS p95
+					  FROM running GROUP BY days, repo, path, workflow, name
+					  HAVING max(total) >= ?6
+					),
+					top AS (
+					  SELECT f.*, row_number() OVER (PARTITION BY days, repo ORDER BY p50 DESC, workflow, name) AS place FROM figures f
+					)
+					SELECT w.days,
+					  (SELECT coalesce(json_group_array(json_object('repo', t.repo, 'path', t.path, 'workflow', t.workflow, 'name', t.name,
+					      'runs', t.runs, 'p50_seconds', t.p50, 'p95_seconds', t.p95)), '[]')
+					   FROM (SELECT * FROM top t WHERE t.days = w.days AND t.place <= ?5 ORDER BY t.repo, t.place) t) AS items
+					FROM windows w
+					ORDER BY w.days
+					""",
+					ranked
+				),
+				_ => Deliveries.all("SELECT min(created_at) AS first FROM workflow_jobs", []),
+			}
+		)
+		let Ok(runners) = windowLists(reads.get(0)) else match {
+			Err(why) => syncFailed("could not compute runner waits: \(why)"),
+		}
+		let Ok(longest) = windowLists(reads.get(1)) else match {
+			Err(why) => syncFailed("could not compute the longest waits: \(why)"),
+		}
+		let Ok(slowest) = windowLists(reads.get(2)) else match {
+			Err(why) => syncFailed("could not compute the slowest jobs: \(why)"),
+		}
+		let dataSince: Option[String] = match reads.get(3) {
+			Some(Ok(rows)) => match Json.decodeSql[List[FirstRun]](rows) {
+				Ok([f]) => f.first,
+				_ => None,
+			},
+			_ => None,
+		}
+		let saves = [7, 30, 90].map(
+			(days) => SqlStatement {
+				sql: """
+					INSERT INTO runner_windows (days, computed_at, since, until, data_since, runners, longest, slowest)
+					VALUES (?1, ?2, ?3, ?2, ?4, ?5, ?6, ?7)
+					ON CONFLICT (days) DO UPDATE SET
+					  computed_at = excluded.computed_at, since = excluded.since, until = excluded.until,
+					  data_since = excluded.data_since, runners = excluded.runners,
+					  longest = excluded.longest, slowest = excluded.slowest
+				""",
+				params: [
+					Integer(days),
+					Text(now.toIso()),
+					Text((now - Duration.millis(days * 86_400_000)).toIso()),
+					text(dataSince),
+					Text(itemsFor(runners, days)),
+					Text(itemsFor(longest, days)),
+					Text(itemsFor(slowest, days)),
+				],
+			}
+		)
+		let Ok(_) <- Deliveries.batch(saves) else match {
+			Err(e) => syncFailed("could not save the runner figures: \(sqlError(e))"),
+		}
+		Ok(())
+	}
+}
+
+// One window's list, as one of the figures queries gives it: the window's
+// length and the list as JSON text.
+type WindowItems = {
+	days: Int,
+	items: String,
+}
+
+// A figures query's rows, or why there are none.
+fn windowLists(r: Option[Result[String, SqlError]]) -> Result[List[WindowItems], String] {
+	match r {
+		Some(Ok(rows)) => match Json.decodeSql[List[WindowItems]](rows) {
+			Ok(lists) => Ok(lists),
+			Err(e) => Err("did not decode: \(jsonError(e))"),
+		},
+		_ => Err(readError(r)),
+	}
+}
+
+// The list for one window, `[]` when there is none.
+fn itemsFor(lists: List[WindowItems], days: Int) -> String {
+	lists.filter((l) => l.days == days).first().map((l) => l.items).getOrElse("[]")
+}
+
+// How many longest waits and slowest jobs each repository keeps, per window.
+const RUNNER_LIST: Int = 10
+
+// How many successful runs in the window a job needs to be ranked among the
+// slowest: one run is one sample, and a one-off job would top the list on it.
+const SLOWEST_MIN_RUNS: Int = 3
+
+// How long a queued job counts as waiting now: a job queued longer than a
+// day is one whose later deliveries were lost.
+const JOB_QUEUE_TIMEOUT: Duration = 24.hours

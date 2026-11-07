@@ -1,0 +1,140 @@
+context github.hooks
+
+--- A row of `runner_windows`: one window's figures, each list as JSON text.
+type RunnerWindow = {
+	computed_at: String,
+	since: String,
+	until: String,
+	data_since: Option[String],
+	runners: String,
+	longest: String,
+	slowest: String,
+}
+
+// /metrics/runners's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsRunners(
+	query: RunnerQuery,
+	everything: Bool
+) -> Effect[HttpResult[RunnerMetrics]] given Deliveries, Logger, Secrets {
+	let true = query.days == 7 || query.days == 30 || query.days == 90 else {
+		BadRequest("days must be 7, 30 or 90")
+	}
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let reads <- [0, 1].parTraverseAll(
+		(read) => match read {
+			0 => Deliveries.all(
+				"SELECT computed_at, since, until, data_since, runners, longest, slowest FROM runner_windows WHERE days = ?1",
+				[Integer(query.days)]
+			),
+			_ => Deliveries.all(
+				"""
+				SELECT repo FROM repositories
+				WHERE (public = 1 OR ?2 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?2, ',' || lower(repo) || ',') = 0
+				""",
+				[text(query.repo.map((r) => "\(r)")), Text(shownNames(excluded, everything))]
+			),
+		}
+	)
+	let Some(Ok(windowRows)) = reads.get(0) else {
+		let _ <- Logger.error("could not read the runner figures: \(readError(reads.get(0)))")
+		ServerError("could not read the runner figures")
+	}
+	let Some(Ok(shownRows)) = reads.get(1) else {
+		let _ <- Logger.error("could not list the repositories shown: \(readError(reads.get(1)))")
+		ServerError("could not list the repositories shown")
+	}
+	let Ok(windows) = Json.decodeSql[List[RunnerWindow]](windowRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the runner figures: \(jsonError(e))")
+			ServerError("the runner figures did not decode")
+		},
+	}
+	let Ok(shown) = Json.decodeSql[List[ShownRepo]](shownRows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the repositories shown: \(jsonError(e))")
+			ServerError("the repositories shown did not decode")
+		},
+	}
+	let empty = RunnerMetrics {
+		since: None,
+		until: None,
+		computed_at: None,
+		data_since: None,
+		runners: [],
+		longest: [],
+		slowest: [],
+	}
+	let Some(w) = windows.first() else { Ok(empty) }
+	let isShown = (repo: String) => shown.any((r) => r.repo == repo)
+	let Ok(runners) = Json.decodeSql[List[RunnerWait]](w.runners) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode runner waits: \(jsonError(e))")
+			ServerError("runner waits did not decode")
+		},
+	}
+	let Ok(longest) = Json.decodeSql[List[LongWait]](w.longest) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the longest waits: \(jsonError(e))")
+			ServerError("the longest waits did not decode")
+		},
+	}
+	let Ok(slowest) = Json.decodeSql[List[JobTime]](w.slowest) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the slowest jobs: \(jsonError(e))")
+			ServerError("the slowest jobs did not decode")
+		},
+	}
+	Ok(RunnerMetrics {
+		since: Some(w.since),
+		until: Some(w.until),
+		computed_at: Some(w.computed_at),
+		data_since: w.data_since,
+		runners: runners.filter((r) => isShown(r.repo)),
+		longest: longest.filter((l) => isShown(l.repo)),
+		slowest: slowest.filter((j) => isShown(j.repo)),
+	})
+}
+
+// /metrics/runners/now's figures (#53): the public route's, or with `everything`, a
+// maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
+fn metricsRunnersNow(
+	query: NowQuery,
+	everything: Bool
+) -> Effect[HttpResult[RunnersNow]] given Deliveries, Logger, Clock, Secrets {
+	let now <- Clock.now()
+	let excluded <- Secrets.get("DASHBOARD_EXCLUDE")
+	let Ok(rows) <- Deliveries.all(
+		"""
+		WITH shown AS (
+		  SELECT repo FROM repositories
+		  WHERE (public = 1 OR ?3 = '*') AND (?1 IS NULL OR repo = ?1 COLLATE NOCASE) AND instr(?3, ',' || lower(repo) || ',') = 0
+		)
+		SELECT j.repo, j.runner,
+		  sum(j.status = 'queued') AS queued,
+		  min(CASE WHEN j.status = 'queued' THEN j.created_at END) AS oldest_queued_at,
+		  sum(j.status = 'waiting') AS awaiting_approval
+		FROM workflow_jobs j JOIN shown s ON s.repo = j.repo
+		WHERE j.status IN ('queued', 'waiting') AND j.created_at >= ?2
+		GROUP BY j.repo, j.runner
+		ORDER BY j.repo, queued DESC, j.runner
+		""",
+		[
+			text(query.repo.map((r) => "\(r)")),
+			Text((now - JOB_QUEUE_TIMEOUT).toIso()),
+			Text(shownNames(excluded, everything)),
+		]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not read the jobs waiting now: \(sqlError(e))")
+			ServerError("could not read the jobs waiting now")
+		},
+	}
+	let Ok(waiting) = Json.decodeSql[List[WaitingNow]](rows) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode the jobs waiting now: \(jsonError(e))")
+			ServerError("the jobs waiting now did not decode")
+		},
+	}
+	Ok(RunnersNow { waiting: waiting })
+}

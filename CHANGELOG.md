@@ -8,6 +8,11 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- `src/github/hooks.bynk` (5,400 lines) is split into 25 files under
+  `src/github/hooks/`, one per part of the Worker, each opening
+  `context github.hooks`, which Bynk joins into one context. Nothing else
+  changes: every declaration moved as it was, the tests and the deploy plan
+  are the same.
 - `docs/deploy.md` says what the lock holds and when it changes: also whenever
   a page's script or styles change, so most releases leave a lock to commit.
   It says how to commit a tag deploy's lock, and that the lock from the last

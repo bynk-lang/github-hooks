@@ -1,0 +1,202 @@
+context github.hooks
+
+---
+Signing a maintainer in with GitHub (#53), through the GitHub App's user
+authorisation. `exchange` trades the code the page received for a user access
+token, with the App's client secret, so only the Worker can make it; `user`
+asks GitHub whose token it is. The user token is used for that one question
+and never kept.
+---
+capability GitHubSignIn {
+	fn exchange(
+		clientId: String,
+		clientSecret: String,
+		r: TokenRequest
+	) -> Effect[Result[GitHubTokenReply, String]]
+	fn user(token: String) -> Effect[Result[GitHubUser, String]]
+	fn revoke(clientId: String, clientSecret: String, token: String) -> Effect[Result[(), String]]
+}
+
+provides GitHubSignIn = GitHubOAuth given Fetch {
+	fn exchange(
+		clientId: String,
+		clientSecret: String,
+		r: TokenRequest
+	) -> Effect[Result[GitHubTokenReply, String]] {
+		let sent <- Fetch.send(Request {
+			method: Post,
+			url: GITHUB_TOKEN_URL,
+			contentType: Some("application/x-www-form-urlencoded"),
+			authorization: None,
+			headers: Map
+				.empty()
+				.insert("accept", "application/json")
+				.insert("user-agent", "bynk-lang-github-hooks"),
+			body: Some(tokenForm(clientId, clientSecret, r)),
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("GitHub could not be reached to finish a sign-in")),
+		}
+		match Json.decode[GitHubTokenReply](res.body) {
+			Ok(reply) => Effect.pure(Ok(reply)),
+			Err(_) => Effect.pure(Err("GitHub answered \(res.status) with a body that isn't a token reply")),
+		}
+	}
+
+	fn user(token: String) -> Effect[Result[GitHubUser, String]] {
+		let sent <- Fetch.send(Request {
+			method: Get,
+			url: "https://api.github.com/user",
+			contentType: None,
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: None,
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("GitHub could not be reached to say who signed in")),
+		}
+		let true = res.status == 200 else {
+			Effect.pure(Err("GitHub answered \(res.status) when asked who signed in"))
+		}
+		match Json.decode[GitHubUser](res.body) {
+			Ok(u) => Effect.pure(Ok(u)),
+			Err(_) => Effect.pure(Err("GitHub's description of the signed-in user did not decode")),
+		}
+	}
+
+	// GitHub's `DELETE /applications/{client_id}/token`, authenticated as the
+	// App with its client ID and secret.
+	fn revoke(clientId: String, clientSecret: String, token: String) -> Effect[Result[(), String]] {
+		let basic = Bytes.fromUtf8("\(clientId):\(clientSecret)").toBase64()
+		let sent <- Fetch.send(Request {
+			method: Delete,
+			url: "https://api.github.com/applications/\(clientId)/token",
+			contentType: Some("application/json"),
+			authorization: Some("Basic \(basic)"),
+			headers: apiHeaders(),
+			body: Some(Json.encode(RevokedToken { access_token: token })),
+		})
+		let Ok(res) = sent else match {
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+		if res.status == 204 {
+			Effect.pure(Ok(()))
+		} else {
+			Effect.pure(Err("GitHub answered \(res.status)"))
+		}
+	}
+}
+
+--- The body of GitHub's token revocation.
+type RevokedToken = {
+	access_token: String,
+}
+
+---
+Acting as the GitHub App. `token` gives an installation token: from `Tokens`
+when one is cached, otherwise by signing a JWT with the App's private key
+(`APP_PRIVATE_KEY`, base64 PKCS#8) as `APP_CLIENT_ID` and exchanging it with
+GitHub. Kept separate from what the service does with the token, so it can move
+into a first-party package unchanged.
+---
+capability AppAuth {
+	fn token(installation: Int) -> Effect[Result[String, String]]
+	fn forget(installation: Int) -> Effect[()]
+}
+
+provides AppAuth = GitHubAppAuth given Secrets, Clock, Crypto, Fetch, Tokens {
+	fn token(installation: Int) -> Effect[Result[String, String]] {
+		let key = "installation:\(installation)"
+		let cached <- Tokens.get(key)
+		match cached {
+			Some(t) => Effect.pure(Ok(t)),
+			None => {
+				// An empty value is as unusable as a missing one.
+				let clientIdSet <- Secrets.get("APP_CLIENT_ID")
+				let Some(clientId) = present(clientIdSet) else {
+					Effect.pure(Err("APP_CLIENT_ID is not set"))
+				}
+				let keySet <- Secrets.get("APP_PRIVATE_KEY")
+				let Some(stored) = present(keySet) else {
+					Effect.pure(Err("APP_PRIVATE_KEY is not set"))
+				}
+				let Some(der) = pkcs8(stored) else {
+					Effect.pure(Err("APP_PRIVATE_KEY is not base64"))
+				}
+				let Ok(signingKey) <- Crypto.importSigningKey(RsaPkcs1Sha256, der) else match {
+					Err(_) => Effect.pure(Err("APP_PRIVATE_KEY is not an RSA PKCS#8 key")),
+				}
+				let now <- Clock.now()
+				let input = jwtSigningInput(clientId, now)
+				let signature <- Crypto.sign(signingKey, Bytes.fromUtf8(input))
+				let jwt = "\(input).\(signature.toBase64Url())"
+				let sent <- Fetch.send(Request {
+					method: Post,
+					url: "https://api.github.com/app/installations/\(installation)/access_tokens",
+					contentType: None,
+					authorization: Some("Bearer \(jwt)"),
+					headers: apiHeaders(),
+					body: None,
+				})
+				let Ok(res) = sent else {
+					Effect.pure(Err("GitHub could not be reached for a token"))
+				}
+				let true = res.status == 201 else {
+					Effect.pure(Err("GitHub refused a token for installation \(installation): \(refusal(res.status, res.body))"))
+				}
+				let Ok(t) = Json.decode[InstallationToken](res.body) else {
+					Effect.pure(Err("GitHub's token response did not decode"))
+				}
+				let _ <- Tokens.putTtl(key, t.token, TOKEN_CACHE_SECONDS)
+				Effect.pure(Ok(t.token))
+			},
+		}
+	}
+
+	// Drop a cached token GitHub has refused, so the next call mints a fresh one
+	// carrying the installation's current permissions.
+	fn forget(installation: Int) -> Effect[()] {
+		Tokens.delete("installation:\(installation)")
+	}
+}
+
+---
+One authenticated call to GitHub's REST API, answering GitHub's response.
+Kept apart from `GitHubApi` so a call can be made again with a fresh token.
+---
+capability GitHubHttp {
+	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]]
+	fn get(token: String, url: String) -> Effect[Result[Response, String]]
+}
+
+provides GitHubHttp = FetchGitHubHttp given Fetch {
+	fn get(token: String, url: String) -> Effect[Result[Response, String]] {
+		let sent <- Fetch.send(Request {
+			method: Get,
+			url: url,
+			contentType: None,
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: None,
+		})
+		match sent {
+			Ok(res) => Effect.pure(Ok(res)),
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+	}
+
+	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]] {
+		let sent <- Fetch.send(Request {
+			method: Post,
+			url: url,
+			contentType: Some("application/json"),
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: Some(body),
+		})
+		match sent {
+			Ok(res) => Effect.pure(Ok(res)),
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+	}
+}

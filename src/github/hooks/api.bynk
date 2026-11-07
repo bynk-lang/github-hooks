@@ -1,0 +1,618 @@
+context github.hooks
+
+service api from http {
+	// GitHub caps a delivery's payload at 25 MB (25,000,000 bytes). This cap is
+	// 25 MiB (26,214,400 bytes), so a delivery at GitHub's limit still fits.
+	limits {
+		maxBody: 26_214_400,
+	}
+
+	// Responses are read by people and scripts, not only by Bynk, so an `Option`
+	// is written plainly: `Some(v)` as `v`, `None` as `null` (bynk-lang/bynk#2858).
+	json {
+		options: plain,
+	}
+
+	// The CI health page. Deliberately not `@cache`d: it names this deploy's
+	// content-hashed stylesheet and script, and a cached copy outliving a deploy
+	// would ask for the previous ones. It is a few hundred bytes from an embed,
+	// with no D1 read; its figures come from the metrics routes, which it polls.
+	on GET("/") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = dashboardTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", dashboardJs.url)
+			.replace("{signin}", signinJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The PR flow page. Not `@cache`d, for the same reason as `/`: it names
+	// this deploy's assets.
+	on GET("/prs") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = prsTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", prsJs.url)
+			.replace("{signin}", signinJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The releases page. Not `@cache`d, for the same reason as `/`.
+	on GET("/releases") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = releasesTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", releasesJs.url)
+			.replace("{signin}", signinJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The issues page. Not `@cache`d, for the same reason as `/`.
+	on GET("/issues") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = issuesTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{js}", issuesJs.url)
+			.replace("{signin}", signinJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// The page's sign-in settings (#53), all public: where to send the
+	// browser, and the GitHub App's client ID. Unavailable until the App's
+	// client ID is set.
+	on GET("/maintainers/config") () -> Effect[HttpResult[SignInConfig]] by v: Visitor given Secrets {
+		let set <- Secrets.get("APP_CLIENT_ID")
+		let Some(clientId) = present(set) else {
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		Ok(SignInConfig { authorization_endpoint: GITHUB_AUTHORIZE, client_id: clientId })
+	}
+
+	// The page GitHub sends a maintainer back to after signing in. The shared
+	// sign-in script finishes the sign-in there and returns to the page they
+	// came from. Not `@cache`d, as it names this deploy's assets.
+	on GET("/maintainers/callback") () -> Effect[HttpResult[String]] by v: Visitor {
+		let page = callbackTemplate
+			.replace("{css}", dashboardCss.url)
+			.replace("{signin}", signinJs.url)
+		Raw(Bytes.fromUtf8(page), "text/html; charset=utf-8")
+	}
+
+	// Finishes a sign-in (#53): exchanges the code at GitHub with the App's
+	// client secret, asks GitHub who signed in (then revokes GitHub's token),
+	// checks with GitHub now that they belong to the organisation, and answers
+	// this service's token for them. The code is
+	// only good with the PKCE verifier the page kept, and the redirect URI
+	// must be the callback on the origin this request came to. Limited per
+	// address like the metrics routes.
+	on POST("/maintainers/token") (body: TokenRequest, headers: RequestHeaders) -> Effect[HttpResult[SignedIn]] by v: Visitor given Secrets, Logger, MetricsLimit, GitHubSignIn, Deliveries, GitHubApi, Clock, Crypto {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many sign-in attempts; try again in a minute")
+		}
+		let true = isOwnCallback(body.redirect_uri, headers.get("Host").getOrElse("")) else {
+			BadRequest("the redirect URI must be this service's /maintainers/callback")
+		}
+		let idSet <- Secrets.get("APP_CLIENT_ID")
+		let secretSet <- Secrets.get("APP_CLIENT_SECRET")
+		let signingSet <- Secrets.get("MAINTAINER_TOKEN_SECRET")
+		let Some(clientId) = present(idSet) else {
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		let Some(clientSecret) = present(secretSet) else {
+			let _ <- Logger.error("APP_CLIENT_SECRET is not set, so no maintainer can sign in")
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		let Some(signing) = present(signingSet) else {
+			let _ <- Logger.error(
+				"MAINTAINER_TOKEN_SECRET is not set, so no maintainer can sign in"
+			)
+			ServiceUnavailable("maintainer sign-in isn't configured")
+		}
+		let Ok(reply) <- GitHubSignIn.exchange(clientId, clientSecret, body) else match {
+			Err(why) => {
+				let _ <- Logger.error("could not exchange a maintainer's sign-in code: \(why)")
+				BadGateway("GitHub could not be reached")
+			},
+		}
+		let Some(userToken) = reply.access_token else {
+			let _ <- Logger.warn(
+				"GitHub refused a sign-in code: \(reply.error.getOrElse("no reason")) \(reply.error_description.getOrElse(""))"
+			)
+			BadRequest("GitHub refused the sign-in: \(reply.error.getOrElse("no reason given"))")
+		}
+		let asked <- GitHubSignIn.user(userToken)
+		// The user token has done its one job: revoke it, so nothing usable is
+		// left behind. A failed revocation is logged, not fatal: the token
+		// still expires, and the Worker never kept it.
+		let revoked <- GitHubSignIn.revoke(clientId, clientSecret, userToken)
+		let _ <- match revoked {
+			Ok(_) => Effect.pure(()),
+			Err(why) => Logger.warn("could not revoke a maintainer's GitHub user token: \(why)"),
+		}
+		let Ok(user) = asked else match {
+			Err(why) => {
+				let _ <- Logger.error("could not ask GitHub who signed in: \(why)")
+				BadGateway("GitHub could not say who signed in")
+			},
+		}
+		// Asked fresh: a kept answer could be a day old, and a token outlives it.
+		let Ok(member) <- maintainerMember(user.login, true) else match {
+			Err(why) => {
+				let _ <- Logger.error(
+					"could not tell whether \(user.login) belongs to \(MAINTAINER_ORG): \(why)"
+				)
+				ServiceUnavailable("GitHub could not say whether you belong to \(MAINTAINER_ORG)")
+			},
+		}
+		let true = member else {
+			RawError(
+				Forbidden,
+				refusal403("not_a_member", "\(user.login) doesn't belong to \(MAINTAINER_ORG)"),
+				"application/json"
+			)
+		}
+		let now <- Clock.now()
+		let Ok(version) <- sessionVersion(user.login) else match {
+			Err(why) => {
+				let _ <- Logger.error("could not read \(user.login)'s session: \(why)")
+				ServiceUnavailable("could not start your sign-in; try again")
+			},
+		}
+		let token <- sessionToken(signing, "\(user.login):\(version)", now)
+		Ok(SignedIn { token: token, expires_in: SESSION_SECONDS, login: user.login })
+	}
+
+	// Who is signed in (#53): their GitHub login, the token's subject, if
+	// they still belong to the organisation (an answer kept a day; only a
+	// miss looks for an installation to ask with).
+	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit {
+		forMaintainer("\(m.identity)", (login) => Effect.pure(Ok(Me { login: login })))
+	}
+
+	// Signs a maintainer out everywhere (#53, step 5): their session moves to
+	// the next version, so every token issued before now is refused, on every
+	// device, though it hasn't expired. Needs only a valid token, not one that
+	// is still current or a membership: ending a session is always allowed.
+	on POST("/maintainers/signout") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, Clock {
+		let login = sessionOf("\(m.identity)").login
+		let now <- Clock.now()
+		let Ok(_) <- Deliveries.run(
+			"""
+			INSERT INTO maintainer_sessions (login, version, signed_out_at) VALUES (?1, 1, ?2)
+			ON CONFLICT (login) DO UPDATE SET version = maintainer_sessions.version + 1, signed_out_at = excluded.signed_out_at
+			""",
+			[Text(login), Text(now.toIso())]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not sign \(login) out: \(sqlError(e))")
+				ServerError("could not sign you out; try again")
+			},
+		}
+		Ok(Me { login: login })
+	}
+
+	// The maintainers' figures (#53): each public metrics route's, for a
+	// signed-in maintainer who still belongs to the organisation, including
+	// private repositories and those `DASHBOARD_EXCLUDE` names. Never
+	// `@cache`d, so they're sent `no-store` and can't be kept at the edge for
+	// the public. Limited per login (`MaintainerLimit`), not per address.
+	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/ci",
+			Json.encode(body),
+			() => metricsCi(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/ci/now",
+			Json.encode(body),
+			() => metricsCiNow(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/ci/history",
+			Json.encode(body),
+			() => metricsCiHistory(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/prs",
+			Json.encode(body),
+			() => metricsPrs(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/prs/open",
+			Json.encode(body),
+			() => metricsPrsOpen(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/issues",
+			Json.encode(body),
+			() => metricsIssues(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/issues/open",
+			Json.encode(body),
+			() => metricsIssuesOpen(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/releases",
+			Json.encode(body),
+			() => metricsReleases(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/releases/recent",
+			Json.encode(body),
+			() => metricsReleasesRecent(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/runners",
+			Json.encode(body),
+			() => metricsRunners(body, true)
+		))
+	}
+
+	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
+			"/metrics/runners/now",
+			Json.encode(body),
+			() => metricsRunnersNow(body, true)
+		))
+	}
+
+	// What is the signed-in maintainer's to act on (#53, step 4): their open
+	// pull requests and their CI, the pull requests waiting on their review,
+	// their open issues, and their merges waiting to ship, across every
+	// repository. It's theirs alone, so it isn't shared (`sharedFigures`), but
+	// it shares their per-login limit, and every list reads by an index.
+	on GET("/maintainers/mine") () -> Effect[HttpResult[Mine]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit {
+		forMaintainer("\(m.identity)", (login) => mine(login))
+	}
+
+	// Re-runs a failed run's failed jobs (#53, step 5), for a maintainer, as
+	// the GitHub App. Only the latest attempt of a run this service recorded,
+	// and only if it failed; an attempt already re-run from here is refused.
+	// Every outcome, GitHub's refusals included, is kept in
+	// `maintainer_actions`. Limited per login (`ActionLimit`) besides the
+	// maintainer routes' own limit, and confirmed in the page before it's sent.
+	on POST("/maintainers/actions/rerun") (body: RerunRequest) -> Effect[HttpResult[RerunDone]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit, ActionLimit, AppAuth, GitHubHttp {
+		forMaintainer("\(m.identity)", (login) => rerunFailedJobs(login, body))
+	}
+
+	// Every repository the service has heard from (#53), for a maintainer:
+	// whether it is public, and whether `DASHBOARD_EXCLUDE` keeps it off the
+	// public pages, so the signed-in pages can mark the ones only maintainers
+	// see. Not `@cache`d, so it is sent `no-store`.
+	on GET("/maintainers/repositories") () -> Effect[HttpResult[List[ShownRepository]]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, Secrets, MaintainerLimit {
+		forMaintainer("\(m.identity)", (login) => shownRepositories())
+	}
+
+	on GET("/about") () -> Effect[HttpResult[String]] by v: Visitor {
+		Ok("github-hooks: POST GitHub App webhook deliveries to /github")
+	}
+
+	// The 50 most recent deliveries, across every repository.
+	on GET("/activity") () -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
+		// `select[Activity]` writes the column list from `Activity`'s fields. The
+		// annotation is load-bearing until bynk-lang/bynk#2957 is fixed: without
+		// it the emitted error type does not narrow on `Sql`/`Decode`.
+		let listed: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
+			"""
+			FROM deliveries
+			ORDER BY received_at DESC, rowid DESC
+			LIMIT 50
+			""",
+			[]
+		)
+		let Ok(list) = listed else match {
+			Err(Sql(e)) => {
+				let _ <- Logger.error("could not list activity: \(sqlError(e))")
+				ServerError("could not read recorded activity")
+			},
+			Err(Decode(e)) => {
+				let _ <- Logger.error("could not decode activity rows: \(jsonError(e))")
+				ServerError("recorded activity did not decode")
+			},
+		}
+		let _ <- Logger.info("\(reader.identity) listed activity")
+		Ok(list)
+	}
+
+	// The 50 most recent deliveries for one repository, `/activity/bynk-lang/bynk`.
+	on GET("/activity/:owner/:name") (
+		owner: String,
+		name: String
+	) -> Effect[HttpResult[List[Activity]]] by reader: Reader given Deliveries, Logger {
+		let listed: Result[List[Activity], SqlReadError] <- Deliveries.select[Activity](
+			"""
+			FROM deliveries
+			WHERE repo = ?1 COLLATE NOCASE
+			ORDER BY received_at DESC, rowid DESC
+			LIMIT 50
+			""",
+			[Text("\(owner)/\(name)")]
+		)
+		let Ok(list) = listed else match {
+			Err(Sql(e)) => {
+				let _ <- Logger.error("could not list \(owner)/\(name) activity: \(sqlError(e))")
+				ServerError("could not read recorded activity")
+			},
+			Err(Decode(e)) => {
+				let _ <- Logger.error(
+					"could not decode \(owner)/\(name) activity rows: \(jsonError(e))"
+				)
+				ServerError("recorded activity did not decode")
+			},
+		}
+		let _ <- Logger.info("\(reader.identity) listed \(owner)/\(name) activity")
+		Ok(list)
+	}
+
+	// One UTC day's activity, counted by repository, event and action.
+	on GET("/digest/:day") (
+		day: Day
+	) -> Effect[HttpResult[DayDigest]] by reader: Reader given Deliveries, Logger {
+		// Unreachable for an `IsoDate`; answered as a server error if the two
+		// calendar rules ever disagree, never as the caller's mistake.
+		let Some(range) = rangeOf(day) else {
+			let _ <- Logger.error("\(day) passed IsoDate but has no instant")
+			ServerError("could not read the day")
+		}
+		// `received_at` defaults to strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		// (0001_create_deliveries.sql), the same text `toIso()` writes down to the
+		// three-digit milliseconds, so the range compares as text, in time order,
+		// and uses the time index. The bound depends on the two formats matching:
+		// change either and the digest's day-boundary test should fail. It stays
+		// `all`, not `select[Tally]`: `deliveries` is a `count(*)`, not a column.
+		let Ok(rows) <- Deliveries.all(
+			"""
+			SELECT repo, event, action, count(*) AS deliveries
+			FROM deliveries
+			WHERE received_at >= ?1 AND received_at < ?2
+			  AND NOT (event = 'push' AND deleted IS 1)
+			GROUP BY repo, event, action
+			ORDER BY deliveries DESC, repo, event, action
+			""",
+			[Text(range.start.toIso()), Text(range.end.toIso())]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not count \(day): \(sqlError(e))")
+				ServerError("could not read recorded activity")
+			},
+		}
+		let Ok(tallies) = Json.decodeSql[List[Tally]](rows) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not decode the \(day) digest rows: \(jsonError(e))")
+				ServerError("the digest did not decode")
+			},
+		}
+		let _ <- Logger.info("\(reader.identity) read the \(day) digest")
+		Ok(digest(day, tallies))
+	}
+
+	// Phase 4 (#20): CI health over a window, public. Only repositories whose
+	// latest delivery says they are public appear (`repositories`), less any
+	// `DASHBOARD_EXCLUDE` names. Cached 30 seconds per URL, so heavy viewing
+	// doesn't become D1 reads. The window counts runs by when they completed.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/ci") (query: CiQuery, headers: RequestHeaders) -> Effect[HttpResult[CiMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsCi(query, false)
+	}
+
+	// What is running now, and each workflow's latest result on its
+	// repository's default branch. A run still "running" a day after it was
+	// queued lost its completed delivery and is left out. The default-branch
+	// state looks back 90 days, so a workflow quiet for longer drops out, and
+	// `red_since` is at most that old: the query stays bounded as runs pile up.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/ci/now") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[CiNow]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsCiNow(query, false)
+	}
+
+	// History for each workflow over the same window and filters as
+	// `/metrics/ci`: its latest `RECENT_RUNS` completed attempts, and its
+	// health day by day (UTC). Both read the `by_completion` index.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/ci/history") (query: CiQuery, headers: RequestHeaders) -> Effect[HttpResult[CiHistory]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsCiHistory(query, false)
+	}
+
+	// PR flow over a window (#26): pull requests merged or closed in it, from
+	// public repositories less `DASHBOARD_EXCLUDE`, which each query applies
+	// through its `shown` CTE. Cached and limited like the CI routes. `gone`
+	// pull requests count nowhere. The four reads run concurrently.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/prs") (query: PrQuery, headers: RequestHeaders) -> Effect[HttpResult[PrMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsPrs(query, false)
+	}
+
+	// Every open pull request in public repositories less
+	// `DASHBOARD_EXCLUDE`, longest waiting first, at most `MAX_OPEN_PULLS`:
+	// ready ones by when they last became ready (or opened, if that isn't
+	// known), then drafts. `queued` when its latest queue moment is an enqueue
+	// from the last `QUEUE_TIMEOUT`: a merge-queue run takes minutes, so an
+	// older one means its `dequeued` delivery was lost.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/prs/open") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[PrsOpen]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsPrsOpen(query, false)
+	}
+
+	// Issue flow over a window (#48): issues opened or closed in it, from
+	// public repositories less `DASHBOARD_EXCLUDE`, which each query applies
+	// through its `shown` CTE. Cached and limited like the other metrics
+	// routes. Tombstones (deleted, transferred) count nowhere. The four reads
+	// run concurrently: 0 the flow, 1 time to close by label, 2 the days, 3
+	// when closes began to be recorded.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/issues") (query: IssueQuery, headers: RequestHeaders) -> Effect[HttpResult[IssueMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsIssues(query, false)
+	}
+
+	// The open issues of public repositories less `DASHBOARD_EXCLUDE` (#48):
+	// each repository's backlog by age, read through `issues_open`, and the
+	// stale issues (by people, with no update for `ISSUE_STALE`), least
+	// recently updated first, at most `MAX_STALE_ISSUES` a repository. The two
+	// reads run concurrently.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/issues/open") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[IssuesOpen]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsIssuesOpen(query, false)
+	}
+
+	// Releases over a window (#36): each public repository (less
+	// `DASHBOARD_EXCLUDE`) with a final release, its cadence, how long merged
+	// pull requests by people waited for a release, what is waiting now, and its
+	// release workflow. Cached and limited like the CI routes. The two reads run
+	// concurrently: 0 the releases, 1 the release workflows.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/releases") (query: ReleaseQuery, headers: RequestHeaders) -> Effect[HttpResult[ReleaseMetrics]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsReleases(query, false)
+	}
+
+	// Each public repository's latest `MAX_RECENT_RELEASES` published releases
+	// (less `DASHBOARD_EXCLUDE`), newest first, pre-releases marked; drafts and
+	// deleted releases aren't shown.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/releases/recent") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[ReleasesRecent]] by v: Visitor given Deliveries, Logger, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsReleasesRecent(query, false)
+	}
+
+	// Runner wait over a window (#42): the figures the `runnerFigures` cron
+	// computed in the last hour, for public repositories less
+	// `DASHBOARD_EXCLUDE`, decided as the route reads. Before the first
+	// computation every list is empty and `computed_at` is `None`. Cached and
+	// limited like the other metrics routes.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/runners") (query: RunnerQuery, headers: RequestHeaders) -> Effect[HttpResult[RunnerMetrics]] by v: Visitor given Deliveries, Logger, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsRunners(query, false)
+	}
+
+	// What public repositories' jobs are waiting for now (#42), live from the
+	// `workflow_jobs_waiting` index: queued for a runner (in the last
+	// `JOB_QUEUE_TIMEOUT`; an older one lost its later deliveries), and held
+	// for a protected environment's approval, by runner label.
+	@cache(maxAge: 30.seconds, scope: public)
+	on GET("/metrics/runners/now") (query: NowQuery, headers: RequestHeaders) -> Effect[HttpResult[RunnersNow]] by v: Visitor given Deliveries, Logger, Clock, Secrets, MetricsLimit {
+		let allowed <- withinMetricsLimit(headers)
+		let true = allowed else {
+			TooManyRequests("too many metrics requests; try again in a minute")
+		}
+		metricsRunnersNow(query, false)
+	}
+
+	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
+	// records the delivery and answers; work done in response belongs elsewhere.
+	@raw(contentType: "application/json")
+	on POST("/github") (
+		headers: RequestHeaders,
+		body: Bytes
+	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot, Facts {
+		let Ok(d) = read(
+			headers.get("X-GitHub-Event"),
+			headers.get("X-GitHub-Delivery"),
+			body
+		) else match {
+			Err(why) => BadRequest(describe(why)),
+		}
+		// Only a conflict on the delivery id is a redelivery: it inserts nothing.
+		// Any other failure, including a constraint a later migration adds, is a
+		// 500, so GitHub can redeliver it.
+		let Ok(r) <- Deliveries.run(
+			"""
+			INSERT INTO deliveries (id, event, action, repo, sender, org, installation, deleted, size)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+			ON CONFLICT (id) DO NOTHING
+			""",
+			[
+				Text(d.id),
+				Text(d.event),
+				text(d.action),
+				text(d.repo),
+				text(d.sender),
+				text(d.org),
+				integer(d.installation),
+				boolean(d.deleted),
+				Integer(d.size),
+			]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error(
+					"could not record delivery \(d.id) (\(d.event)): \(sqlError(e))"
+				)
+				ServerError("could not record the delivery")
+			},
+		}
+		// Act after answering: GitHub waits at most 10 seconds for the reply.
+		// A redelivery reacts too, so a failed action is retried; one that
+		// worked is not repeated (see `Bot`).
+		~> Bot.react(d, body)
+		~> Facts.extract(d, body, r.changes > 0)
+		if r.changes == 0 {
+			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
+			Ok("duplicate")
+		} else {
+			let _ <- Logger.info("delivery \(d.id) (\(d.event))")
+			Accepted("recorded")
+		}
+	}
+}
