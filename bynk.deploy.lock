@@ -22,7 +22,7 @@ namespace_id = "702297304"
 deployed = true
 assets = [
     "/_assets/dashboard.d7c37ad151974dd4.css",
-    "/_assets/dashboard.f766dc0bdf3a1808.js",
+    "/_assets/dashboard.e1ba9db73170457a.js",
     "/_assets/issues.1d200534155554ef.js",
     "/_assets/prs.287739f3b00ab03b.js",
     "/_assets/releases.3894125963de2bd3.js",
