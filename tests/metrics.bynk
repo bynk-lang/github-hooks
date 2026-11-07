@@ -721,6 +721,41 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
 	expect again == first
+	// A live change that purges the public routes reaches the shared answer too.
+	let purged <- Deliveries.run(
+		"UPDATE edge_purges SET at = '2026-11-05T11:59:00.000Z' WHERE id = 1",
+		[]
+	)
+	expect purged is Ok(_)
+	let afterPurge <- api.POST(
+		"/maintainers/metrics/ci/now",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	let Ok(fresh) = afterPurge else {
+		expect false
+	}
+	expect !Json.encode(fresh).contains("bynk-lang/secret")
+	// An issue purge is the issue routes' own: it leaves the CI answer shared.
+	let running <- Deliveries.run(
+		"""
+		INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+		                           created_at, queued_at, started_at, completed_at, updated_at)
+		VALUES ('bynk-lang/secret', 999, 1, 'CI', '.github/workflows/ci.yml', 'main', 'abc', 'push', 'in_progress', NULL,
+		        '2026-11-05T11:58:00.000Z', '2026-11-05T11:58:00.000Z', '2026-11-05T11:58:30.000Z', NULL, '2026-11-05T11:58:30.000Z')
+		""",
+		[]
+	)
+	expect running is Ok(_)
+	let issuePurge <- Deliveries.run(
+		"UPDATE edge_purge_slots SET at = '2026-11-05T11:59:30.000Z' WHERE slot = 'issues'",
+		[]
+	)
+	expect issuePurge is Ok(_)
+	let stillShared <- api.POST(
+		"/maintainers/metrics/ci/now",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	expect stillShared == afterPurge
 	// Another query is its own answer, read afresh.
 	let narrowed <- api.POST("/maintainers/metrics/ci/now", NowQuery {
 		repo: Some("bynk-lang/secret"),
@@ -728,7 +763,8 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 	let Ok(n) = narrowed else {
 		expect false
 	}
-	expect !Json.encode(n).contains("bynk-lang/secret")
+	// Read afresh, so the new running run is there.
+	expect Json.encode(n).contains("bynk-lang/secret")
 	// A kept answer is no way past the membership check.
 	let leaver <- api.POST(
 		"/maintainers/metrics/ci/now",

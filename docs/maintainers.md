@@ -178,12 +178,18 @@ and those `DASHBOARD_EXCLUDE` keeps off the public pages.
   membership (a kept answer first).
 - **Shared for a minute:** a maintainer's figures are the same for every
   maintainer, so each twin's answer is kept in KV (`Tokens`, keys
-  `figures:<route>:<query as JSON>`) for `FIGURES_CACHE_SECONDS`, 60 seconds,
+  `figures:<purge>:<route>:<query as JSON>`) for `FIGURES_CACHE_SECONDS`, 60 seconds,
   KV's shortest expiry (`sharedFigures`). Every signed-in tab polling the
   same figures becomes one D1 read a minute between them. Only successes are
   kept, and the cache is asked only past the membership check, so a kept
-  answer never lets a leaver in. A live change doesn't clear it, so a
-  maintainer's figures can trail the public ones by up to a minute.
+  answer never lets a leaver in.
+- **Live, through the cache:** each key carries the route's purge
+  generation, when its last edge purge was claimed (`edge_purges.at`, or the
+  issue routes' own `edge_purge_slots` row). A live change that purges the
+  public routes moves the maintainers' figures to a fresh key too, so a
+  signed-in page's refetch after a live event reads afresh, as a public one
+  does at the edge. Older entries are never read again and expire. That costs
+  one primary-key read per request.
 - **Marking:** `GET /maintainers/repositories` says which repositories are
   public and which are excluded, so the signed-in pages (step 3) can mark the
   ones only maintainers see.

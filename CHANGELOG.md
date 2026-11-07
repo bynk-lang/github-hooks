@@ -55,8 +55,10 @@ All notable changes to github-hooks. The format follows
     up, as the feed carries only public repositories, and the freshness line
     says the rest are polled.
   - **Shared figures:** each twin's answer is kept in KV for 60 seconds
-    (`sharedFigures`), keyed by route and query, so every signed-in tab
-    shares one D1 read a minute. It's asked only past the membership check.
+    (`sharedFigures`), keyed by route, query and the route's last edge
+    purge, so every signed-in tab shares one D1 read a minute, and a live
+    change that purges the public routes reaches maintainers' pages too. It's
+    asked only past the membership check.
   - **A refused token** signs the page out, back to the public figures.
 - Phase 4, slice 6, step 2 (#53): the maintainers' figures.
   - **Eleven twins:** each public metrics route has a maintainer twin,
