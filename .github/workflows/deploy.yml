@@ -1,0 +1,253 @@
+# Deploy the Worker to production with bynk-deploy (#62).
+#
+# - A pull request gets a dry-run plan: what a deploy of it would change. It
+#   never authenticates, and reads no secrets.
+# - Pushing a `v*` tag deploys that commit, once the checks pass on it. The tag
+#   must be on `main`.
+# - A manual run deploys `main`. "Check only" lists which of the production
+#   environment's secrets are set (names only, never values) and deploys
+#   nothing. "Overwrite secrets" re-sets every name that has an Actions secret,
+#   after a rotation.
+#
+# The Worker's secrets live in the `production` environment, one Actions secret
+# per name. A deploy only sets a secret the Worker doesn't have yet (unless
+# overwriting), so a routine deploy changes none. Each name's line is written
+# only when its Actions secret is set: an unset Actions secret would otherwise
+# be `NAME=`, an empty value the driver would set. See docs/deploy.md.
+name: Deploy
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      check-only:
+        description: Only list which production secrets are set; deploy nothing
+        type: boolean
+        default: false
+      overwrite-secrets:
+        description: Overwrite the Worker's secrets with the Actions secrets (after a rotation)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One production deploy at a time, never cancelled halfway. Pull requests'
+# plans run per pull request, and a newer push replaces an older plan.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('deploy-plan-{0}', github.ref) || 'deploy-production' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    name: Plan (dry run)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: bynk-lang/bynk-deploy@20eebc8606e3298fbf0f38522e2f47a9482a9b4d # v2.1.0
+        with:
+          version-file: BYNK_VERSION
+          dry-run: "true"
+          plan-format: text
+
+  # The same checks as CI, on the commit being deployed. Repeated here rather
+  # than calling ci.yml, whose concurrency group would cancel a run on `main`.
+  # Named apart from CI's checks: on a pull request these jobs are skipped, and
+  # a skipped check of the same name could stand in for a required one.
+  test:
+    name: deploy checks / check, format and test
+    if: github.event_name != 'pull_request' && !inputs.check-only
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: bynk-lang/bynk-ci@5bb74c76051d513386506c41b9c2bbde5bef91c8 # v1
+        with:
+          version-file: BYNK_VERSION
+          source: .
+
+  smoke:
+    name: deploy checks
+    if: github.event_name != 'pull_request' && !inputs.check-only
+    uses: ./.github/workflows/smoke.yml
+
+  deploy:
+    name: Deploy to production
+    needs: [test, smoke]
+    # A check-only run skips the checks, so it doesn't wait on them.
+    if: >-
+      !cancelled() && github.event_name != 'pull_request'
+      && (inputs.check-only || (needs.test.result == 'success' && needs.smoke.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://github-hooks.bynk-lang.workers.dev/about
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Only `main`, or a tag on it, goes to production.
+      - name: Check what is being deployed
+        if: ${{ !inputs.check-only }}
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            git merge-base --is-ancestor HEAD origin/main \
+              || { echo "::error::Tag $REF_NAME isn't on main: tag a commit on main to deploy it."; exit 1; }
+          elif [ "$REF_NAME" != main ]; then
+            echo "::error::A manual deploy runs from main, not $REF_NAME."
+            exit 1
+          fi
+          echo "Deploying $REF_NAME ($(git rev-parse --short HEAD))"
+
+      # Each expected name, set or missing. The values never reach the shell:
+      # each variable is only "true" or "false".
+      - name: Check the production secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID != '' }}
+          APP_WEBHOOK_SECRET: ${{ secrets.APP_WEBHOOK_SECRET != '' }}
+          API_TOKEN_SECRET: ${{ secrets.API_TOKEN_SECRET != '' }}
+          MAINTAINER_TOKEN_SECRET: ${{ secrets.MAINTAINER_TOKEN_SECRET != '' }}
+          APP_CLIENT_ID: ${{ secrets.APP_CLIENT_ID != '' }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY != '' }}
+          APP_CLIENT_SECRET: ${{ secrets.APP_CLIENT_SECRET != '' }}
+          ACTION_REPOS: ${{ secrets.ACTION_REPOS != '' }}
+          DASHBOARD_EXCLUDE: ${{ secrets.DASHBOARD_EXCLUDE != '' }}
+          WELCOME_ASSOCIATIONS: ${{ secrets.WELCOME_ASSOCIATIONS != '' }}
+          BUMP_APP_ID: ${{ secrets.BUMP_APP_ID != '' }}
+          BUMP_APP_KEY: ${{ secrets.BUMP_APP_KEY != '' }}
+          # Each secret is one dotenv line, so a value with a line break would
+          # be cut short there: most likely a wrapped APP_PRIVATE_KEY.
+          MULTILINE: >-
+            ${{ contains(secrets.APP_WEBHOOK_SECRET, fromJSON('"\n"')) && 'APP_WEBHOOK_SECRET' || '' }}
+            ${{ contains(secrets.API_TOKEN_SECRET, fromJSON('"\n"')) && 'API_TOKEN_SECRET' || '' }}
+            ${{ contains(secrets.MAINTAINER_TOKEN_SECRET, fromJSON('"\n"')) && 'MAINTAINER_TOKEN_SECRET' || '' }}
+            ${{ contains(secrets.APP_CLIENT_ID, fromJSON('"\n"')) && 'APP_CLIENT_ID' || '' }}
+            ${{ contains(secrets.APP_PRIVATE_KEY, fromJSON('"\n"')) && 'APP_PRIVATE_KEY' || '' }}
+            ${{ contains(secrets.APP_CLIENT_SECRET, fromJSON('"\n"')) && 'APP_CLIENT_SECRET' || '' }}
+            ${{ contains(secrets.ACTION_REPOS, fromJSON('"\n"')) && 'ACTION_REPOS' || '' }}
+            ${{ contains(secrets.DASHBOARD_EXCLUDE, fromJSON('"\n"')) && 'DASHBOARD_EXCLUDE' || '' }}
+            ${{ contains(secrets.WELCOME_ASSOCIATIONS, fromJSON('"\n"')) && 'WELCOME_ASSOCIATIONS' || '' }}
+        run: |
+          row() { printf '| `%s` | %s | %s |\n' "$1" "$([ "$2" = true ] && echo set || echo missing)" "$3"; }
+          {
+            echo "### Production secrets"
+            echo
+            echo "| Name | | Needed for |"
+            echo "|---|---|---|"
+            row CLOUDFLARE_API_TOKEN "$CLOUDFLARE_API_TOKEN" "every deploy"
+            row CLOUDFLARE_ACCOUNT_ID "$CLOUDFLARE_ACCOUNT_ID" "every deploy"
+            row APP_WEBHOOK_SECRET "$APP_WEBHOOK_SECRET" "a Worker without it, and overwriting"
+            row API_TOKEN_SECRET "$API_TOKEN_SECRET" "a Worker without it, and overwriting"
+            row MAINTAINER_TOKEN_SECRET "$MAINTAINER_TOKEN_SECRET" "a Worker without it, and overwriting"
+            row APP_CLIENT_ID "$APP_CLIENT_ID" "a Worker without it, and overwriting"
+            row APP_PRIVATE_KEY "$APP_PRIVATE_KEY" "a Worker without it, and overwriting"
+            row APP_CLIENT_SECRET "$APP_CLIENT_SECRET" "a Worker without it, and overwriting"
+            row ACTION_REPOS "$ACTION_REPOS" "optional"
+            row DASHBOARD_EXCLUDE "$DASHBOARD_EXCLUDE" "optional"
+            row WELCOME_ASSOCIATIONS "$WELCOME_ASSOCIATIONS" "optional"
+            row BUMP_APP_ID "$BUMP_APP_ID" "the lock pull request (an organisation secret)"
+            row BUMP_APP_KEY "$BUMP_APP_KEY" "the lock pull request (an organisation secret)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          missing=""
+          [ "$CLOUDFLARE_API_TOKEN" = true ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ "$CLOUDFLARE_ACCOUNT_ID" = true ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          for name in APP_WEBHOOK_SECRET API_TOKEN_SECRET MAINTAINER_TOKEN_SECRET APP_CLIENT_ID APP_PRIVATE_KEY APP_CLIENT_SECRET; do
+            [ "${!name}" = true ] || echo "::warning::$name isn't set in the production environment: a deploy keeps the Worker's value, but can't set or overwrite it."
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Set${missing} in the production environment to deploy."
+            exit 1
+          fi
+          broken=$(echo $MULTILINE)
+          if [ -n "$broken" ]; then
+            echo "::error::Store each of these as one line, with no line breaks (for the key, base64 -w0): $broken"
+            exit 1
+          fi
+
+      # The bump App's token, so the action can open the pull request that
+      # commits a changed bynk.deploy.lock (GITHUB_TOKEN's pull requests start
+      # no workflows). Without it, the lock is kept as an artifact.
+      - name: Mint the lock pull request token
+        id: app-token
+        if: ${{ !inputs.check-only }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.BUMP_APP_ID }}
+          private-key: ${{ secrets.BUMP_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # Only values straight from `secrets.*`, so GitHub masks them in the log.
+      # A line is empty when its Actions secret isn't set, and the driver skips
+      # empty lines.
+      - name: Deploy
+        id: deploy
+        if: ${{ !inputs.check-only }}
+        uses: bynk-lang/bynk-deploy@20eebc8606e3298fbf0f38522e2f47a9482a9b4d # v2.1.0
+        with:
+          version-file: BYNK_VERSION
+          cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          cloudflare-account-id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          force-secrets: ${{ inputs.overwrite-secrets && 'true' || 'false' }}
+          lock-pr-token: ${{ steps.app-token.outputs.token }}
+          secrets: |
+            ${{ secrets.APP_WEBHOOK_SECRET != '' && format('APP_WEBHOOK_SECRET={0}', secrets.APP_WEBHOOK_SECRET) || '' }}
+            ${{ secrets.API_TOKEN_SECRET != '' && format('API_TOKEN_SECRET={0}', secrets.API_TOKEN_SECRET) || '' }}
+            ${{ secrets.MAINTAINER_TOKEN_SECRET != '' && format('MAINTAINER_TOKEN_SECRET={0}', secrets.MAINTAINER_TOKEN_SECRET) || '' }}
+            ${{ secrets.APP_CLIENT_ID != '' && format('APP_CLIENT_ID={0}', secrets.APP_CLIENT_ID) || '' }}
+            ${{ secrets.APP_PRIVATE_KEY != '' && format('APP_PRIVATE_KEY={0}', secrets.APP_PRIVATE_KEY) || '' }}
+            ${{ secrets.APP_CLIENT_SECRET != '' && format('APP_CLIENT_SECRET={0}', secrets.APP_CLIENT_SECRET) || '' }}
+            ${{ secrets.ACTION_REPOS != '' && format('ACTION_REPOS={0}', secrets.ACTION_REPOS) || '' }}
+            ${{ secrets.DASHBOARD_EXCLUDE != '' && format('DASHBOARD_EXCLUDE={0}', secrets.DASHBOARD_EXCLUDE) || '' }}
+            ${{ secrets.WELCOME_ASSOCIATIONS != '' && format('WELCOME_ASSOCIATIONS={0}', secrets.WELCOME_ASSOCIATIONS) || '' }}
+
+      # A tag's deploy can't open the lock pull request (a tag isn't a branch
+      # to open one against), and neither can a run without the App's token:
+      # keep the new lock to commit by hand.
+      - name: Keep the changed bynk.deploy.lock
+        if: always() && steps.deploy.outputs.lock-changed == 'true' && steps.deploy.outputs.lock-pr == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bynk.deploy.lock
+          path: |
+            bynk.deploy.lock
+            bynk.schema.lock
+
+      # The live Worker answers: its root, and public figures read from D1.
+      # The metrics routes are edge-cached per URL, so the figures ask for a
+      # branch no run has, unique to this run: never a cached copy from the
+      # previous version, always the new Worker reading D1.
+      - name: Check the live Worker
+        if: ${{ !inputs.check-only }}
+        env:
+          BASE: https://github-hooks.bynk-lang.workers.dev
+          UNIQUE: deploy-check-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          fail=0
+          for path in /about "/metrics/ci?days=7&branch=$UNIQUE"; do
+            status=000
+            for attempt in 1 2 3 4 5; do
+              status=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE$path" || echo 000)
+              [ "$status" = 200 ] && break
+              sleep $((attempt * 3))
+            done
+            echo "$path: $status"
+            [ "$status" = 200 ] || { echo "::error::$BASE$path answered $status after the deploy"; fail=1; }
+          done
+          exit $fail
