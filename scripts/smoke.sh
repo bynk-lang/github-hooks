@@ -150,6 +150,8 @@ if [ -n "${MAINTAINER_TOKEN_SECRET:-}" ]; then
   check 401 "$(mpost /maintainers/metrics/ci)" "the maintainer CI figures without a token are refused"
   check 401 "$(mpost /maintainers/metrics/prs "$RTOKEN")" "the maintainer PR figures refuse a reader's token"
   check 503 "$(mpost /maintainers/metrics/issues "$MTOKEN")" "a maintainer token reaches the figures' membership check"
+  get 401 "what's yours needs a maintainer's token" /maintainers/mine "$RTOKEN"
+  get 503 "a maintainer token reaches what's theirs, past the membership check" /maintainers/mine "$MTOKEN"
   stored=$(curl -s -o /dev/null -D - -H "Authorization: Bearer $MTOKEN" "$BASE/maintainers/repositories" \
     | tr -d '\r' | awk -F': ' 'tolower($1) == "cache-control" { print $2 }') || stored=none
   check no-store "$stored" "the maintainers' repository list is never cached"

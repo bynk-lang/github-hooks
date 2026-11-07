@@ -13,6 +13,13 @@ type PullDelivery = {
 	pull_request: PullPayload,
 	repository: RepoRef,
 	reason: Option[String],
+	requested_reviewer: Option[UserRef] = None,
+	requested_team: Option[TeamRef] = None,
+}
+
+--- A team as a review request names it.
+type TeamRef = {
+	slug: String,
 }
 
 ---
@@ -29,6 +36,7 @@ under the name GitHub uses now (after any rename).
 ---
 type BranchRef = {
 	ref: String,
+	sha: Option[String] = None,
 	repo: Option[RepoRef],
 }
 
@@ -53,6 +61,8 @@ type PullPayload = {
 	additions: Option[Int],
 	deletions: Option[Int],
 	changed_files: Option[Int],
+	requested_reviewers: Option[List[UserRef]] = None,
+	requested_teams: Option[List[TeamRef]] = None,
 }
 
 ---
@@ -84,6 +94,14 @@ type PullFact = {
 	changedFiles: Option[Int],
 	updatedAt: String,
 	reason: Option[String],
+	--- The head commit (#53), for the PR's CI.
+	headSha: Option[String] = None,
+	--- Whose review it waits on, as this delivery says: the whole set, when it says.
+	reviewers: Option[List[String]] = None,
+	teams: Option[List[String]] = None,
+	--- The one request a `review_requested` or `review_request_removed` names.
+	requestedUser: Option[String] = None,
+	requestedTeam: Option[String] = None,
 }
 
 ---
@@ -94,7 +112,14 @@ fn pullOf(body: Bytes) -> Result[PullFact, String] {
 	let Ok(p) = Json.decode[PullDelivery](text) else match {
 		Err(e) => Err("the payload did not decode: \(e.kind) at \(e.path): \(e.message)"),
 	}
-	pullFact(p.repository.full_name, p.action, p.reason, p.pull_request)
+	let Ok(f) = pullFact(p.repository.full_name, p.action, p.reason, p.pull_request) else match {
+		Err(why) => Err(why),
+	}
+	Ok(PullFact {
+		...f,
+		requestedUser: p.requested_reviewer.map((u) => u.login),
+		requestedTeam: p.requested_team.map((t) => t.slug),
+	})
 }
 
 ---
@@ -143,6 +168,11 @@ fn pullFact(
 		changedFiles: pr.changed_files,
 		updatedAt: updated,
 		reason: reason,
+		headSha: pr.head.sha,
+		reviewers: pr.requested_reviewers.map((us) => us.map((u) => u.login)),
+		teams: pr.requested_teams.map((ts) => ts.map((t) => t.slug)),
+		requestedUser: None,
+		requestedTeam: None,
 	})
 }
 

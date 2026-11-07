@@ -343,3 +343,133 @@ case "the merge commit is kept only once the pull request has merged" {
 	let kept <- Deliveries.first("SELECT merge_commit_sha FROM pull_requests", [])
 	expect kept == Ok(Some("{\"merge_commit_sha\":\"5c1ea97f111ced1e27160467b9268efeedf216a7\"}"))
 }
+
+--- PR #25 open at `updated`, after `action`, asking `users` and `teams` (logins and slugs) to review.
+fn requesting(
+	action: String,
+	extra: String,
+	updated: String,
+	users: List[String],
+	teams: List[String]
+) -> Bytes {
+	let us = users.map((u) => "{\"login\": \"\(u)\", \"type\": \"User\"}")
+	let ts = teams.map((t) => "{\"slug\": \"\(t)\"}")
+	Bytes.fromUtf8(pullAt(action, extra, "open", false, updated, "null", "null")
+		.decodeUtf8()
+		.getOrElse("")
+		.replace("\"requested_reviewers\": []", "\"requested_reviewers\": [\(joined(us, ", "))]")
+		.replace("\"requested_teams\": []", "\"requested_teams\": [\(joined(ts, ", "))]"))
+}
+
+--- The query for PR #25's review requests: "login" or "@slug", sorted and joined with commas, or null for none.
+fn requestsSql() -> String {
+	"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)"
+}
+
+--- `requestsSql`'s row for `names`.
+fn requested(names: String) -> Result[Option[String], SqlError] {
+	if names == "" { Ok(Some("{\"who\":null}")) } else { Ok(Some("{\"who\":\"\(names)\"}")) }
+}
+
+case "a pull request records its head commit and whose review it waits on" {
+	let r <- api.POST(
+		"/github",
+		headers("pull_request", "rq-1"),
+		requesting(
+			"review_requested",
+			", \"requested_reviewer\": {\"login\": \"b-person\", \"type\": \"User\"}",
+			"2026-11-05T09:00:00Z",
+			["a-person", "b-person"],
+			["core"]
+		)
+	) by GitHub
+	expect r is Accepted(_)
+	let sha <- Deliveries.first("SELECT head_sha FROM pull_requests WHERE number = 25", [])
+	expect sha == Ok(Some("{\"head_sha\":\"b65fe31d2f057a5af17713d14e71dae5b28fd600\"}"))
+	let first <- Deliveries.first(requestsSql(), [])
+	expect first == requested("@core,a-person,b-person")
+}
+
+case "requests made in the same second combine, and a removal or a review takes one off" {
+	// Two requests in one second: each delivery lists the set at its moment,
+	// and they may arrive in either order. The tie never replaces the set;
+	// each adds the one it names.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-2"),
+		requesting(
+			"review_requested",
+			", \"requested_reviewer\": {\"login\": \"c-person\", \"type\": \"User\"}",
+			"2026-11-05T09:00:00Z",
+			["a-person", "c-person"],
+			[]
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-1"),
+		requesting(
+			"review_requested",
+			", \"requested_reviewer\": {\"login\": \"a-person\", \"type\": \"User\"}",
+			"2026-11-05T09:00:00Z",
+			["a-person"],
+			[]
+		)
+	) by GitHub
+	let both <- Deliveries.first(requestsSql(), [])
+	expect both == requested("a-person,c-person")
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-3"),
+		requesting(
+			"review_request_removed",
+			", \"requested_team\": {\"slug\": \"core\"}",
+			"2026-11-05T09:01:00Z",
+			["a-person", "c-person"],
+			[]
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-4"),
+		requesting(
+			"review_request_removed",
+			", \"requested_reviewer\": {\"login\": \"c-person\", \"type\": \"User\"}",
+			"2026-11-05T09:02:00Z",
+			["a-person"],
+			[]
+		)
+	) by GitHub
+	let removed <- Deliveries.first(requestsSql(), [])
+	expect removed == requested("a-person")
+	// Reviewing satisfies the request, as GitHub has it.
+	let reviewed = Bytes.fromUtf8(review.replace(
+		"\"login\": \"accuser\"",
+		"\"login\": \"A-Person\""
+	))
+	let _ <- api.POST("/github", headers("pull_request_review", "rv-9"), reviewed) by GitHub
+	let after <- Deliveries.first(requestsSql(), [])
+	expect after == requested("")
+}
+
+case "a strictly newer delivery's set replaces the requests, and an older one changes nothing" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-5"),
+		requesting("edited", "", "2026-11-05T09:05:00Z", ["a-person", "b-person"], ["core"])
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-6"),
+		requesting("edited", "", "2026-11-05T09:01:00Z", ["z-late"], [])
+	) by GitHub
+	let kept <- Deliveries.first(requestsSql(), [])
+	expect kept == requested("@core,a-person,b-person")
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rq-7"),
+		requesting("edited", "", "2026-11-05T09:10:00Z", [], [])
+	) by GitHub
+	let cleared <- Deliveries.first(requestsSql(), [])
+	expect cleared == requested("")
+}

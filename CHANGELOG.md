@@ -43,6 +43,19 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 6, step 4 (#53): the per-person view.
+  - **`GET /maintainers/mine`:** what is the signed-in maintainer's to act
+    on, across every repository: their open pull requests with stage and CI
+    on the head commit, pull requests waiting on their review, their open
+    issues (stale first), and their merges waiting to ship.
+  - **Recorded** (migration `0017`): each pull request's head commit
+    (`head_sha`), and whose review it waits on
+    (`pull_request_review_requests`). A strictly newer delivery replaces the
+    set, `review_requested` and `review_request_removed` add or remove one,
+    and a submitted review takes its reviewer's request off.
+  - **The pages:** each signed-in page shows its own part under *Yours*. CI
+    health shows failing pull requests; PR flow shows open ones and review
+    requests; issues and releases show theirs.
 - Phase 4, slice 6, step 3 (#53): the signed-in pages.
   - **Figures:** signed in, the four dashboards read the maintainer twins
     (`window.bynkMetrics` in `signin.js`, which now loads first), so they
