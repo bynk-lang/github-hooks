@@ -6,40 +6,13 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
-### Changed
+## [0.2.0] - 2026-11-07
 
-- Enrolled in the bynk-lang Bynk canary. The Bynk version lives in
-  `BYNK_VERSION`, which CI reads through the org's `bynk-ci` and `setup-bynk`
-  actions (replacing the local install action and its hand-pinned SHA-256;
-  the archive is now checked against the release's `SHA256SUMS`). The smoke
-  job is a callable workflow, `smoke.yml`. `bynk-canary.yml` runs the checks,
-  the smoke and live-feed checks, and a deploy dry run against each new Bynk
-  release, keeps a `canary` issue open while they fail, and proposes moving
-  `BYNK_VERSION` once one passes.
-- Built and tested with Bynk v0.510.2, moved by the canary's first bump
-  (#34). The open-PR sync tests build typed `PullPayload` values again, now
-  that a suite helper may name a commons type (bynk-lang/bynk#2947); each case
-  encodes them, as `Json.encode` in a helper still fails (bynk-lang/bynk#2990).
-  `Json.encode` writes `Option` tagged, not as GitHub does (bynk-lang/bynk#2991),
-  so a new case sends GitHub's own REST JSON (plain values, `null`s, a deleted
-  fork's `null` repository) to pin the wire format.
-- Built and tested with Bynk v0.508.4 (was v0.492.1). `Bot.react` now takes
-  the `Delivery` itself instead of reading it again from its parts, now that a
-  capability may take a commons type (bynk-lang/bynk#2886). The read API's
-  token refusals are tested for forged and expired tokens too (`by Forged`,
-  `by Expired`).
-- **The read API's JSON is plain** (breaking for any client of the tagged
-  form): an optional field is its value or `null`, so
-  `"action": {"kind": "Some", "value": "opened"}` is now `"action": "opened"`
-  and `"deleted": {"kind": "None"}` is `"deleted": null`
-  (`json { options: plain }`, bynk-lang/bynk#2858). Bynk clients read both.
-- A digest day is an `IsoDate`, so a date that doesn't exist (`2026-02-30`) is
-  refused at the boundary like any other bad `:day`, not by the handler.
-- The activity routes read with `select[Activity]`, which writes the column
-  list from the row type.
-- Read API tokens are minted with `bynk token Reader --sub <name>`;
-  `scripts/token.sh` is gone. Its default lifetime was 30 days, `bynk token`'s
-  is an hour: pass `--lifetime 30d` for the old one.
+Phases 2 to 4: the read API, daily digest and retention; the App acting on
+events (welcoming first-time contributors); and the public dashboard of
+repository health, with CI, pull request flow, releases, runner wait and issue
+response, and the maintainers' view behind GitHub sign-in. Deploys now run from
+GitHub Actions.
 
 ### Added
 
@@ -415,6 +388,40 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- Enrolled in the bynk-lang Bynk canary. The Bynk version lives in
+  `BYNK_VERSION`, which CI reads through the org's `bynk-ci` and `setup-bynk`
+  actions (replacing the local install action and its hand-pinned SHA-256;
+  the archive is now checked against the release's `SHA256SUMS`). The smoke
+  job is a callable workflow, `smoke.yml`. `bynk-canary.yml` runs the checks,
+  the smoke and live-feed checks, and a deploy dry run against each new Bynk
+  release, keeps a `canary` issue open while they fail, and proposes moving
+  `BYNK_VERSION` once one passes.
+- Built and tested with Bynk v0.510.34 (v0.1.0: v0.492.1), kept current by
+  the canary. The moves made room for:
+  - **`Bot.react` takes the `Delivery`** itself instead of reading it again
+    from its parts, now that a capability may take a commons type
+    (bynk-lang/bynk#2886).
+  - **Typed `PullPayload` values** in the open-PR sync tests, now that a suite
+    helper may name a commons type (bynk-lang/bynk#2947). Each case encodes
+    them, as `Json.encode` in a helper still fails (bynk-lang/bynk#2990).
+    `Json.encode` writes `Option` tagged, not as GitHub does
+    (bynk-lang/bynk#2991), so a new case sends GitHub's own REST JSON (plain
+    values, `null`s, a deleted fork's `null` repository) to pin the wire
+    format.
+  - **Forged and expired tokens** in the read API's refusal tests (`by
+    Forged`, `by Expired`).
+- **The read API's JSON is plain** (breaking for any client of the tagged
+  form): an optional field is its value or `null`, so
+  `"action": {"kind": "Some", "value": "opened"}` is now `"action": "opened"`
+  and `"deleted": {"kind": "None"}` is `"deleted": null`
+  (`json { options: plain }`, bynk-lang/bynk#2858). Bynk clients read both.
+- A digest day is an `IsoDate`, so a date that doesn't exist (`2026-02-30`) is
+  refused at the boundary like any other bad `:day`, not by the handler.
+- The activity routes read with `select[Activity]`, which writes the column
+  list from the row type.
+- Read API tokens are minted with `bynk token Reader --sub <name>`;
+  `scripts/token.sh` is gone. Its default lifetime was 30 days, `bynk token`'s
+  is an hour: pass `--lifetime 30d` for the old one.
 - The digest's day handling uses `Instant.fromIso`, which already knows which
   dates exist, and queries the exact range from the day's first instant to the
   next day's (`start + 1.days`). This replaces a hand-written leap-year check
@@ -506,5 +513,6 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bynk-lang/github-hooks/releases/tag/v0.1.0
