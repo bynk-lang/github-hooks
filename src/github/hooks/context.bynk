@@ -1,0 +1,136 @@
+context github.hooks
+
+uses github.events
+uses github.activity
+uses github.app
+uses github.welcome
+uses github.runs
+uses github.metrics
+uses github.pulls
+uses github.releases
+uses github.jobs
+uses github.issues
+uses github.maintainers
+consumes bynk { Logger, Secrets, Clock, Fetch }
+consumes bynk.crypto { Crypto }
+consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
+
+---
+Every delivery this service has accepted, one row each, keyed by GitHub's
+delivery id. The key is what makes a redelivery harmless.
+---
+capability Deliveries = D1
+
+---
+Installation tokens, cached for `TOKEN_CACHE_SECONDS` so a burst of deliveries
+mints one token, not one each. Keyed `installation:<id>`. A token here is a
+credential: it expires within the hour and is never logged.
+---
+capability Tokens = Kv
+
+---
+The CI health page (#20, step 3): its template, with the stylesheet and script
+it loads. Those two are content-hashed, so each deploy's page loads its own
+and browsers may cache them for good.
+---
+embed dashboardTemplate = "embeds/dashboard.html"
+
+asset dashboardCss = "assets/dashboard.css"
+
+asset dashboardJs = "assets/dashboard.js"
+
+---
+The PR flow page (#26, step 4): its template and script. It shares the CI
+page's stylesheet, so both read as one site.
+---
+embed prsTemplate = "embeds/prs.html"
+
+asset prsJs = "assets/prs.js"
+
+--- The releases page (#36, step 4): its template and script, with the same stylesheet.
+embed releasesTemplate = "embeds/releases.html"
+
+asset releasesJs = "assets/releases.js"
+
+--- The issues page (#48, step 4): its template and script, with the same stylesheet.
+embed issuesTemplate = "embeds/issues.html"
+
+asset issuesJs = "assets/issues.js"
+
+---
+Signing maintainers in (#53): the script every page loads for the sign-in
+link, and the page GitHub returns to.
+---
+asset signinJs = "assets/signin.js"
+
+embed callbackTemplate = "embeds/callback.html"
+
+---
+The public metrics routes' per-address limit: 60 uncached requests a minute
+is ample for a page polling every 30 seconds, and bounds what anyone can make
+D1 read by varying the query string past the cache.
+---
+capability MetricsLimit = RateLimit @limit(60) @period(60.seconds)
+
+---
+The maintainers' figures' per-login limit (#53): they skip the edge cache, so
+every request is a D1 read. 60 a minute is several signed-in tabs polling, and
+bounds what one person's tabs (or a runaway one) can put on D1, where webhook
+writes queue behind reads. Shared by every route `forMaintainer` guards.
+---
+capability MaintainerLimit = RateLimit @limit(60) @period(60.seconds)
+
+---
+Maintainers' actions' per-login limit (#53, step 5): each is a change on
+GitHub, so far fewer than the figures' reads. 10 a minute is a burst of
+re-runs after a bad night, and bounds a runaway page.
+---
+capability ActionLimit = RateLimit @limit(10) @period(60.seconds)
+
+---
+Cloudflare's edge cache for this Worker. Declaring it turns Workers Cache on,
+so the public metrics routes' `@cache(scope: public)` answers are kept at the
+edge for 30 seconds and served without running the Worker, and heavy viewing
+doesn't become D1 reads. Every other response is sent `no-store`. A live
+change purges the routes it affects (see `purgeFor`), so pages can refetch at once.
+Every `@cache` route here is served `by v: Visitor`: a cached answer is
+shared with every caller.
+---
+capability Edge = EdgeCache
+
+---
+The `bynk-lang` GitHub App. GitHub signs every delivery with HMAC-SHA256 of the
+raw body under the App's webhook secret and sends it as
+`X-Hub-Signature-256: sha256=<hex>`. The compiler generates the check: it runs
+before the handler, compares in constant time, and answers `401` to anything
+unsigned or forged.
+
+GitHub signs no timestamp, so there is no replay window here. A replayed
+delivery carries a delivery id we have already recorded, and is acknowledged
+without being recorded twice.
+---
+actor GitHub { auth = Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-Signature-256") }
+
+---
+Who may read recorded activity: a caller presenting a JWT signed (HS256) with
+`API_TOKEN_SECRET`. The compiler generates the check, including `exp` and
+`nbf`, and answers `401` to a missing, forged or expired token.
+`bynk token Reader --sub <name>` mints one. The token's `sub` names the reader, for logs.
+---
+actor Reader { auth = Bearer(secret = "API_TOKEN_SECRET"), identity = ReaderId }
+
+---
+A bynk-lang maintainer, signed in with GitHub (#53). The Worker issues the
+token itself once GitHub has said who signed in and that they belong to the
+organisation: an HS256 JWT signed with `MAINTAINER_TOKEN_SECRET`, whose `sub`
+is their GitHub login. The compiler generates the check, including `exp` and
+`nbf`. Whether they still belong to the organisation is checked again by the
+routes, as a token outlives a membership. `bynk token Maintainer --sub
+<login>` mints one for testing.
+---
+actor Maintainer { auth = Bearer(secret = "MAINTAINER_TOKEN_SECRET"), identity = MaintainerId }
+
+---
+A reader's name, from their token's `sub`.
+---
+type ReaderId = String where NonEmpty

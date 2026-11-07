@@ -1,0 +1,160 @@
+context github.hooks
+
+// `POST /maintainers/actions/rerun`'s work, for `login`.
+fn rerunFailedJobs(login: String, r: RerunRequest) -> Effect[HttpResult[RerunDone]] given Deliveries, Logger, Clock, ActionLimit, AppAuth, GitHubHttp {
+	let allowed <- ActionLimit.allow("action:\(login.toLower())")
+	let true = allowed else { TooManyRequests("too many actions; try again in a minute") }
+	let found <- Deliveries.first(
+		"""
+		SELECT w.repo, w.attempt, w.status, w.conclusion,
+		  (SELECT d.installation FROM deliveries d
+		   WHERE d.repo = w.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		   ORDER BY d.received_at DESC LIMIT 1) AS installation,
+		  EXISTS (SELECT 1 FROM maintainer_actions a
+		          WHERE a.repo = w.repo AND a.run_id = w.run_id AND a.attempt = w.attempt AND a.claimed = 1) AS rerun
+		FROM workflow_runs w
+		WHERE w.repo = ?1 COLLATE NOCASE AND w.run_id = ?2
+		ORDER BY w.attempt DESC LIMIT 1
+		""",
+		[Text(r.repo), Integer(r.run_id)]
+	)
+	let Ok(Some(row)) = found else match {
+		Ok(None) => NotFound,
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not find \(r.repo) run \(r.run_id) to re-run: \(sqlError(e))"
+			)
+			ServerError("could not read the run")
+		},
+	}
+	let Ok(run) = Json.decodeSql[RunToRerun](row) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode \(r.repo) run \(r.run_id): \(jsonError(e))")
+			ServerError("could not read the run")
+		},
+	}
+	let failed = run.status == "completed"
+		&& (run.conclusion == Some("failure")
+			|| run.conclusion == Some("timed_out")
+			|| run.conclusion == Some("startup_failure"))
+	let true = failed else {
+		Conflict(
+			"attempt \(run.attempt) of run \(r.run_id) hasn't failed, so there are no failed jobs to re-run"
+		)
+	}
+	let true = run.rerun == 0 else {
+		Conflict("attempt \(run.attempt) of run \(r.run_id) has already been re-run")
+	}
+	let Some(installation) = run.installation else {
+		ServiceUnavailable("no installation of the App has delivered for \(run.repo)")
+	}
+	// Claim the attempt before asking GitHub: two requests close together
+	// (a double click, two tabs, two maintainers) can both pass the check
+	// above, but only one claim is kept (`maintainer_actions_claimed`), so
+	// only one reaches GitHub. A refusal gives the claim up, so it can be
+	// tried again.
+	let claimedAt <- Clock.now()
+	let claim <- Deliveries.run(
+		"""
+		INSERT OR IGNORE INTO maintainer_actions (login, action, repo, run_id, attempt, at, status, outcome, claimed)
+		VALUES (?1, 'rerun-failed-jobs', ?2, ?3, ?4, ?5, NULL, 'pending', 1)
+		""",
+		[
+			Text(login),
+			Text(run.repo),
+			Integer(r.run_id),
+			Integer(run.attempt),
+			Text(claimedAt.toIso()),
+		]
+	)
+	let Ok(claimed) = claim else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not claim \(run.repo) run \(r.run_id) for a re-run: \(sqlError(e))"
+			)
+			ServerError("could not record the re-run; nothing was asked of GitHub")
+		},
+	}
+	let true = claimed.changes > 0 else {
+		Conflict("attempt \(run.attempt) of run \(r.run_id) is already being re-run")
+	}
+	let url = "https://api.github.com/repos/\(run.repo)/actions/runs/\(r.run_id)/rerun-failed-jobs"
+	let sent <- asApp(installation, (token) => GitHubHttp.post(token, url, "{}"))
+	let now <- Clock.now()
+	let answer = match sent {
+		Ok(res) => if res.status == 201 {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: "re-run requested",
+			}
+		} else {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: refusal(res.status, res.body),
+			}
+		},
+		Err(why) => ActionOutcome {
+			status: None,
+			outcome: why,
+		},
+	}
+	let status = answer.status
+	let outcome = answer.outcome
+	// GitHub's answer completes the claim: kept for a success, given up for
+	// a refusal, so the attempt can be asked for again.
+	let kept <- Deliveries.run(
+		"""
+		UPDATE maintainer_actions SET at = ?4, status = ?5, outcome = ?6, claimed = ?7
+		WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND claimed = 1 AND outcome = 'pending'
+		""",
+		[
+			Text(run.repo),
+			Integer(r.run_id),
+			Integer(run.attempt),
+			Text(now.toIso()),
+			integer(status),
+			Text(outcome),
+			Boolean(status == Some(201)),
+		]
+	)
+	let _ <- match kept {
+		Ok(_) => Effect.pure(()),
+		Err(e) => Logger.error(
+			"could not record \(login)'s re-run of \(run.repo) run \(r.run_id): \(sqlError(e))"
+		),
+	}
+	let _ <- Logger.info(
+		"\(login) asked to re-run \(run.repo) run \(r.run_id) attempt \(run.attempt): \(outcome)"
+	)
+	match status {
+		Some(201) => Ok(RerunDone {
+			repo: run.repo,
+			run_id: r.run_id,
+			attempt: run.attempt,
+			message: "Re-running the failed jobs of run \(r.run_id)",
+		}),
+		Some(403) => BadGateway(
+			"GitHub refused the re-run (does the App have Actions: Read and write?): \(outcome)"
+		),
+		Some(_) => BadGateway("GitHub refused the re-run: \(outcome)"),
+		None => BadGateway("the App couldn't ask GitHub to re-run it; the Worker's log says why"),
+	}
+}
+
+// The run `rerunFailedJobs` was asked about: its latest attempt, the
+// installation to act through, and whether that attempt was re-run already.
+type RunToRerun = {
+	repo: String,
+	attempt: Int,
+	status: String,
+	conclusion: Option[String],
+	installation: Option[Int],
+	rerun: Int,
+}
+
+// What GitHub answered an action: its HTTP status (none when it couldn't be
+// reached), and why, in words.
+type ActionOutcome = {
+	status: Option[Int],
+	outcome: String,
+}

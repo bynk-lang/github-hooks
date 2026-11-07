@@ -1,0 +1,282 @@
+context github.hooks
+
+// Records a tag a push delivery pushed (#36), so the release workflow's runs
+// can be told from its runs on branches. The first push of a tag is kept.
+fn recordTag(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Some(t) = tagOf(body) else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO tags (repo, tag, pushed_at)
+		SELECT ?1, ?2, received_at FROM deliveries WHERE id = ?3
+		ON CONFLICT (repo, tag) DO NOTHING
+		""",
+		[Text(t.repo), Text(t.tag), Text(d.id)]
+	) else match {
+		Err(e) => Logger.error("could not record tag \(t.repo) \(t.tag): \(sqlError(e))"),
+	}
+	Effect.pure(())
+}
+
+// Records a release (#36). A `deleted` delivery marks the row deleted (kept,
+// so lead times don't shift, but not shown); any other creates or refreshes
+// it, and one that publishes a final release matches what it shipped.
+fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, GitHubApi {
+	let Ok(r) = releaseOf(body) else match {
+		Err(why) => Logger.error("could not read release from \(d.id): \(why)"),
+	}
+	let saved <- Deliveries.batch(
+		[
+			if r.action == "deleted" {
+				SqlStatement {
+					sql: "UPDATE releases SET deleted_at = (SELECT received_at FROM deliveries WHERE id = ?3) WHERE repo = ?1 AND tag = ?2",
+					params: [Text(r.repo), Text(r.tag), Text(d.id)],
+				}
+			} else {
+				releaseStatement(r)
+			},
+		]
+	)
+	let Ok(_) = saved else match {
+		Err(e) => Logger.error("could not record release \(r.repo) \(r.tag): \(sqlError(e))"),
+	}
+	// GitHub sends `released` for a final release as it is published (alongside
+	// `published`) and for a pre-release made final, so matching on it alone
+	// matches each final release once.
+	let true = r.action == "released" && isFinal(r) else { Effect.pure(()) }
+	let Some(installation) = d.installation else {
+		Logger.warn(
+			"cannot match \(r.repo) \(r.tag) to pull requests: \(d.id) names no installation"
+		)
+	}
+	let Ok(_) <- shipRelease(installation, r) else match {
+		Err(why) => Logger.error("could not match \(r.repo) \(r.tag) to pull requests: \(why)"),
+	}
+	Effect.pure(())
+}
+
+// Records a release, then says whether open pages should hear of it: when
+// what they show has settled, on the delivery's first arrival only, not for a
+// draft (which isn't shown), and only for a repository the public pages may
+// show. A final release is told on `released`, after its matching, so a
+// refetch sees what it shipped; GitHub's `created` and `published` for it
+// arrive alongside, before the matching has finished, and aren't told. A
+// pre-release, which ships nothing, is told on `prereleased`, and any release
+// on `deleted`.
+fn releaseChanged(
+	d: Delivery,
+	body: Bytes,
+	fresh: Bool
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets, GitHubApi {
+	let nothing: Option[LiveEvent] = None
+	let _ <- recordRelease(d, body)
+	let true = fresh else { Effect.pure(nothing) }
+	let Ok(r) = releaseOf(body) else { Effect.pure(nothing) }
+	let settled = r.action == "released" || r.action == "prereleased" || r.action == "deleted"
+	let true = settled && !r.draft else { Effect.pure(nothing) }
+	let shown <- shownLive(r.repo)
+	let true = shown else { Effect.pure(nothing) }
+	Effect.pure(Some(releaseEventOf(r)))
+}
+
+// Matches a final release a delivery published: finds the final release
+// before it, then matches what it shipped (`matchRelease`). A repository's
+// first release has nothing to compare against, so it stays unmatched.
+fn shipRelease(
+	installation: Int,
+	r: ReleaseFact
+) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+	let Ok(found) <- previousRelease(installation, r, 1, []) else match {
+		Err(f) => Effect.pure(Err(f.message)),
+	}
+	let Some(previous) = found.previous else {
+		let _ <- if found.complete {
+			Logger.info("\(r.repo) \(r.tag) is its first release: nothing to compare it with")
+		} else {
+			Logger.warn(
+				"\(r.repo) \(r.tag): no earlier final release among its latest \(found.searched) releases; its pull requests are left unknown"
+			)
+		}
+		markNoPrevious(r.repo, r.tag)
+	}
+	let Ok(_) <- matchRelease(installation, r, previous) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	Effect.pure(Ok(()))
+}
+
+// Records that a release was tried and has no previous final release to
+// compare with (a repository's first, or one whose previous is past what was
+// listed): `previous_tag` is then `''`, not null, so the sync doesn't try it
+// again and it can't hold one of its repair slots.
+fn markNoPrevious(repo: String, tag: String) -> Effect[Result[(), String]] given Deliveries {
+	let Ok(_) <- Deliveries.run(
+		"UPDATE releases SET previous_tag = '' WHERE repo = ?1 AND tag = ?2 AND previous_tag IS NULL",
+		[Text(repo), Text(tag)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not record that \(repo) \(tag) has no previous release: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(()))
+}
+
+// Creates or refreshes a release's row, from a delivery or the sync. A release
+// GitHub describes exists, so any earlier deletion is undone.
+fn releaseStatement(r: ReleaseFact) -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO releases (repo, tag, release_id, name, draft, prerelease, created_at, published_at, author_is_bot)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+			ON CONFLICT (repo, tag) DO UPDATE SET
+			  release_id = excluded.release_id, name = excluded.name, draft = excluded.draft,
+			  prerelease = excluded.prerelease, created_at = excluded.created_at,
+			  published_at = excluded.published_at, author_is_bot = excluded.author_is_bot, deleted_at = NULL
+		""",
+		params: [
+			Text(r.repo),
+			Text(r.tag),
+			Integer(r.releaseId),
+			text(r.name),
+			Boolean(r.draft),
+			Boolean(r.prerelease),
+			Text(r.createdAt),
+			text(r.publishedAt),
+			Boolean(r.authorIsBot),
+		],
+	}
+}
+
+// Matches `r` to the pull requests it shipped: the commits from `previous`'s
+// tag to its own, each matched to a merged PR by merge commit or, for a PR
+// recorded before its merge commit was, by the number its commit names. A PR
+// keeps the first release that shipped it. `shipped` counts them only when
+// `previous` was published after pull requests began to be recorded: before
+// that, some of what `r` shipped was never recorded, and a count would be
+// short. Its PRs are marked either way, for their lead times.
+fn matchRelease(
+	installation: Int,
+	r: ReleaseFact,
+	previous: ReleaseAt
+) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi {
+	let Ok(c) <- GitHubApi.compare(installation, r.repo, previous.tag, r.tag) else match {
+		Err(f) => if isGone(f) { compareGone(r, previous, f) } else { Effect.pure(Err(f.message)) },
+	}
+	let _ <- if c.commits.length() < c.total_commits {
+		Logger.warn(
+			"\(r.repo) \(previous.tag)...\(r.tag) has \(c.total_commits) commits; only the first \(c.commits.length()) were matched"
+		)
+	} else {
+		Effect.pure(())
+	}
+	let Ok(since) <- recordingSince(r.repo) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let counted = since.map((s) => previous.at >= s).getOrElse(false)
+	let shipped = shippedBy(c.commits)
+	let Ok(_) <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: """
+					UPDATE pull_requests SET released_in = ?2, released_at = ?3
+					WHERE repo = ?1 AND state = 'merged'
+					  AND (released_in IS NULL OR released_at > ?3)
+					  AND (merge_commit_sha IN (SELECT value FROM json_each(?4))
+					       OR (merge_commit_sha IS NULL AND number IN (SELECT value FROM json_each(?5))))
+				""",
+				params: [
+					Text(r.repo),
+					Text(r.tag),
+					text(r.publishedAt),
+					Text(Json.encode(shipped.shas)),
+					Text(Json.encode(shipped.numbers)),
+				],
+			},
+			SqlStatement {
+				sql: """
+					UPDATE releases
+					SET previous_tag = ?3,
+					    shipped = CASE WHEN ?4 THEN
+					      (SELECT count(*) FROM pull_requests WHERE repo = ?1 AND released_in = ?2)
+					    END
+					WHERE repo = ?1 AND tag = ?2
+				""",
+				params: [Text(r.repo), Text(r.tag), Text(previous.tag), Boolean(counted)],
+			},
+		]
+	) else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	Effect.pure(Ok(true))
+}
+
+// A comparison GitHub no longer has (a tag deleted from git while its release
+// remains) will never succeed: record the previous release, leave `shipped`
+// unknown, and warn, so the release stops being retried.
+fn compareGone(
+	r: ReleaseFact,
+	previous: ReleaseAt,
+	f: ApiFailure
+) -> Effect[Result[Bool, String]] given Deliveries, Logger {
+	let _ <- Logger.warn(
+		"\(r.repo) \(r.tag): GitHub can no longer compare it with \(previous.tag); its pull requests are left unknown (\(f.message))"
+	)
+	let Ok(_) <- Deliveries.run(
+		"UPDATE releases SET previous_tag = ?3 WHERE repo = ?1 AND tag = ?2",
+		[Text(r.repo), Text(r.tag), Text(previous.tag)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not record \(r.repo) \(r.tag)'s previous release: \(sqlError(e))")),
+	}
+	Effect.pure(Ok(false))
+}
+
+// When a repository's pull requests began to be recorded: its first moment
+// kept (#26), or `None` before any was. Per repository, since each starts when
+// the App can see it. Its name as deliveries give it, so the
+// `pull_request_events_by_pr` index answers.
+fn recordingSince(repo: String) -> Effect[Result[Option[String], String]] given Deliveries {
+	let Ok(row) <- Deliveries.first(
+		"SELECT min(at) AS since FROM pull_request_events WHERE repo = ?1",
+		[Text(repo)]
+	) else match {
+		Err(e) => Effect.pure(Err("could not read when pull requests began to be recorded: \(sqlError(e))")),
+	}
+	let Some(json) = row else { Effect.pure(Ok(None)) }
+	match Json.decodeSql[RecordingSince](json) {
+		Ok(s) => Effect.pure(Ok(s.since)),
+		Err(e) => Effect.pure(Err("when pull requests began to be recorded did not decode: \(jsonError(e))")),
+	}
+}
+
+type RecordingSince = {
+	since: Option[String],
+}
+
+// The final release before `r`, looked for a page of releases at a time. A
+// short page means every release has been seen, so finding none there means
+// `r` is the repository's first; reaching `MAX_RELEASE_PAGES` without one
+// leaves it unknown.
+fn previousRelease(
+	installation: Int,
+	r: ReleaseFact,
+	page: Int,
+	sofar: List[ReleasePayload]
+) -> Effect[Result[PreviousRelease, ApiFailure]] given GitHubApi {
+	let Ok(listed) <- GitHubApi.releases(installation, r.repo, page) else match {
+		Err(f) => Effect.pure(Err(f)),
+	}
+	let seen = sofar.concat(listed)
+	let found = previousFinalAt(r, seen)
+	if found.isSome() || listed.length() < RELEASE_PAGE {
+		Effect.pure(Ok(PreviousRelease {
+			previous: found,
+			searched: seen.length(),
+			complete: true,
+		}))
+	} else if page >= MAX_RELEASE_PAGES {
+		Effect.pure(Ok(PreviousRelease {
+			previous: None,
+			searched: seen.length(),
+			complete: false,
+		}))
+	} else {
+		previousRelease(installation, r, page + 1, seen)
+	}
+}

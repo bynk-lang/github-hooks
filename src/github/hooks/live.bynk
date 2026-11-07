@@ -1,0 +1,84 @@
+context github.hooks
+
+// The board is a route parameter (`?board=ci`) rather than written in: the
+// upgrade's Durable Object is resolved from the route, and a literal or
+// `const` key there routes to the wrong instance or doesn't compile
+// (bynk-lang/bynk#2959). `LiveBoardKey` admits only "ci".
+service live from websocket(in: LiveHello, out: LiveEvent) {
+	on open(board: LiveBoardKey, client: LiveClient) -> Effect[()] by v: Visitor {
+		let _ <- LiveBoard(board).join(client, connection)
+	}
+
+	on close(board: LiveBoardKey, client: LiveClient) -> Effect[()] by v: Visitor {
+		let _ <- LiveBoard(board).leave(client)
+	}
+}
+
+---
+Holds every open dashboard's connection (one Durable Object; connections
+survive hibernation) and fans each event out to all of them in parallel. A
+public endpoint must not grow without bound, so past `LIVE_LIMIT` connections a
+new one is closed at once and that page keeps polling instead.
+---
+agent LiveBoard {
+	key id: LiveBoardKey
+
+	store conns: Map[LiveClient, Connection[LiveEvent]]
+	// When each connection joined, as a running count, so the oldest can go.
+	store joined: Map[LiveClient, Int]
+	store joins: Cell[Int]
+
+	// Past `LIVE_LIMIT` the oldest connection is closed to make room, rather
+	// than the newcomer refused: a client that vanished without a close (a
+	// shut laptop, a dropped network) would otherwise hold its slot for good,
+	// and enough of them would shut every new page out. A live page that is
+	// evicted sees its socket close and reconnects, polling meanwhile.
+	on call join(c: LiveClient, conn: Connection[LiveEvent]) -> Effect[()] {
+		let open <- conns.size()
+		let room = if open >= LIVE_LIMIT { 1 } else { 0 }
+		let oldest <- joined.entries.sortBy((e) => e.value).take(room).map((e) => e.key).collect()
+		let _ <- oldest.traverseAll((k: LiveClient) => {
+			let _ <- joined.remove(k)
+			let _ <- conns.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		let n = joins
+		joins := n + 1
+		let _ <- joined.put(c, n)
+		let _ <- conns.put(c, conn)
+	}
+
+	on call leave(c: LiveClient) -> Effect[()] {
+		let _ <- joined.remove(c)
+		let _ <- conns.remove(c)
+	}
+
+	// Each send's outcome is gathered rather than raised, so one dead
+	// connection can't stop the rest from hearing. Answers how many sends
+	// succeeded.
+	on call publish(e: LiveEvent) -> Effect[Int] {
+		let sent <- conns.parTraverseAll((c: Connection[LiveEvent]) => {
+			do c.send(e)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		Effect.pure(sent.filter((r) => r is Ok(_)).length())
+	}
+}
+
+const LIVE_LIMIT: Int = 500
+
+---
+Pushes a changed run to every open dashboard. A capability (not a direct agent
+call) so the rule for *when* to push is observable in tests.
+---
+capability LiveFeed {
+	fn publish(e: LiveEvent) -> Effect[()]
+}
+
+provides LiveFeed = BoardFeed {
+	fn publish(e: LiveEvent) -> Effect[()] {
+		let _ <- LiveBoard("ci").publish(e)
+	}
+}

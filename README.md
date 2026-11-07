@@ -29,7 +29,7 @@ GitHub App ──POST /github──▶ signature check ──▶ read headers + 
              X-Hub-Signature-256   (generated)       src/github/events.bynk      (delivery id is the key)
 ```
 
-1. **Verify.** The `GitHub` actor in [`src/github/hooks.bynk`](src/github/hooks.bynk)
+1. **Verify.** The `GitHub` actor in [`src/github/hooks/context.bynk`](src/github/hooks/context.bynk)
    declares `Signature(secret = "APP_WEBHOOK_SECRET", header = "X-Hub-Signature-256")`.
    The compiler generates the check: HMAC-SHA256 over the exact bytes received,
    compared in constant time, before the handler runs. Anything unsigned or
@@ -173,7 +173,24 @@ src/github/pulls.bynk    commons github.pulls: pull_request and review deliverie
 src/github/releases.bynk commons github.releases: release deliveries, and which pull requests a release shipped
 src/github/jobs.bynk     commons github.jobs: a workflow_job delivery as a workflow_jobs row
 src/github/metrics.bynk  commons github.metrics: the CI metrics API's query and answer types
-src/github/hooks.bynk    context github.hooks: the Worker (actors, D1, KV, AppAuth, Bot, Facts, routes)
+src/github/hooks/        context github.hooks, the Worker, one file per part:
+  context.bynk           its uses, bindings (D1, KV, rate limits, edge cache), assets and actors
+  api.bynk               the HTTP routes
+  github-auth.bynk       sign-in, the App's installation tokens, and HTTP to GitHub
+  github-api.bynk        the GitHub REST calls (GitHubApi) and their paging
+  facts.bynk             recording each delivery (Facts)
+  pulls/issues/runs/releases.bynk   each kind of delivery's rows
+  purge.bynk             edge-cache purges, one slot per kind
+  live.bynk              the live feed (WebSocket, LiveBoard, LiveFeed)
+  bot.bynk               acting on events (Bot: the welcome)
+  retention.bynk         the hourly retention and the job-day roll-up
+  sync.bynk              the daily syncs (open PRs, open issues, releases)
+  runner-figures.bynk    the hourly runner figures
+  metrics-*.bynk         the public metrics routes' queries
+  members.bynk           organisation membership
+  maintainers.bynk       the maintainers' routes: sessions, shared figures
+  mine.bynk, actions.bynk   the maintainers' Mine view, and re-running failed jobs
+  support.bynk           shared helpers
 embeds/welcome.md        the welcome comment's text
 embeds/dashboard.html    the CI health page served at /
 embeds/prs.html          the PR flow page served at /prs

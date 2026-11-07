@@ -1,0 +1,80 @@
+context github.hooks
+
+---
+The facts the dashboards read, extracted from a delivery after it is
+answered: whether its repository is public (from any delivery that says); for
+a `workflow_run`, one `workflow_runs` row per run attempt (#20); for a
+`pull_request`, its `pull_requests` row and, for the moments the row can't
+hold, a `pull_request_events` row; for a `pull_request_review`, its
+`pull_request_reviews` row (#26); for a `release`, its `releases` row and,
+once a final release is published, which pull requests it shipped (#36); for
+a `workflow_job`, its `workflow_jobs` row (#42); for an `issues` or
+`issue_comment`, its `issues` row and labels, and a maintainer's first
+response (#48). A redelivery records the same facts again, which changes
+nothing.
+---
+capability Facts {
+	--- `fresh` when this is the delivery's first arrival, not a redelivery.
+	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()]
+}
+
+provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock, GitHubApi {
+	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()] {
+		let _ <- recordVisibility(body)
+		let _ <- if d.event == "pull_request_review" {
+			recordReview(d, body)
+		} else if d.event == "push" {
+			recordTag(d, body)
+		} else if d.event == "workflow_job" { recordJob(d, body) } else { Effect.pure(()) }
+		let nothing: Option[LiveEvent] = None
+		let changed <- if d.event == "workflow_run" {
+			recordRun(d, body)
+		} else if d.event == "pull_request" {
+			recordPull(d, body, fresh)
+		} else if d.event == "release" {
+			releaseChanged(d, body, fresh)
+		} else if d.event == "issues" || d.event == "issue_comment" {
+			recordIssue(d, body, fresh)
+		} else {
+			Effect.pure(nothing)
+		}
+		let Some(e) = changed else { Effect.pure(()) }
+		let purged <- purgeFor(e.kind)
+		let _ <- LiveFeed.publish(LiveEvent {
+			refetch_ms: if purged { PURGED_REFETCH_MS } else { EXPIRED_REFETCH_MS },
+			kind: e.kind,
+			repo: e.repo,
+			number: e.number,
+			path: e.path,
+			workflow: e.workflow,
+			run_id: e.run_id,
+			attempt: e.attempt,
+			status: e.status,
+			conclusion: e.conclusion,
+		})
+	}
+}
+
+// Visibility is decided when the dashboard reads, from this table, not stored
+// per run: a repository made private hides its whole history at once. Last
+// arrival wins; a `repository` `privatized`/`publicized` delivery carries the
+// new value, as does every later delivery from the repository.
+fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Some(v) = visibilityOf(body) else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO repositories (repo, public, default_branch) VALUES (?1, ?2, ?3)
+		ON CONFLICT (repo) DO UPDATE
+		  SET public = excluded.public,
+		      default_branch = coalesce(excluded.default_branch, repositories.default_branch),
+		      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		  WHERE repositories.public != excluded.public
+		     OR coalesce(excluded.default_branch, repositories.default_branch)
+		        IS NOT repositories.default_branch
+		""",
+		[Text(v.repo), Boolean(v.isPublic), text(v.defaultBranch)]
+	) else match {
+		Err(e) => Logger.error("could not record whether \(v.repo) is public: \(sqlError(e))"),
+	}
+	Effect.pure(())
+}

@@ -1,0 +1,136 @@
+context github.hooks
+
+// Whether `login` belongs to `org`, from an answer GitHub gave in the last
+// `MEMBER_RECHECK`, or else from GitHub (and then kept).
+fn orgMember(
+	installation: Int,
+	org: String,
+	login: String
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let known <- recentMember(org, login)
+	let None = known else { Effect.pure(Ok(known == Some(true))) }
+	askMember(installation, org, login)
+}
+
+// Whether `login` belongs to `org`, asked of GitHub now, and kept for
+// `orgMember` and `recentMember`.
+fn askMember(
+	installation: Int,
+	org: String,
+	login: String
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let who = login.toLower()
+	let now <- Clock.now()
+	let Ok(member) <- GitHubApi.isMember(installation, org, login) else match {
+		Err(f) => Effect.pure(Err(f.message)),
+	}
+	// Keeping the answer is a saving, not a fact: if it can't be kept, the
+	// next comment asks again.
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO org_members (org, login, member, checked_at) VALUES (?1, ?2, ?3, ?4)
+		ON CONFLICT (org, login) DO UPDATE SET member = excluded.member, checked_at = excluded.checked_at
+		""",
+		[Text(org), Text(who), Boolean(member), Text(now.toIso())]
+	)
+	Effect.pure(Ok(member))
+}
+
+// How long GitHub's answer on organisation membership is reused.
+const MEMBER_RECHECK: Duration = 1.days
+
+--- A user's membership of an organisation, as GitHub's `GET /orgs/{org}/memberships/{user}` describes it: `active` or `pending`.
+type OrgMembership = {
+	state: String,
+}
+
+--- A cached membership answer.
+type CachedMember = {
+	member: Int,
+}
+
+// A 403's body: a code, and why, as JSON.
+fn refusal403(code: String, message: String) -> Bytes {
+	Bytes.fromUtf8(Json.encode(Refusal { error: code, message: message }))
+}
+
+type Refusal = {
+	error: String,
+	message: String,
+}
+
+// Whether `login` belongs to `org`, if GitHub answered in the last
+// `MEMBER_RECHECK`: no installation is needed to know it.
+fn recentMember(org: String, login: String) -> Effect[Option[Bool]] given Deliveries, Clock {
+	let now <- Clock.now()
+	let cached <- Deliveries.first(
+		"SELECT member FROM org_members WHERE org = ?1 AND login = ?2 AND checked_at >= ?3",
+		[Text(org), Text(login.toLower()), Text((now - MEMBER_RECHECK).toIso())]
+	)
+	let Ok(Some(row)) = cached else { Effect.pure(None) }
+	match Json.decode[CachedMember](row) {
+		Ok(m) => Effect.pure(Some(m.member == 1)),
+		Err(_) => Effect.pure(None),
+	}
+}
+
+// Whether `login` belongs to the maintainers' organisation, through an
+// installation that has delivered for it. `fresh` asks GitHub now, as signing
+// in does, so a token is never issued on a kept answer; otherwise an answer
+// kept in the last `MEMBER_RECHECK` settles it without an installation. The
+// answer is kept either way.
+fn maintainerMember(
+	login: String,
+	fresh: Bool
+) -> Effect[Result[Bool, String]] given Deliveries, GitHubApi, Clock {
+	let known: Option[Bool] <- if fresh {
+		Effect.pure(None)
+	} else {
+		recentMember(MAINTAINER_ORG, login)
+	}
+	let None = known else { Effect.pure(Ok(known == Some(true))) }
+	let Some(installation) <- orgInstallation(MAINTAINER_ORG) else {
+		Effect.pure(Err("no installation of the App has delivered for \(MAINTAINER_ORG) yet"))
+	}
+	askMember(installation, MAINTAINER_ORG, login)
+}
+
+// A maintainer's token (#53): an HS256 JWT for `login`, issued at `now`,
+// signed with `secret` (`MAINTAINER_TOKEN_SECRET`), as the `Maintainer`
+// actor verifies it.
+fn sessionToken(secret: String, login: String, now: Instant) -> Effect[String] given Crypto {
+	let input = sessionSigningInput(login, now)
+	let mac <- Crypto.hmac(Sha256, Bytes.fromUtf8(secret), Bytes.fromUtf8(input))
+	Effect.pure("\(input).\(mac.toBase64Url())")
+}
+
+// The installation that last delivered for one of `org`'s repositories: the
+// one whose token can ask about its members. It walks the organisation's
+// repositories by key and reads each one's latest delivery from
+// `deliveries_by_repo_nocase`, so it sorts only the repositories, never the
+// deliveries. Asked only when no recent membership answer is kept.
+fn orgInstallation(org: String) -> Effect[Option[Int]] given Deliveries {
+	let found <- Deliveries.first(
+		"""
+		SELECT installation FROM (
+		  SELECT (SELECT d.installation FROM deliveries d
+		          WHERE d.repo = r.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		          ORDER BY d.received_at DESC LIMIT 1) AS installation,
+		         (SELECT d.received_at FROM deliveries d
+		          WHERE d.repo = r.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		          ORDER BY d.received_at DESC LIMIT 1) AS latest
+		  FROM repositories r WHERE r.repo >= ?1 AND r.repo < ?2
+		) WHERE installation IS NOT NULL ORDER BY latest DESC LIMIT 1
+		""",
+		[Text("\(org)/"), Text("\(org)0")]
+	)
+	let Ok(Some(row)) = found else { Effect.pure(None) }
+	match Json.decode[InstallationRow](row) {
+		Ok(r) => Effect.pure(Some(r.installation)),
+		Err(_) => Effect.pure(None),
+	}
+}
+
+type InstallationRow = {
+	installation: Int,
+}

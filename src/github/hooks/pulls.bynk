@@ -1,0 +1,282 @@
+context github.hooks
+
+// Records a pull request from a delivery (#26). Every `pull_request`
+// delivery carries the whole PR, so any of them refreshes its row (see
+// `savePull` for the ordering rules); the moments the row can't hold go to
+// `pull_request_events`.
+fn recordPull(
+	d: Delivery,
+	body: Bytes,
+	fresh: Bool
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets {
+	let nothing: Option[LiveEvent] = None
+	let Ok(p) = pullOf(body) else match {
+		Err(why) => {
+			let _ <- Logger.error("could not read pull request from \(d.id): \(why)")
+			Effect.pure(nothing)
+		},
+	}
+	let Ok(_) <- savePull(p) else match {
+		Err(why) => {
+			let _ <- Logger.error(why)
+			Effect.pure(nothing)
+		},
+	}
+	// Keyed by delivery, so a redelivery adds nothing; timed by when the
+	// delivery arrived, since an enqueue doesn't move the PR's `updated_at`.
+	let notAMoment: Result[SqlRun, SqlError] = Ok(SqlRun { changes: 0, lastRowId: 0 })
+	let moment <- if isPullMoment(p.action) {
+		Deliveries.run(
+			"""
+			INSERT INTO pull_request_events (delivery, repo, number, action, reason, at)
+			SELECT ?1, ?2, ?3, ?4, ?5, received_at FROM deliveries WHERE id = ?1
+			ON CONFLICT (delivery) DO NOTHING
+			""",
+			[Text(d.id), Text(p.repo), Integer(p.number), Text(p.action), text(p.reason)]
+		)
+	} else {
+		Effect.pure(notAMoment)
+	}
+	let Ok(_) = moment else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not record \(p.action) of \(p.repo)#\(p.number): \(sqlError(e))"
+			)
+			Effect.pure(nothing)
+		},
+	}
+	// Tell open pages of a delivery's first arrival only (a redelivery tells
+	// nothing new), and only for a repository the public pages may show.
+	let true = fresh else { Effect.pure(nothing) }
+	let shown <- shownLive(p.repo)
+	let true = shown else { Effect.pure(nothing) }
+	Effect.pure(Some(pullEventOf(p)))
+}
+
+// Creates or refreshes a pull request's row, from a delivery or the sync.
+// The row moves forward only (by `updated_at`); on a same-second tie a
+// delivery applies unless it would take the PR out of `merged`, which is
+// final. `ready_at` only moves earlier. Sizes and `commits` keep their last
+// known values when a source lacks them.
+fn savePull(p: PullFact) -> Effect[Result[(), String]] given Deliveries {
+	let Ok(_) <- Deliveries.batch(pullStatements(p)) else match {
+		Err(e) => Effect.pure(Err("could not record \(p.repo)#\(p.number): \(sqlError(e))")),
+	}
+	Effect.pure(Ok(()))
+}
+
+// The statements that save a pull request, so a run can save many in one
+// batch: the review requests the delivery lists (only if it is strictly
+// newer, checked before the row moves), the row itself, then `ready_at`,
+// which moves only earlier whatever the row's ordering says, then the one
+// request a `review_requested` or `review_request_removed` names.
+fn pullStatements(p: PullFact) -> List[SqlStatement] {
+	reviewRequestSet(p)
+		.concat(
+			[
+				SqlStatement {
+					sql: """
+						INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+						                           opened_at, ready_at, closed_at, merged_at, commits, additions, deletions,
+						                           changed_files, updated_at, merge_commit_sha, head_sha)
+						VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+						ON CONFLICT (repo, number) DO UPDATE SET
+						  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
+						  base = excluded.base, head = excluded.head, draft = excluded.draft, state = excluded.state,
+						  opened_at = excluded.opened_at, closed_at = excluded.closed_at, merged_at = excluded.merged_at,
+						  commits = coalesce(excluded.commits, pull_requests.commits),
+						  additions = coalesce(excluded.additions, pull_requests.additions),
+						  deletions = coalesce(excluded.deletions, pull_requests.deletions),
+						  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
+						  merge_commit_sha = coalesce(excluded.merge_commit_sha, pull_requests.merge_commit_sha),
+						  head_sha = coalesce(excluded.head_sha, pull_requests.head_sha),
+						  updated_at = excluded.updated_at
+						WHERE excluded.updated_at > pull_requests.updated_at
+						   OR (excluded.updated_at = pull_requests.updated_at
+						       AND (pull_requests.state != 'merged' OR excluded.state = 'merged'))
+					""",
+					params: [
+						Text(p.repo),
+						Integer(p.number),
+						Text(p.title),
+						Text(p.author),
+						Boolean(p.authorIsBot),
+						Text(p.base),
+						Text(p.head),
+						Boolean(p.draft),
+						Text(p.state),
+						Text(p.openedAt),
+						text(p.readyAt),
+						text(p.closedAt),
+						text(p.mergedAt),
+						integer(p.commits),
+						integer(p.additions),
+						integer(p.deletions),
+						integer(p.changedFiles),
+						Text(p.updatedAt),
+						text(p.mergeCommitSha),
+						text(p.headSha),
+					],
+				},
+				SqlStatement {
+					sql: """
+						UPDATE pull_requests SET ready_at = ?3
+						WHERE repo = ?1 AND number = ?2 AND ?3 IS NOT NULL AND (ready_at IS NULL OR ready_at > ?3)
+					""",
+					params: [Text(p.repo), Integer(p.number), text(p.readyAt)],
+				},
+			]
+		)
+		.concat(reviewRequestChange(p))
+}
+
+// Replaces a pull request's review requests (#53) with the set its fact
+// lists, users and teams, when it lists them and the row isn't newer. Runs
+// before the row moves, so it compares with the row as it was.
+//
+// A delivery replaces the set only when it is strictly newer than the row (or
+// there is no row yet). Several requests made in one second arrive as
+// deliveries with one `updated_at`, each listing the set at its moment in no
+// guaranteed order, so a tie never replaces the set: `reviewRequestChange`
+// adds each. The daily sync reads GitHub's current state, so at a tie its set
+// is the current one, and replaces the stored set unless the row is strictly
+// newer: that back-fills pull requests recorded before requests were.
+fn reviewRequestSet(p: PullFact) -> List[SqlStatement] {
+	let users = p.reviewers.map((us) => us.map((u) => [u, "0"]))
+	let teams = p.teams.map((ts) => ts.map((t) => [t, "1"]))
+	let requests = users.getOrElse([]).concat(teams.getOrElse([]))
+	if users.isNone() && teams.isNone() {
+		[]
+	} else if p.action == "sync" {
+		[
+			SqlStatement {
+				sql: """
+					DELETE FROM pull_request_review_requests
+					WHERE repo = ?1 AND number = ?2
+					  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?3)
+				""",
+				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
+			},
+		].concat(
+			requests.map(
+				(r) => SqlStatement {
+					sql: """
+						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
+						SELECT ?1, ?2, ?3, ?4
+						WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?5)
+					""",
+					params: requestParams(p, r),
+				}
+			)
+		)
+	} else {
+		[
+			SqlStatement {
+				sql: """
+					DELETE FROM pull_request_review_requests
+					WHERE repo = ?1 AND number = ?2
+					  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at >= ?3)
+				""",
+				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
+			},
+		].concat(
+			requests.map(
+				(r) => SqlStatement {
+					sql: """
+						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
+						SELECT ?1, ?2, ?3, ?4
+						WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at >= ?5)
+					""",
+					params: requestParams(p, r),
+				}
+			)
+		)
+	}
+}
+
+// One request's parameters for `reviewRequestSet`: `r` is [reviewer, "1" for a team].
+fn requestParams(p: PullFact, r: List[String]) -> List[SqlValue] {
+	[
+		Text(p.repo),
+		Integer(p.number),
+		Text(r.first().getOrElse("")),
+		Integer(if r.get(1) == Some("1") { 1 } else { 0 }),
+		Text(p.updatedAt),
+	]
+}
+
+// The one review request a `review_requested` or `review_request_removed`
+// delivery names, added or removed whatever the delivery's age: each such
+// delivery is one change.
+fn reviewRequestChange(p: PullFact) -> List[SqlStatement] {
+	let named = match p.requestedUser {
+		Some(u) => Some([u, "0"]),
+		None => p.requestedTeam.map((t) => [t, "1"]),
+	}
+	let Some(r) = named else { [] }
+	let reviewer = Text(r.first().getOrElse(""))
+	let team = Integer(if r.get(1) == Some("1") { 1 } else { 0 })
+	if p.action == "review_request_removed" {
+		[
+			SqlStatement {
+				sql: "DELETE FROM pull_request_review_requests WHERE repo = ?1 AND number = ?2 AND reviewer = ?3 AND team = ?4",
+				params: [Text(p.repo), Integer(p.number), reviewer, team],
+			},
+		]
+	} else if p.action == "review_requested" {
+		[
+			SqlStatement {
+				sql: "INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team) VALUES (?1, ?2, ?3, ?4)",
+				params: [Text(p.repo), Integer(p.number), reviewer, team],
+			},
+		]
+	} else {
+		[]
+	}
+}
+
+// Records a review (#26): submitted, edited or dismissed. Review payloads
+// carry no `updated_at` to order them by, but a dismissal is final, so it
+// sticks: a `submitted` arriving after its `dismissed` changes nothing. Kept
+// for later; the page doesn't show reviews yet.
+fn recordReview(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
+	let Ok(r) = reviewOf(body) else match {
+		Err(why) => Logger.error("could not read review from \(d.id): \(why)"),
+	}
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+		ON CONFLICT (review_id) DO UPDATE SET
+		  state = CASE WHEN pull_request_reviews.state = 'dismissed' THEN 'dismissed' ELSE excluded.state END,
+		  submitted_at = coalesce(excluded.submitted_at, pull_request_reviews.submitted_at)
+		""",
+		[
+			Integer(r.reviewId),
+			Text(r.repo),
+			Integer(r.number),
+			text(r.reviewer),
+			Boolean(r.reviewerIsBot),
+			Text(r.state),
+			text(r.submittedAt),
+		]
+	) else match {
+		Err(e) => Logger.error(
+			"could not record review \(r.reviewId) on \(r.repo)#\(r.number): \(sqlError(e))"
+		),
+	}
+	// Reviewing takes the reviewer's request off the pull request (#53), as
+	// GitHub does. The review's own pull request is a partial view, so the row
+	// isn't saved from it; a later re-request arrives as `review_requested`.
+	let Some(reviewer) = r.reviewer else { Effect.pure(()) }
+	let true = d.action == Some("submitted") else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.run(
+		"DELETE FROM pull_request_review_requests WHERE repo = ?1 AND number = ?2 AND reviewer = ?3 COLLATE NOCASE AND team = 0",
+		[Text(r.repo), Integer(r.number), Text(reviewer)]
+	) else match {
+		Err(e) => Logger.error(
+			"could not take \(reviewer)'s review request off \(r.repo)#\(r.number): \(sqlError(e))"
+		),
+	}
+	Effect.pure(())
+}
