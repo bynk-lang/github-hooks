@@ -43,6 +43,15 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Deploys from GitHub Actions (#62). `.github/workflows/deploy.yml` deploys a
+  `v*` tag on `main` to production with `bynk-deploy`, once the checks and
+  smoke pass on it, then checks that the live Worker answers. Pull requests get
+  a dry-run plan; a manual run deploys `main`, can only check which secrets are
+  set, or can overwrite them after a rotation. The Worker's secrets are Actions
+  secrets in a `production` environment, one per name; a name whose Actions
+  secret isn't set is left out rather than passed empty. A changed
+  `bynk.deploy.lock` comes back as a pull request, or as an artifact for a
+  tag's deploy. See `docs/deploy.md`.
 - Phase 4, slice 6, step 5 (#53): sessions and actions.
   - **Server-side sign-out:** a maintainer token's subject is
     `login:version`, checked against `maintainer_sessions` (migration

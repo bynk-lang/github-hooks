@@ -134,9 +134,14 @@ API_TOKEN_SECRET=dev-api scripts/smoke.sh
 
 ## Deploy
 
-[docs/github-app.md](docs/github-app.md) walks through the whole set-up in
-order: choose a webhook secret, deploy the Worker with it, then register and
-install the GitHub App. The deploy itself is:
+Production deploys run from GitHub Actions (`.github/workflows/deploy.yml`): a
+`v*` tag deploys the tagged commit once its checks pass, and pull requests get
+a dry-run plan. The Worker's secrets are Actions secrets in the `production`
+environment. See [docs/deploy.md](docs/deploy.md).
+
+For a first deploy by hand, [docs/github-app.md](docs/github-app.md) walks
+through the whole set-up in order: choose a webhook secret, deploy the Worker
+with it, then register and install the GitHub App. The deploy itself is:
 
 ```sh
 npx wrangler login                    # or set CLOUDFLARE_API_TOKEN
@@ -182,8 +187,9 @@ tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
 scripts/live.mjs         the live feed end to end (WebSocket), run by smoke.sh with SMOKE_LIVE=1
 BYNK_VERSION             the Bynk release CI and local work use; the canary proposes moving it
-.github/workflows/       CI (check, format, test; smoke), and the Bynk canary
+.github/workflows/       CI (check, format, test; smoke), the deploy, and the Bynk canary
 docs/github-app.md       registering and installing the GitHub App
+docs/deploy.md           deploying from GitHub Actions: triggers, the production secrets, the lock
 docs/read-api.md         the read API: tokens, routes, what the digest counts
 docs/ci-metrics.md       the public CI metrics: routes, definitions, settings
 docs/pr-flow.md          the PR flow: facts, the daily open-PR sync, routes

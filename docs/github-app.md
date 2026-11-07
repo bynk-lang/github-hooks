@@ -32,6 +32,9 @@ Keep `API_TOKEN_SECRET` somewhere safe too: `bynk token Reader` needs it to mint
 read-API tokens. Changing it later invalidates every token minted with the old
 value.
 
+Later deploys run from GitHub Actions, with these secrets in the `production`
+environment: see [deploy.md](deploy.md).
+
 `.secrets.env` is ignored by git. Delete it once the deploy has run. A secret
 already set on the Worker is kept on later deploys (`bynk deploy` says
 `already set … skipping`), so a later `.secrets.env` needs only the names that
