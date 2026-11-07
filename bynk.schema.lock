@@ -3,7 +3,7 @@ version = 2
 [events]
 
 [agents."github.hooks.LiveBoard"]
-version = 1
+version = 2
 floor = 1
 
 [[agents."github.hooks.LiveBoard".shapes]]
@@ -49,3 +49,93 @@ refinement = "Int"
 [[agents."github.hooks.LiveBoard".shapes.fields.paths]]
 path = "joins"
 type = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes]]
+version = 2
+additive = true
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "conns"
+kind = "Map"
+type = "String, <non-boundary>"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$"), <non-boundary>'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "conns#0"
+type = "String"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "conns#1"
+type = "<non-boundary>"
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "expected"
+kind = "Map"
+type = "String, {at_ms: Int, login: String}"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$"), {at_ms: Int, login: String}'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "expected#0"
+type = "String"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "expected#1"
+type = "{}"
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "expected#1.at_ms"
+type = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "expected#1.login"
+type = "String"
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "joined"
+kind = "Map"
+type = "String, Int"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$"), Int'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "joined#0"
+type = "String"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "joined#1"
+type = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "joins"
+kind = "Cell"
+type = "Int"
+refinement = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "joins"
+type = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields]]
+name = "owners"
+kind = "Map"
+type = "String, {at_ms: Int, login: String}"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$"), {at_ms: Int, login: String}'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "owners#0"
+type = "String"
+refinement = 'String where Matches("^[A-Za-z0-9-]{8,64}$")'
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "owners#1"
+type = "{}"
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "owners#1.at_ms"
+type = "Int"
+
+[[agents."github.hooks.LiveBoard".shapes.fields.paths]]
+path = "owners#1.login"
+type = "String"

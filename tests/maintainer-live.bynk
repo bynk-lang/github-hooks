@@ -1,0 +1,79 @@
+// #68, step 1: a signed-in maintainer's page joining the maintainers' live
+// board, `POST /maintainers/live`, against an in-memory D1 with the
+// migrations applied. The socket itself can't be driven from a suite
+// (bynk-lang/bynk has no WebSocket test harness yet); `scripts/live.mjs`
+// checks the board end to end against `bynk dev`. accuser is a maintainer (a
+// kept membership answer).
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+--- accuser's membership, checked an hour ago, and the App's installation.
+fn member() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/secret', 0, 'main')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'push', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+	]
+}
+
+fn page() -> LiveRequest {
+	LiveRequest { client: "page-0001" }
+}
+
+case "a maintainer's page is expected on the maintainers' board, once checked" {
+	let seeded <- Deliveries.batch(member())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/live", page()) by Maintainer("Accuser:0")
+	expect r == Ok(LiveExpected { client: "page-0001", within_ms: 60000 })
+	expect LiveFeed.awaitSocket called once with client == "page-0001" && login == "Accuser"
+}
+
+case "someone who has left, or whose session has ended, isn't expected" {
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })
+	let seeded <- Deliveries.batch(member())
+	expect seeded is Ok(_)
+	let leaver <- api.POST("/maintainers/live", page()) by Maintainer("a-leaver")
+	expect leaver is RawError(403, _, _)
+	let out <- api.POST("/maintainers/signout") by Maintainer("accuser")
+	expect out is Ok(_)
+	let ended <- api.POST("/maintainers/live", page()) by Maintainer("accuser:0")
+	expect ended is RawError(403, _, _)
+	expect LiveFeed.awaitSocket never called
+}
+
+case "asking is limited per login, like the maintainers' other routes" {
+	stub MaintainerLimit.allow(_) returns false
+	let seeded <- Deliveries.batch(member())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/live", page()) by Maintainer("accuser")
+	expect r is TooManyRequests(_)
+	expect LiveFeed.awaitSocket never called
+}
+
+case "if the session can't be checked, nothing is expected" {
+	let seeded <- Deliveries.batch(member())
+	expect seeded is Ok(_)
+	let broken <- Deliveries.run("DROP TABLE maintainer_sessions", [])
+	expect broken is Ok(_)
+	let r <- api.POST("/maintainers/live", page()) by Maintainer("accuser")
+	expect r is ServiceUnavailable(_)
+	expect LiveFeed.awaitSocket never called
+}
+
+case "signing out closes the login's live sockets" {
+	let out <- api.POST("/maintainers/signout") by Maintainer("accuser:3")
+	expect out is Ok(_)
+	expect LiveFeed.signedOut called once with login == "accuser"
+}

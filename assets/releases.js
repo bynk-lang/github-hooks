@@ -51,6 +51,9 @@
   // excluded repositories included; otherwise the public route (signin.js).
   const figures = (path, query) => window.bynkMetrics(path, query);
   const signedIn = () => Boolean(window.bynkMaintainer && window.bynkMaintainer());
+  // Signed in, private and not-public repositories are live too once the
+  // maintainers' board is open (#68); until then they're polled.
+  const privateLive = () => !signedIn() || Boolean(window.bynkMaintainersLiveOpen && window.bynkMaintainersLiveOpen());
   const repoMark = (name) => (window.bynkRepoMark ? window.bynkRepoMark(name) : null);
 
   async function refreshFlow() {
@@ -96,7 +99,7 @@
     if (problems.length > 0) f.textContent = `${problems.join("; ")}.`;
     else if (latest) {
       f.textContent = live
-        ? `${signedIn() ? "Public repositories live, private and not-public ones polled" : "Live"} · updated ${clock(latest)} UTC as releases and merges happen`
+        ? `${privateLive() ? "Live" : "Public repositories live, private and not-public ones polled"} · updated ${clock(latest)} UTC as releases and merges happen`
         : `Updated ${clock(latest)} UTC · refreshes every minute`;
     } else f.textContent = "Loading…";
     f.classList.toggle("stale", problems.length > 0);
@@ -297,7 +300,7 @@
   let timers = [];
   function poll() {
     timers.forEach(clearInterval);
-    timers = live && !signedIn()
+    timers = live && privateLive()
       ? [setInterval(refreshFlow, LIVE_POLL_MS), setInterval(refreshRecent, LIVE_POLL_MS)]
       : [setInterval(refreshFlow, FLOW_EVERY_MS), setInterval(refreshRecent, RECENT_EVERY_MS)];
   }
@@ -350,22 +353,31 @@
   // merging.
   const concerns = (e) => e.kind === "release" || (e.kind === "pull" && e.conclusion === "merged");
 
+  // A live frame, from the public board or, signed in, the maintainers' (#68).
+  function onLiveMessage(m) {
+    let e = null;
+    try {
+      e = JSON.parse(m.data);
+    } catch {
+      // unreadable: refresh anyway, after the longest wait
+    }
+    if (e && !concerns(e)) return;
+    onLiveEvent(e ? e.refetch_ms : undefined, refreshAll);
+  }
+  if (window.bynkMaintainersLive) window.bynkMaintainersLive(onLiveMessage);
+
+  document.addEventListener("bynk:maintainers-live", () => {
+    if (!document.hidden && timers.length) poll();
+    renderFreshness();
+  });
+
   function connect() {
     if (socket || !("WebSocket" in globalThis)) return;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${scheme}://${location.host}/live?board=ci&client=${newClientId()}`);
     socket = ws;
     ws.onopen = () => { live = true; retryMs = 5_000; poll(); renderFreshness(); };
-    ws.onmessage = (m) => {
-      let e = null;
-      try {
-        e = JSON.parse(m.data);
-      } catch {
-        // unreadable: refresh anyway, after the longest wait
-      }
-      if (e && !concerns(e)) return;
-      onLiveEvent(e ? e.refetch_ms : undefined, refreshAll);
-    };
+    ws.onmessage = onLiveMessage;
     ws.onclose = () => {
       if (socket !== ws) return;
       socket = null;

@@ -6,6 +6,20 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A live board for maintainers (#68, step 1). Signed in, a page also joins a
+  `maintainers` board that carries the changes the public board leaves out
+  (private repositories, and those in `DASHBOARD_EXCLUDE`), so they're live
+  too and the page polls as the public one does. Each change goes to one
+  board: a hidden one purges nothing at the edge and moves the maintainers'
+  shared figures on instead (migration `0021`, `hidden_changes`), at most once
+  per its purge slot's gap, as an edge purge is. A page joins
+  through `POST /maintainers/live`, which makes every maintainer check and has
+  the board expect its random client id for a minute; the board closes any
+  socket it doesn't expect, a login's sockets when they sign out, and every
+  maintainer's socket after an hour, so the page asks again.
+
 ### Changed
 
 - `src/github/hooks.bynk` (5,400 lines) is split into 25 files under

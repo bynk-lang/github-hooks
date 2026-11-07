@@ -232,8 +232,10 @@ polls every 30 seconds meanwhile.
   socket close, polls, and reconnects.
 - **Each connection has its own id,** made afresh by the page every time it
   connects, so an old socket's late close can never remove its replacement.
-- **`board`** is always `ci`. It is a route parameter rather than fixed in the
-  code because of bynk-lang/bynk#2959.
+- **`board`** is `ci` for this page. A route parameter rather than fixed in
+  the code because of bynk-lang/bynk#2959. The other board, `maintainers`,
+  carries the private and excluded repositories to signed-in maintainers
+  ([maintainers.md](maintainers.md#live-updates)).
 - **Testing:** suites can't drive a WebSocket yet, so the rule for what is
   pushed is tested through a `LiveFeed` capability (`tests/live.bynk`), and
   the socket end to end by `scripts/live.mjs`, which CI's smoke job runs

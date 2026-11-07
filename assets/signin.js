@@ -207,6 +207,7 @@
   // Signing out, or a token refused: forget it, and redraw the link.
   function forget() {
     store.drop(KEY);
+    closeMaintainersLive();
     shown = new Map();
     mine = null;
     renderMine();
@@ -315,7 +316,85 @@
     }
   }
 
+  // The maintainers' live board (#68): signed in, the page also hears the
+  // changes the public board leaves out (private and excluded repositories).
+  // First `POST /maintainers/live` checks the token (as every maintainer route
+  // does) and has the board expect a fresh client id; then the socket opens
+  // with it. The board closes it after an hour, or at sign-out, and the page
+  // asks again, through a fresh check. Each page hands in its own live
+  // handler (`window.bynkMaintainersLive(onMessage)`), which hears both
+  // boards' frames alike. Signed out, nothing opens; a refused token signs the
+  // page out.
+  const liveHandlers = [];
+  let maintainersSocket = null; // a WebSocket, "asking" while the board is asked, or null
+  let maintainersRetry = null;
+  let maintainersRetryMs = 5_000;
+  const newClientId = () => (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+  function maintainersLive(onMessage) {
+    liveHandlers.push(onMessage);
+    openMaintainersLive();
+  }
+  async function openMaintainersLive() {
+    if (maintainersSocket || liveHandlers.length === 0 || !("WebSocket" in globalThis) || document.hidden) return;
+    const m = current();
+    if (!m) return;
+    const client = newClientId();
+    maintainersSocket = "asking";
+    let expected = false;
+    try {
+      const res = await fetch("/maintainers/live", {
+        method: "POST",
+        cache: "no-store",
+        headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${m.token}` },
+        body: JSON.stringify({ client }),
+      });
+      if (res.status === 401 || res.status === 403) { maintainersSocket = null; forget(); return; }
+      expected = res.ok;
+    } catch (e) {
+      console.warn("Couldn't join the maintainers' live board:", e.message);
+    }
+    if (maintainersSocket !== "asking") return; // signed out meanwhile
+    if (!expected) { maintainersSocket = null; retryMaintainersLive(); return; }
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${scheme}://${location.host}/live?board=maintainers&client=${client}`);
+    maintainersSocket = ws;
+    ws.onopen = () => { maintainersRetryMs = 5_000; announceMaintainersLive(); };
+    ws.onmessage = (frame) => { for (const handle of liveHandlers) handle(frame); };
+    ws.onclose = () => {
+      if (maintainersSocket !== ws) return;
+      maintainersSocket = null;
+      announceMaintainersLive();
+      retryMaintainersLive();
+    };
+  }
+  function retryMaintainersLive() {
+    clearTimeout(maintainersRetry);
+    if (!current() || document.hidden) return;
+    maintainersRetry = setTimeout(openMaintainersLive, maintainersRetryMs);
+    maintainersRetryMs = Math.min(maintainersRetryMs * 2, 60_000);
+  }
+  function closeMaintainersLive() {
+    clearTimeout(maintainersRetry);
+    const ws = maintainersSocket;
+    maintainersSocket = null;
+    if (ws && ws !== "asking") ws.close();
+    announceMaintainersLive();
+  }
+  // Whether the maintainers' board is open, so a signed-in page can rely on
+  // it as on the public one: pages listen for `bynk:maintainers-live`.
+  const maintainersLiveOpen = () => typeof maintainersSocket === "object" && maintainersSocket !== null && maintainersSocket.readyState === 1;
+  function announceMaintainersLive() {
+    document.dispatchEvent(new CustomEvent("bynk:maintainers-live"));
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) closeMaintainersLive();
+    else openMaintainersLive();
+  });
+
   window.bynkMaintainer = current;
+  window.bynkMaintainersLive = maintainersLive;
+  window.bynkMaintainersLiveOpen = maintainersLiveOpen;
   window.bynkAct = act;
   window.bynkMetrics = metrics;
   window.bynkRepoMark = repoMark;

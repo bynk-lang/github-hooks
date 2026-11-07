@@ -43,13 +43,55 @@ case "a late in_progress after completed moves nothing, so pushes nothing" {
 	expect LiveFeed.publish called once with e.status == "completed"
 }
 
-case "a private repository's run is never pushed" {
+case "a private repository's run is pushed to the maintainers' board only, and moves their figures on (#68)" {
+	stub Edge.purge(_) returns true
 	let _ <- api.POST(
 		"/github",
 		runHeaders("private-1"),
 		Bytes.fromUtf8(completedRun.replace("\"private\": false", "\"private\": true"))
 	) by GitHub
 	expect LiveFeed.publish never called
+	expect LiveFeed.publishMaintainers called once with e.kind == "run" && e.repo == "bynk-lang/github-hooks" && e.refetch_ms == 3000
+	// Nothing at the edge shows it, so nothing is purged; the maintainers'
+	// shared figures move on to a fresh key instead.
+	expect Edge.purge never called
+	let moved <- Deliveries.first(
+		"SELECT slot FROM hidden_changes WHERE at != '0000-01-01T00:00:00.000Z' ORDER BY slot",
+		[]
+	)
+	expect moved == Ok(Some("{\"slot\":\"runs\"}"))
+}
+
+case "a second hidden change within its slot's gap doesn't move the maintainers' figures again" {
+	stub Edge.purge(_) returns true
+	let first <- api.POST(
+		"/github",
+		runHeaders("private-a"),
+		Bytes.fromUtf8(completedRun.replace("\"private\": false", "\"private\": true"))
+	) by GitHub
+	expect first is Accepted(_)
+	let movedAt <- Deliveries.first("SELECT at FROM hidden_changes WHERE slot = 'runs'", [])
+	let second <- api.POST(
+		"/github",
+		runHeaders("private-b"),
+		Bytes.fromUtf8(completedRun
+			.replace("\"private\": false", "\"private\": true")
+			.replace("\"id\": 41978704067", "\"id\": 41978704068"))
+	) by GitHub
+	expect second is Accepted(_)
+	// The first moves the key, at once; the second, inside the 20 seconds,
+	// leaves it, and its pages wait for the kept answers to expire.
+	expect LiveFeed.publishMaintainers called with e.run_id == 41978704067 && e.refetch_ms == 3000
+	expect LiveFeed.publishMaintainers called with e.run_id == 41978704068 && e.refetch_ms == 61000
+	let stillAt <- Deliveries.first("SELECT at FROM hidden_changes WHERE slot = 'runs'", [])
+	expect stillAt == movedAt
+}
+
+case "a public run reaches only the public board, which signed-in pages hear too (#68)" {
+	stub Edge.purge(_) returns true
+	let _ <- api.POST("/github", runHeaders("public-1"), Bytes.fromUtf8(completedRun)) by GitHub
+	expect LiveFeed.publish called once
+	expect LiveFeed.publishMaintainers never called
 }
 
 case "other events push nothing" {
@@ -59,6 +101,7 @@ case "other events push nothing" {
 		Bytes.fromUtf8("{\"repository\": {\"full_name\": \"bynk-lang/bynk\", \"private\": false}}")
 	) by GitHub
 	expect LiveFeed.publish never called
+	expect LiveFeed.publishMaintainers never called
 }
 
 --- A `pull_request` delivery's headers.

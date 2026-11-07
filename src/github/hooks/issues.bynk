@@ -13,7 +13,7 @@ fn recordIssue(
 	d: Delivery,
 	body: Bytes,
 	fresh: Bool
-) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets, GitHubApi, Clock {
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, GitHubApi, Clock {
 	let nothing: Option[LiveEvent] = None
 	let Ok(read) = issueOf(body) else match {
 		Err(why) => {
@@ -52,10 +52,8 @@ fn recordIssue(
 		},
 	}
 	// Tell open pages of a delivery's first arrival only (a redelivery tells
-	// nothing new), and only for a repository the public pages may show.
+	// nothing new); which board hears it is `Facts`' call.
 	let true = fresh && showsOnPage(d.event, i.action) else { Effect.pure(nothing) }
-	let shown <- shownLive(i.repo)
-	let true = shown else { Effect.pure(nothing) }
 	Effect.pure(Some(issueEventOf(i)))
 }
 

@@ -127,11 +127,12 @@ type FirstRun = {
 }
 
 ---
-The live board's key. There is one board, so one value; it is a refined
-route parameter because the WebSocket upgrade resolves its agent from the
-route (bynk-lang/bynk#2959).
+A live board's key: `ci`, the public board, or `maintainers`, the signed-in
+board for the repositories the public one leaves out (#68). A refined route
+parameter, because the WebSocket upgrade resolves its agent from the route
+(bynk-lang/bynk#2959).
 ---
-type LiveBoardKey = String where Matches("^ci$")
+type LiveBoardKey = String where Matches("^(ci|maintainers)$")
 
 ---
 A dashboard's id for its live connection: a random UUID the page makes.

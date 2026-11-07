@@ -115,10 +115,12 @@ type RepositoryRow = {
 //
 // The key carries the route's purge generation: when its slot last claimed
 // an edge purge (`edge_purge_slots`, by `purgeSlotOf`'s routes; the runner
-// routes, which no change purges, follow the CI slot). A live change that purges the public routes makes
-// every earlier answer unreachable, so a signed-in page's refetch after it
-// reads afresh, as the public one does at the edge. If the generation can't
-// be read, nothing is kept or reused.
+// routes, which no change purges, follow the CI slot), and when a change the
+// public pages don't show last happened on that slot (`hidden_changes`, #68).
+// A live change that purges the public routes, or one only the maintainers'
+// board hears, makes every earlier answer unreachable, so a signed-in page's
+// refetch after it reads afresh, as the public one does at the edge. If the
+// generation can't be read, nothing is kept or reused.
 fn sharedFigures[T: Codable](
 	route: String,
 	body: String,
@@ -126,9 +128,9 @@ fn sharedFigures[T: Codable](
 ) -> Effect[HttpResult[T]] given Tokens, Deliveries {
 	let purges <- Deliveries.first(
 		"""
-		SELECT (SELECT at FROM edge_purge_slots WHERE slot = 'runs') AS runs,
-		  (SELECT at FROM edge_purge_slots WHERE slot = 'flow') AS flow,
-		  (SELECT at FROM edge_purge_slots WHERE slot = 'issues') AS issues
+		SELECT (SELECT at FROM edge_purge_slots WHERE slot = 'runs') || '/' || (SELECT at FROM hidden_changes WHERE slot = 'runs') AS runs,
+		  (SELECT at FROM edge_purge_slots WHERE slot = 'flow') || '/' || (SELECT at FROM hidden_changes WHERE slot = 'flow') AS flow,
+		  (SELECT at FROM edge_purge_slots WHERE slot = 'issues') || '/' || (SELECT at FROM hidden_changes WHERE slot = 'issues') AS issues
 		""",
 		[]
 	)

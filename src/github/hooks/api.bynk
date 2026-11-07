@@ -170,7 +170,7 @@ service api from http {
 	// the next version, so every token issued before now is refused, on every
 	// device, though it hasn't expired. Needs only a valid token, not one that
 	// is still current or a membership: ending a session is always allowed.
-	on POST("/maintainers/signout") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, Clock {
+	on POST("/maintainers/signout") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, Clock, LiveFeed {
 		let login = sessionOf("\(m.identity)").login
 		let now <- Clock.now()
 		let Ok(_) <- Deliveries.run(
@@ -185,7 +185,24 @@ service api from http {
 				ServerError("could not sign you out; try again")
 			},
 		}
+		// Their live sockets close too (#68): the session they opened under has ended.
+		let _ <- LiveFeed.signedOut(login)
 		Ok(Me { login: login })
+	}
+
+	// Lets a signed-in maintainer's page join the maintainers' live board
+	// (#68): past every check a maintainer route makes, the board expects the
+	// page's client id for `LIVE_EXPECT_MS`, and the page then opens
+	// `/live?board=maintainers&client=<id>`. Never cached.
+	on POST("/maintainers/live") (body: LiveRequest) -> Effect[HttpResult[LiveExpected]] by m: Maintainer given Deliveries, Logger, Clock, GitHubApi, MaintainerLimit, LiveFeed {
+		forMaintainer("\(m.identity)", (login) => {
+			let _ <- LiveFeed.awaitSocket(body.client, login)
+			let r: HttpResult[LiveExpected] = Ok(LiveExpected {
+				client: body.client,
+				within_ms: LIVE_EXPECT_MS,
+			})
+			Effect.pure(r)
+		})
 	}
 
 	// The maintainers' figures (#53): each public metrics route's, for a

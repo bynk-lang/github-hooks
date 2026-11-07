@@ -66,15 +66,13 @@ fn releaseChanged(
 	d: Delivery,
 	body: Bytes,
 	fresh: Bool
-) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets, GitHubApi {
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, GitHubApi {
 	let nothing: Option[LiveEvent] = None
 	let _ <- recordRelease(d, body)
 	let true = fresh else { Effect.pure(nothing) }
 	let Ok(r) = releaseOf(body) else { Effect.pure(nothing) }
 	let settled = r.action == "released" || r.action == "prereleased" || r.action == "deleted"
 	let true = settled && !r.draft else { Effect.pure(nothing) }
-	let shown <- shownLive(r.repo)
-	let true = shown else { Effect.pure(nothing) }
 	Effect.pure(Some(releaseEventOf(r)))
 }
 
