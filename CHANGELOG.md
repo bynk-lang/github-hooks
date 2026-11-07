@@ -6,6 +6,14 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-07
+
+Phases 2 to 4: the read API, daily digest and retention; the App acting on
+events (welcoming first-time contributors); and the public dashboard of
+repository health, with CI, pull request flow, releases, runner wait and issue
+response, and the maintainers' view behind GitHub sign-in. Deploys now run from
+GitHub Actions.
+
 ### Changed
 
 - Enrolled in the bynk-lang Bynk canary. The Bynk version lives in
@@ -16,6 +24,7 @@ All notable changes to github-hooks. The format follows
   the smoke and live-feed checks, and a deploy dry run against each new Bynk
   release, keeps a `canary` issue open while they fail, and proposes moving
   `BYNK_VERSION` once one passes.
+- Built and tested with Bynk v0.510.34, moved by the canary (#54).
 - Built and tested with Bynk v0.510.2, moved by the canary's first bump
   (#34). The open-PR sync tests build typed `PullPayload` values again, now
   that a suite helper may name a commons type (bynk-lang/bynk#2947); each case
@@ -40,6 +49,18 @@ All notable changes to github-hooks. The format follows
 - Read API tokens are minted with `bynk token Reader --sub <name>`;
   `scripts/token.sh` is gone. Its default lifetime was 30 days, `bynk token`'s
   is an hour: pass `--lifetime 30d` for the old one.
+- The digest's day handling uses `Instant.fromIso`, which already knows which
+  dates exist, and queries the exact range from the day's first instant to the
+  next day's (`start + 1.days`). This replaces a hand-written leap-year check
+  and a string trick for the range's end; behaviour is unchanged.
+- A read whose rows don't decode now logs why, from the `JsonError`'s kind,
+  path and message (`StructuralMismatch at $[0].size: …`), not only that it
+  failed.
+- `scripts/smoke.sh` reads `APP_WEBHOOK_SECRET` (and, to check the read API,
+  `API_TOKEN_SECRET`) from the environment instead of its arguments, and signs
+  with Node, so no secret appears in a process's arguments.
+- **Deploying needs `API_TOKEN_SECRET`** as well as `APP_WEBHOOK_SECRET`. A
+  deploy without it fails, naming it.
 
 ### Added
 
@@ -413,21 +434,6 @@ All notable changes to github-hooks. The format follows
   from a `push`, so a push that deleted a branch or tag can be told apart; the
   digest leaves those out.
 
-### Changed
-
-- The digest's day handling uses `Instant.fromIso`, which already knows which
-  dates exist, and queries the exact range from the day's first instant to the
-  next day's (`start + 1.days`). This replaces a hand-written leap-year check
-  and a string trick for the range's end; behaviour is unchanged.
-- A read whose rows don't decode now logs why, from the `JsonError`'s kind,
-  path and message (`StructuralMismatch at $[0].size: …`), not only that it
-  failed.
-- `scripts/smoke.sh` reads `APP_WEBHOOK_SECRET` (and, to check the read API,
-  `API_TOKEN_SECRET`) from the environment instead of its arguments, and signs
-  with Node, so no secret appears in a process's arguments.
-- **Deploying needs `API_TOKEN_SECRET`** as well as `APP_WEBHOOK_SECRET`. A
-  deploy without it fails, naming it.
-
 ### Fixed
 
 - Each kind of live change purges only the routes it changes, on its own
@@ -506,5 +512,6 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bynk-lang/github-hooks/releases/tag/v0.1.0
