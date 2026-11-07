@@ -168,9 +168,11 @@ workflows, for the window chosen at the top (7, 30 or 90 days):
 
 Each workflow's trend panel lists its jobs among the repository's **slowest
 jobs**, matched by the workflow's file (#62). A job delivery names its workflow
-but not the file, so each job's file comes from its run (`path` in the
-figures). Two workflow files with the same `name:` keep their own jobs. A job
-whose run wasn't recorded has no `path`, and is matched by workflow name.
+but not the file, so each job keeps its run's file (`path` in the figures):
+taken from the run's row when the job is recorded, or filled in when the run
+is recorded after it (migration `0020`). Two workflow files with the same
+`name:` keep their own jobs. A job whose run wasn't recorded has no `path`, and
+is matched by workflow name.
 
 Jobs have no live feed, so the block polls, live or not: what's waiting now
 every 30 seconds, and the window's figures every minute (they change hourly,

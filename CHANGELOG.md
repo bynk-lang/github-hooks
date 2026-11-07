@@ -428,8 +428,10 @@ All notable changes to github-hooks. The format follows
   requests and releases shared one slot that purged every metrics route, so a
   burst of CI runs spent the purges a merge needed. The maintainers' shared
   figures follow each route's own slot.
-- The slowest jobs are matched to their workflow by its file, from each job's
-  run, not by the workflow's name, which two workflow files can share (#62).
+- The slowest jobs are matched to their workflow by its file, not by the
+  workflow's name, which two workflow files can share (#62). Each job keeps its
+  run's file (migration `0020`, which fills it in on the jobs already
+  recorded), so the hourly figures don't join every job to its run.
   `/metrics/runners`' slowest jobs carry `path`.
 - The trend charts' duration axis labels ticks under a minute in seconds, and
   keeps one decimal of minutes: a 30-second tick read "1 m", and a 150-second

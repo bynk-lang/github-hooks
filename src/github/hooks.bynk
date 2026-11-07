@@ -1336,10 +1336,12 @@ fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 	let Ok(_) <- Deliveries.run(
 		"""
 		INSERT INTO workflow_jobs (job_id, repo, run_id, attempt, workflow, name, runner, runner_group, status,
-		                           conclusion, created_at, started_at, completed_at, approval)
-		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+		                           conclusion, created_at, started_at, completed_at, approval, path)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+		        (SELECT path FROM workflow_runs WHERE repo = ?2 AND run_id = ?3 AND attempt = ?4))
 		ON CONFLICT (job_id) DO UPDATE SET
 		  runner = excluded.runner,
+		  path = coalesce(workflow_jobs.path, excluded.path),
 		  runner_group = coalesce(excluded.runner_group, workflow_jobs.runner_group),
 		  status = excluded.status, conclusion = excluded.conclusion,
 		  started_at = coalesce(excluded.started_at, workflow_jobs.started_at),
@@ -1762,6 +1764,19 @@ fn recordRun(
 		Err(e) => {
 			let _ <- Logger.error(
 				"could not record \(r.repo) run \(r.runId) attempt \(r.attempt): \(sqlError(e))"
+			)
+			Effect.pure(nothing)
+		},
+	}
+	// A job delivery doesn't name its workflow's file, so the run's jobs
+	// recorded before it take it from the run (#62).
+	let Ok(_) <- Deliveries.run(
+		"UPDATE workflow_jobs SET path = ?4 WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND path IS NULL",
+		[Text(r.repo), Integer(r.runId), Integer(r.attempt), Text(r.path)]
+	) else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not give \(r.repo) run \(r.runId) attempt \(r.attempt)'s jobs their workflow's file: \(sqlError(e))"
 			)
 			Effect.pure(nothing)
 		},
@@ -2999,13 +3014,12 @@ service runnerFigures from cron {
 					"""
 					WITH windows (days, since) AS (VALUES (7, ?1), (30, ?2), (90, ?3)),
 					counts AS (
-					  SELECT j.repo, r.path, j.workflow, j.name, j.took_seconds AS took,
+					  SELECT j.repo, j.path, j.workflow, j.name, j.took_seconds AS took,
 					    sum(j.started_at >= ?1) AS n7, sum(j.started_at >= ?2) AS n30, count(*) AS n90
 					  FROM workflow_jobs j INDEXED BY workflow_jobs_took
-					  LEFT JOIN workflow_runs r ON r.repo = j.repo AND r.run_id = j.run_id AND r.attempt = j.attempt
 					  WHERE j.took_seconds IS NOT NULL AND j.conclusion = 'success'
 					    AND j.started_at >= ?3 AND j.started_at < ?4
-					  GROUP BY j.repo, r.path, j.workflow, j.name, j.took_seconds
+					  GROUP BY j.repo, j.workflow, j.name, j.path, j.took_seconds
 					),
 					spread AS (
 					  SELECT w.days, c.repo, c.path, c.workflow, c.name, c.took,
