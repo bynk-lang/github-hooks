@@ -189,8 +189,87 @@
   function forget() {
     store.drop(KEY);
     shown = new Map();
+    mine = null;
+    renderMine();
     renderLink();
     document.dispatchEvent(new CustomEvent("bynk:repositories"));
+  }
+
+  // The page's "Mine" section (#53, step 4): what is the signed-in
+  // maintainer's to act on, from `GET /maintainers/mine`, shown above the
+  // repositories. Each page asks for its own part (`data-mine`): CI, their
+  // pull requests whose CI is failing; PR flow, their open pull requests and
+  // those waiting on their review; issues, their open issues; releases, their
+  // merges waiting to ship. Everything from GitHub is set as text.
+  const MINE_EVERY_MS = 60_000;
+  let mine = null;
+  async function loadMine() {
+    const m = current();
+    if (!m) { mine = null; renderMine(); return; }
+    try {
+      const res = await fetch("/maintainers/mine", { cache: "no-store", headers: { accept: "application/json", authorization: `Bearer ${m.token}` } });
+      if (res.status === 401 || res.status === 403) { forget(); return; }
+      if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
+      mine = await res.json();
+    } catch (e) {
+      console.warn("Couldn't load what's yours:", e.message);
+    }
+    renderMine();
+  }
+
+  const node = (tag, attrs = {}, ...children) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    for (const c of children) if (c != null) n.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    return n;
+  };
+  const ago = (iso) => {
+    const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+    if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min`;
+    if (s < 172800) return `${Math.round(s / 3600)} h`;
+    return `${Math.round(s / 86400)} days`;
+  };
+  const link = (repo, number, kind, title) =>
+    node("a", { href: `https://github.com/${repo}/${kind}/${number}` }, `${repo}#${number}`, " ", title);
+  const CI_LABEL = { failing: "CI failing", running: "CI running", passing: "CI passing" };
+  const STAGE_LABEL = { draft: "draft", queued: "in the merge queue", ready: "ready" };
+
+  function list(title, items, empty, row) {
+    const box = node("div", {}, node("h3", {}, title));
+    if (items.length === 0) box.append(node("p", { class: "mine-empty" }, empty));
+    else box.append(node("ul", { class: "mine-list" }, ...items.map((i) => node("li", {}, ...row(i)))));
+    return box;
+  }
+
+  function renderMine() {
+    const slot = document.getElementById("mine");
+    if (!slot) return;
+    const m = current();
+    if (!m || !mine) { slot.hidden = true; slot.replaceChildren(); return; }
+    const kind = slot.dataset.mine;
+    const parts = [];
+    if (kind === "ci") {
+      const failing = mine.pulls.filter((p) => p.ci === "failing");
+      parts.push(list("Your pull requests failing CI", failing, "None of your open pull requests is failing CI.",
+        (p) => [link(p.repo, p.number, "pull", p.title), " · ", node("span", { class: "mine-ci failing" }, "CI failing")]));
+    } else if (kind === "prs") {
+      parts.push(list("Your open pull requests", mine.pulls, "You have no open pull requests.",
+        (p) => [link(p.repo, p.number, "pull", p.title), " · ", STAGE_LABEL[p.stage] || p.stage,
+          p.stage === "draft" ? null : ` for ${ago(p.ready_since || p.opened_at)}`,
+          p.ci ? " · " : null, p.ci ? node("span", { class: `mine-ci ${p.ci}` }, CI_LABEL[p.ci] || p.ci) : null]));
+      parts.push(list("Waiting on your review", mine.reviews, "Nothing is waiting on your review.",
+        (r) => [link(r.repo, r.number, "pull", r.title), ` · by ${r.author}`,
+          r.draft ? " · draft" : ` · ready for ${ago(r.ready_since || r.opened_at)}`]));
+    } else if (kind === "issues") {
+      parts.push(list("Your open issues", mine.issues, "You have no open issues.",
+        (i) => [link(i.repo, i.number, "issues", i.title), ` · opened ${ago(i.opened_at)} ago`,
+          i.stale ? " · " : null, i.stale ? node("span", { class: "mine-stale" }, `stale, no update for ${ago(i.updated_at)}`) : null]));
+    } else if (kind === "releases") {
+      parts.push(list("Your merges waiting to ship", mine.unreleased, "Nothing of yours is waiting for a release.",
+        (u) => [link(u.repo, u.number, "pull", u.title), ` · merged ${ago(u.merged_at)} ago`]));
+    }
+    slot.replaceChildren(node("div", { class: "repo-head" }, node("h2", { id: "mine-title" }, `Yours, ${m.login}`)), ...parts);
+    slot.hidden = false;
   }
 
   window.bynkMaintainer = current;
@@ -199,6 +278,11 @@
 
   document.addEventListener("DOMContentLoaded", () => {
     if (location.pathname === CALLBACK) finish();
-    else { renderLink(); loadRepositories(); }
+    else {
+      renderLink();
+      loadRepositories();
+      loadMine();
+      setInterval(() => { if (!document.hidden) loadMine(); }, MINE_EVERY_MS);
+    }
   });
 })();

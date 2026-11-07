@@ -1,0 +1,213 @@
+// Phase 4, slice 6, step 4 (#53): what is a signed-in maintainer's to act on,
+// `GET /maintainers/mine`, against an in-memory D1 with the migrations
+// applied. It's 12:00 UTC on 5 November; accuser is a maintainer (a kept
+// membership answer), in public and private repositories alike.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+---
+accuser's open pull requests: #1 (CI failing on its head, though an older
+commit passed), #2 (passing, after a failed first attempt), #3 a draft with no
+runs, and #4 in a private repository, queued. Someone else's #5 asks accuser
+(and a team) to review; #6 asks someone else; #7 is closed but still lists
+accuser. accuser's issues: #10 stale (no update since October), #11 fresh, and
+someone else's #12. Merges: #20 after bynk-lang/bynk's latest final release,
+#21 before it, #22 already shipped, #23 in a repository that never releases.
+---
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				INSERT INTO repositories (repo, public, default_branch) VALUES
+				  ('bynk-lang/bynk', 1, 'main'), ('bynk-lang/secret', 0, 'main'), ('bynk-lang/quiet', 1, 'main')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+				                           opened_at, ready_at, closed_at, merged_at, updated_at, head_sha, released_in) VALUES
+				  ('bynk-lang/bynk', 1, 'One', 'accuser', 0, 'main', 'one', 0, 'open', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', NULL, NULL, '2026-11-04T00:00:00.000Z', 'sha-1', NULL),
+				  ('bynk-lang/bynk', 2, 'Two', 'Accuser', 0, 'main', 'two', 0, 'open', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', NULL, NULL, '2026-11-04T00:00:00.000Z', 'sha-2', NULL),
+				  ('bynk-lang/bynk', 3, 'Three', 'accuser', 0, 'main', 'three', 1, 'open', '2026-11-03T00:00:00.000Z', NULL, NULL, NULL, '2026-11-04T00:00:00.000Z', 'sha-3', NULL),
+				  ('bynk-lang/secret', 4, 'Four', 'accuser', 0, 'main', 'four', 0, 'open', '2026-10-30T00:00:00.000Z', '2026-10-30T00:00:00.000Z', NULL, NULL, '2026-11-04T00:00:00.000Z', 'sha-4', NULL),
+				  ('bynk-lang/bynk', 5, 'Five', 'a-person', 0, 'main', 'five', 0, 'open', '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', NULL, NULL, '2026-11-04T00:00:00.000Z', 'sha-5', NULL),
+				  ('bynk-lang/bynk', 6, 'Six', 'a-person', 0, 'main', 'six', 0, 'open', '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', NULL, NULL, '2026-11-04T00:00:00.000Z', 'sha-6', NULL),
+				  ('bynk-lang/bynk', 7, 'Seven', 'a-person', 0, 'main', 'seven', 0, 'closed', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', '2026-11-02T00:00:00.000Z', NULL, '2026-11-02T00:00:00.000Z', 'sha-7', NULL),
+				  ('bynk-lang/bynk', 20, 'Twenty', 'accuser', 0, 'main', 'twenty', 0, 'merged', '2026-11-01T00:00:00.000Z', NULL, '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', 'sha-20', NULL),
+				  ('bynk-lang/bynk', 21, 'Twenty-one', 'accuser', 0, 'main', 'tw1', 0, 'merged', '2026-10-01T00:00:00.000Z', NULL, '2026-10-02T00:00:00.000Z', '2026-10-02T00:00:00.000Z', '2026-10-02T00:00:00.000Z', 'sha-21', NULL),
+				  ('bynk-lang/bynk', 22, 'Twenty-two', 'accuser', 0, 'main', 'tw2', 0, 'merged', '2026-11-01T00:00:00.000Z', NULL, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', '2026-11-04T00:00:00.000Z', 'sha-22', 'v2.0.0'),
+				  ('bynk-lang/quiet', 23, 'Twenty-three', 'accuser', 0, 'main', 'tw3', 0, 'merged', '2026-11-01T00:00:00.000Z', NULL, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', 'sha-23', NULL)
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_request_events (delivery, repo, number, action, reason, at) VALUES
+				  ('e-1', 'bynk-lang/secret', 4, 'enqueued', NULL, '2026-11-05T11:50:00.000Z')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+				                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+				  ('bynk-lang/bynk', 100, 1, 'CI', 'ci.yml', 'one', 'sha-0', 'pull_request', 'completed', 'success',
+				   '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z', '2026-11-01T00:05:00.000Z', '2026-11-01T00:05:00.000Z'),
+				  ('bynk-lang/bynk', 101, 1, 'CI', 'ci.yml', 'one', 'sha-1', 'pull_request', 'completed', 'failure',
+				   '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:05:00.000Z', '2026-11-04T00:05:00.000Z'),
+				  ('bynk-lang/bynk', 103, 1, 'Lint', 'lint.yml', 'one', 'sha-1', 'pull_request', 'completed', 'success',
+				   '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:05:00.000Z', '2026-11-04T00:05:00.000Z'),
+				  ('bynk-lang/bynk', 102, 1, 'CI', 'ci.yml', 'two', 'sha-2', 'pull_request', 'completed', 'failure',
+				   '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', '2026-11-04T00:05:00.000Z', '2026-11-04T00:05:00.000Z'),
+				  ('bynk-lang/bynk', 102, 2, 'CI', 'ci.yml', 'two', 'sha-2', 'pull_request', 'completed', 'success',
+				   '2026-11-04T00:10:00.000Z', '2026-11-04T00:10:00.000Z', '2026-11-04T00:10:00.000Z', '2026-11-04T00:15:00.000Z', '2026-11-04T00:15:00.000Z'),
+				  ('bynk-lang/secret', 104, 1, 'CI', 'ci.yml', 'four', 'sha-4', 'pull_request', 'in_progress', NULL,
+				   '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z', '2026-11-05T11:01:00.000Z', NULL, '2026-11-05T11:01:00.000Z')
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_request_review_requests (repo, number, reviewer, team) VALUES
+				  ('bynk-lang/bynk', 5, 'Accuser', 0), ('bynk-lang/bynk', 5, 'core', 1),
+				  ('bynk-lang/bynk', 6, 'b-person', 0), ('bynk-lang/bynk', 7, 'accuser', 0),
+				  ('bynk-lang/bynk', 6, 'accuser', 1)
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state, state_reason,
+				                    opened_at, closed_at, updated_at, comments) VALUES
+				  ('bynk-lang/bynk', 10, 'Ten', 'accuser', 0, 'MEMBER', 'open', NULL, '2026-10-01T00:00:00.000Z', NULL, '2026-10-10T00:00:00.000Z', 0),
+				  ('bynk-lang/secret', 11, 'Eleven', 'accuser', 0, 'MEMBER', 'open', NULL, '2026-11-04T00:00:00.000Z', NULL, '2026-11-04T00:00:00.000Z', 0),
+				  ('bynk-lang/bynk', 12, 'Twelve', 'a-person', 0, 'NONE', 'open', NULL, '2026-11-04T00:00:00.000Z', NULL, '2026-11-04T00:00:00.000Z', 0)
+			""",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO releases (repo, tag, release_id, draft, prerelease, created_at, published_at, author_is_bot) VALUES
+				  ('bynk-lang/bynk', 'v2.0.0', 1, 0, 0, '2026-11-02T12:00:00.000Z', '2026-11-02T12:00:00.000Z', 0),
+				  ('bynk-lang/bynk', 'v2.1.0-rc', 2, 0, 1, '2026-11-04T00:00:00.000Z', '2026-11-04T00:00:00.000Z', 0)
+			""",
+			params: [],
+		},
+	]
+}
+
+case "a maintainer's own work, across public and private repositories" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	expect r == Ok(Mine {
+		login: "accuser",
+		pulls: [
+			MyPull {
+				repo: "bynk-lang/secret",
+				number: 4,
+				title: "Four",
+				stage: "queued",
+				opened_at: "2026-10-30T00:00:00.000Z",
+				ready_since: Some("2026-10-30T00:00:00.000Z"),
+				ci: Some("running"),
+			},
+			MyPull {
+				repo: "bynk-lang/bynk",
+				number: 1,
+				title: "One",
+				stage: "ready",
+				opened_at: "2026-11-01T00:00:00.000Z",
+				ready_since: Some("2026-11-01T00:00:00.000Z"),
+				ci: Some("failing"),
+			},
+			MyPull {
+				repo: "bynk-lang/bynk",
+				number: 2,
+				title: "Two",
+				stage: "ready",
+				opened_at: "2026-11-02T00:00:00.000Z",
+				ready_since: Some("2026-11-02T00:00:00.000Z"),
+				ci: Some("passing"),
+			},
+			MyPull {
+				repo: "bynk-lang/bynk",
+				number: 3,
+				title: "Three",
+				stage: "draft",
+				opened_at: "2026-11-03T00:00:00.000Z",
+				ready_since: None,
+				ci: None,
+			},
+		],
+		reviews: [
+			ReviewWaiting {
+				repo: "bynk-lang/bynk",
+				number: 5,
+				title: "Five",
+				author: "a-person",
+				draft: false,
+				opened_at: "2026-11-04T00:00:00.000Z",
+				ready_since: Some("2026-11-04T00:00:00.000Z"),
+			},
+		],
+		issues: [
+			MyIssue {
+				repo: "bynk-lang/bynk",
+				number: 10,
+				title: "Ten",
+				opened_at: "2026-10-01T00:00:00.000Z",
+				updated_at: "2026-10-10T00:00:00.000Z",
+				stale: true,
+			},
+			MyIssue {
+				repo: "bynk-lang/secret",
+				number: 11,
+				title: "Eleven",
+				opened_at: "2026-11-04T00:00:00.000Z",
+				updated_at: "2026-11-04T00:00:00.000Z",
+				stale: false,
+			},
+		],
+		unreleased: [
+			MyMerge {
+				repo: "bynk-lang/bynk",
+				number: 20,
+				title: "Twenty",
+				merged_at: "2026-11-03T00:00:00.000Z",
+			},
+		],
+	})
+}
+
+case "someone with nothing to act on gets empty lists, not an error" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let kept <- Deliveries.run(
+		"INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'new-person', 1, '2026-11-05T11:00:00.000Z')",
+		[]
+	)
+	expect kept is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("new-person")
+	expect r == Ok(Mine { login: "new-person", pulls: [], reviews: [], issues: [], unreleased: [] })
+}
+
+case "it is a maintainer's alone: someone who has left is refused" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let installed <- Deliveries.run(
+		"INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'push', 'bynk-lang/bynk', 42, 1, '2026-11-05T00:00:00.000Z')",
+		[]
+	)
+	expect installed is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("a-leaver")
+	expect r is RawError(403, _, _)
+}

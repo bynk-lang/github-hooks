@@ -141,3 +141,71 @@ type ShownRepository = {
 	public: Bool,
 	excluded: Bool,
 }
+
+---
+`GET /maintainers/mine` (#53): what is the signed-in maintainer's to act on,
+across every repository, private ones included. Each list is capped at
+`MAX_MINE`.
+- `pulls`: their open pull requests, oldest waiting first, each with its
+  stage and its CI on its head commit.
+- `reviews`: open pull requests waiting on their review, asked of them by
+  name (a team's request isn't attributed to its members).
+- `issues`: their open issues, the stale first (no update for 14 days).
+- `unreleased`: their pull requests merged since their repository's latest
+  final release, waiting to ship.
+---
+type Mine = {
+	login: String,
+	pulls: List[MyPull],
+	reviews: List[ReviewWaiting],
+	issues: List[MyIssue],
+	unreleased: List[MyMerge],
+}
+
+---
+One of a maintainer's open pull requests. `stage` is `draft`, `queued` or
+`ready`. `ci` is the latest attempt of each workflow on its head commit, taken
+together: `failing` if any failed, else `running` if any is still going, else
+`passing`; `None` when nothing has run on it (or its head isn't known yet).
+---
+type MyPull = {
+	repo: String,
+	number: Int,
+	title: String,
+	stage: String,
+	opened_at: String,
+	ready_since: Option[String],
+	ci: Option[String],
+}
+
+--- An open pull request waiting on the maintainer's review.
+type ReviewWaiting = {
+	repo: String,
+	number: Int,
+	title: String,
+	author: String,
+	draft: Bool,
+	opened_at: String,
+	ready_since: Option[String],
+}
+
+--- One of a maintainer's open issues. `stale` is no update for 14 days.
+type MyIssue = {
+	repo: String,
+	number: Int,
+	title: String,
+	opened_at: String,
+	updated_at: String,
+	stale: Bool,
+}
+
+--- One of a maintainer's merged pull requests waiting to ship.
+type MyMerge = {
+	repo: String,
+	number: Int,
+	title: String,
+	merged_at: String,
+}
+
+--- The most of each kind `GET /maintainers/mine` lists.
+const MAX_MINE: Int = 50

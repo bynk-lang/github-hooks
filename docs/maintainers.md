@@ -4,8 +4,8 @@ The last slice of the dashboard
 ([#53](https://github.com/bynk-lang/github-hooks/issues/53)): a signed-in view
 for bynk-lang's maintainers, covering private repositories, what is theirs to
 act on, and actions such as re-running a flaky run. This page covers signing
-in (step 1), the maintainers' figures (step 2) and the signed-in pages (step
-3). The per-person view and the actions follow in later steps.
+in (step 1), the maintainers' figures (step 2), the signed-in pages (step
+3) and the per-person view (step 4). The actions follow in step 5.
 
 ## Who may sign in
 
@@ -111,6 +111,7 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 | `GET /maintainers/me` | a maintainer | `{login}` |
 | `POST /maintainers/metrics/…` | a maintainer | each public metrics route's figures, private and excluded repositories included ([below](#the-maintainers-figures)) |
 | `GET /maintainers/repositories` | a maintainer | every repository: `[{repo, public, excluded}]` |
+| `GET /maintainers/mine` | a maintainer | what is theirs to act on ([below](#whats-yours)) |
 
 **`/maintainers/token`:**
 - **Callback only:** the `redirect_uri` must be `/maintainers/callback` on
@@ -219,6 +220,44 @@ for the public.
 - **A refused token:** if a twin answers `401` (an expired or forged token)
   or `403` (someone who has left the organisation), the page signs out and
   fetches the public figures instead.
+
+## What's yours
+
+`GET /maintainers/mine` (step 4) answers what is the signed-in maintainer's
+to act on, across every repository, private ones included. Each list holds at
+most 50.
+
+- **`pulls`:** their open pull requests, drafts last, oldest waiting first.
+  Each has its stage (`draft`, `queued` or `ready`) and its CI.
+  - **Matching:** CI is matched by the head commit (`head_sha`, recorded
+    since step 4), from the latest attempt of each workflow run on it.
+  - **The state:** `failing` if any failed, else `running` if any is still
+    going, else `passing`. It's `null` when nothing has run on it, or its
+    head isn't recorded yet (an older pull request until its next delivery
+    or the daily sync).
+- **`reviews`:** open pull requests waiting on their review. Only requests
+  made to them by name count: a team's request isn't attributed to its
+  members.
+- **`issues`:** their open issues, the stale first (no update for 14 days).
+- **`unreleased`:** their pull requests merged since their repository's
+  latest final release, waiting to ship. A repository that has never
+  released is left out.
+
+It's the maintainer's alone, so it isn't shared like the figures, but it
+counts against their per-login limit. Every list reads by an index on the
+author or the reviewer.
+
+Each signed-in page shows its own part of it above the repositories, under
+*Yours, login*. `signin.js` fetches it on load and every minute while the
+page is visible, and draws it into the page's `#mine` section (its
+`data-mine` says which part).
+
+| Page | Shows |
+|---|---|
+| CI health | their open pull requests whose CI is failing |
+| PR flow | their open pull requests, with stage, how long they've waited and CI; and those waiting on their review |
+| Issues | their open issues, stale ones marked |
+| Releases | their merges waiting to ship |
 
 ## Settings
 

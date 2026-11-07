@@ -109,6 +109,13 @@ h2 { font-size: 1.15rem; margin: 0; }
   padding: 16px; margin-bottom: 20px;
 }
 .repo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+/* What is the signed-in maintainer's (#53, step 4). */
+.mine h3 { margin: 12px 0 4px; font-size: 1rem; }
+.mine-list { margin: 0; padding-left: 1.2em; }
+.mine-list li { margin: 4px 0; }
+.mine-empty { margin: 4px 0; color: var(--ink-2); }
+.mine-ci, .mine-stale { font-weight: 500; }
+.mine-ci.failing, .mine-stale { text-decoration: underline; text-decoration-style: dotted; }
 /* Signed in (#53), the page says it covers every repository (signin.js sets `signed-in`). */
 .for-maintainers { display: none; }
 .signed-in .for-maintainers { display: block; }

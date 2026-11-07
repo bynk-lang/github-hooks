@@ -335,6 +335,10 @@ case "the callback page loads the sign-in script, and every dashboard has the si
 	expect pages.all(
 		(p) => !p.split("<script src=\"\(signinJs.url)\"").first().getOrElse("").contains("<script")
 	)
+	// Signed in, each page shows what's the maintainer's, its own part of it.
+	expect pages.map((p) => ["ci", "prs", "issues", "releases"].filter((k) => p.contains(
+		"data-mine=\"\(k)\""
+	))) == [["ci"], ["prs"], ["releases"], ["issues"]]
 	// Signed in, each page says it covers every repository.
 	expect pages.all((p) => p.contains("class=\"subtitle for-public\"")
 		&& p.contains("class=\"subtitle for-maintainers\""))

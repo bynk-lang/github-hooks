@@ -28,6 +28,20 @@ indefinitely (retention prunes `deliveries`, not these).
   the queue turned a PR away.
 - **`pull_request_reviews`**: each review, keyed by GitHub's review id.
   `dismissed` is final. Recorded but not shown yet.
+- **For the maintainers' view** (migration `0017`, #53):
+  - **`head_sha`:** each PR's head commit. Its CI is found by commit, not by
+    branch name, since a fork's `main` isn't the base repository's.
+  - **`pull_request_review_requests`:** whose review a PR is waiting on, a
+    user's login or a team's slug. A delivery's whole set
+    (`requested_reviewers`, `requested_teams`) replaces the stored one only
+    when the delivery is strictly newer. Requests made in the same second
+    arrive as deliveries with one `updated_at`, each listing the set at its
+    moment in no fixed order, so `review_requested` and
+    `review_request_removed` also add or remove the one request they name,
+    as issue labels are kept ([issues.md](issues.md)). A submitted review
+    takes its reviewer's own request off, as GitHub does. The review's own
+    pull request isn't saved, being a partial view. The daily sync fills both
+    for open pull requests.
 
 ## The daily sync
 
