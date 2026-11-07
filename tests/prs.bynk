@@ -288,3 +288,37 @@ case "a maintainer's PR flow includes private and excluded repositories; the pub
 	expect mt1.contains("bynk-lang/secret") && mt1.contains("bynk-lang/sandbox")
 	expect mt1.contains("bynk-lang/bynk")
 }
+
+case "a maintainer's PR figures are shared until a pull request or release purge, not a run's (#62)" {
+	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
+	expect seeded is Ok(_)
+	let first <- api.POST(
+		"/maintainers/metrics/prs/open",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	expect first is Ok(_)
+	let cleared <- Deliveries.run("DELETE FROM pull_requests", [])
+	expect cleared is Ok(_)
+	// A run's purge leaves PR flow's shared answer alone.
+	let run <- Deliveries.run(
+		"UPDATE edge_purge_slots SET at = '2026-11-05T11:59:00.000Z' WHERE slot = 'runs'",
+		[]
+	)
+	expect run is Ok(_)
+	let afterRun <- api.POST(
+		"/maintainers/metrics/prs/open",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	expect afterRun == first
+	// A pull request's purge moves it on, so the cleared table is read.
+	let flow <- Deliveries.run(
+		"UPDATE edge_purge_slots SET at = '2026-11-05T11:59:30.000Z' WHERE slot = 'flow'",
+		[]
+	)
+	expect flow is Ok(_)
+	let afterFlow <- api.POST(
+		"/maintainers/metrics/prs/open",
+		NowQuery { repo: None }
+	) by Maintainer("accuser")
+	expect afterFlow == Ok(PrsOpen { open: [] })
+}

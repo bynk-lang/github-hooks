@@ -458,6 +458,8 @@ One of a repository's slowest jobs in the window, by its median duration
 ---
 type JobTime = {
 	repo: String,
+	--- The workflow's file (#62), from the job's run; `None` when that run isn't recorded.
+	path: Option[String] = None,
 	workflow: String,
 	name: String,
 	runs: Int,

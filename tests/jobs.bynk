@@ -7,6 +7,8 @@ suite github.hooks
 
 fixture completedJob = "fixtures/github/workflow_job.completed.json"
 
+fixture completedRun = "fixtures/github/workflow_run.completed.json"
+
 --- A delivery's headers.
 fn headers(id: String) -> RequestHeaders {
 	RequestHeaders.of(["X-GitHub-Event: workflow_job", "X-GitHub-Delivery: \(id)"])
@@ -186,4 +188,37 @@ case "a waiting delivery that arrives after the job completed still marks it" {
 	) by GitHub
 	let marked <- Deliveries.first("SELECT status, approval FROM workflow_jobs", [])
 	expect marked == Ok(Some("{\"status\":\"completed\",\"approval\":1}"))
+}
+
+--- The run fixture moved to the job fixture's repository and run.
+fn jobsRun() -> Bytes {
+	Bytes.fromUtf8(completedRun
+		.replace("bynk-lang/github-hooks", "bynk-lang/bynk")
+		.replace("41978704067", "42190975969"))
+}
+
+fn runHeaders(id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: workflow_run", "X-GitHub-Delivery: \(id)"])
+}
+
+case "a job keeps its workflow's file from its run, whichever is recorded first (#62)" {
+	// The job first: it has no file until its run is recorded.
+	let _ <- api.POST("/github", headers("job-done"), Bytes.fromUtf8(completedJob)) by GitHub
+	let before <- Deliveries.first("SELECT path FROM workflow_jobs", [])
+	expect before == Ok(Some("{\"path\":null}"))
+	let _ <- api.POST("/github", runHeaders("run-done"), jobsRun()) by GitHub
+	let after <- Deliveries.first("SELECT path FROM workflow_jobs", [])
+	expect after == Ok(Some("{\"path\":\".github/workflows/ci.yml\"}"))
+	// The run first: a job recorded after it takes the file straight away.
+	let _ <- api.POST(
+		"/github",
+		headers("job-other"),
+		Bytes.fromUtf8(completedJob.replace("\"id\": 127812039258", "\"id\": 127812039259"))
+	) by GitHub
+	let both <- Deliveries.first(
+		"SELECT count(*) AS jobs, count(path) AS with_path FROM workflow_jobs",
+		[]
+	)
+	expect both == Ok(Some("{\"jobs\":2,\"with_path\":2}"))
+	expect Logger.error never called
 }

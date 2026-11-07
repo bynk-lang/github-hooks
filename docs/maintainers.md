@@ -187,8 +187,9 @@ and those `DASHBOARD_EXCLUDE` keeps off the public pages.
   kept, and the cache is asked only past the membership check, so a kept
   answer never lets a leaver in.
 - **Live, through the cache:** each key carries the route's purge
-  generation, when its last edge purge was claimed (`edge_purges.at`, or the
-  issue routes' own `edge_purge_slots` row). A live change that purges the
+  generation, when its slot last claimed an edge purge (`edge_purge_slots`:
+  `runs` for CI and runner routes, `flow` for PR flow and releases, `issues`
+  for issues). A live change that purges the
   public routes moves the maintainers' figures to a fresh key too, so a
   signed-in page's refetch after a live event reads afresh, as a public one
   does at the edge. Older entries are never read again and expire. That costs
