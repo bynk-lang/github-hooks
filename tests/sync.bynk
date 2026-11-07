@@ -404,3 +404,42 @@ case "a pull request held under a differently cased name is still repaired, unde
 	)
 	expect rows == Ok(Some("{\"rows\":\"Bynk-Lang/Bynk#5:merged\"}"))
 }
+
+--- #10 as the list endpoint gives it now: its head commit, and asking accuser and the core team to review.
+fn askedPull() -> PullPayload {
+	PullPayload {
+		...listed(10, false, "2026-11-05T08:00:00Z"),
+		head: BranchRef {
+			ref: "branch-10",
+			sha: Some("sha-10"),
+			repo: None,
+		},
+		requested_reviewers: Some([UserRef { login: "accuser", type: "User" }]),
+		requested_teams: Some([TeamRef { slug: "core" }]),
+	}
+}
+
+case "the sync back-fills an unchanged pull request's head commit and review requests" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns ok(Json.encode([askedPull()]))
+	let seeded <- Deliveries.batch(repositories())
+	expect seeded is Ok(_)
+	// Recorded before review requests were, at the same `updated_at`.
+	let held <- Deliveries.run(
+		"""
+		INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+		                           opened_at, updated_at)
+		VALUES ('bynk-lang/bynk', 10, 'Pull request 10', 'a-contributor', 0, 'main', 'branch-10', 0, 'open',
+		        '2026-11-01T09:00:00.000Z', '2026-11-05T08:00:00.000Z')
+		""",
+		[]
+	)
+	expect held is Ok(_)
+	let r <- pullSync.schedule("41 4 * * *", 1793880000000)
+	expect r == Ok(())
+	let row <- Deliveries.first(
+		"SELECT head_sha, (SELECT group_concat(reviewer || ':' || team, ' ') FROM (SELECT * FROM pull_request_review_requests ORDER BY reviewer)) AS asked FROM pull_requests",
+		[]
+	)
+	expect row == Ok(Some("{\"head_sha\":\"sha-10\",\"asked\":\"accuser:0 core:1\"}"))
+}

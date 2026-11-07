@@ -40,8 +40,10 @@ indefinitely (retention prunes `deliveries`, not these).
     `review_request_removed` also add or remove the one request they name,
     as issue labels are kept ([issues.md](issues.md)). A submitted review
     takes its reviewer's own request off, as GitHub does. The review's own
-    pull request isn't saved, being a partial view. The daily sync fills both
-    for open pull requests.
+    pull request isn't saved, being a partial view.
+  - **The daily sync** fills both for open pull requests. It reads GitHub's
+    current state, so at a tie its set of requests replaces the stored one,
+    which back-fills pull requests recorded before requests were.
 
 ## The daily sync
 

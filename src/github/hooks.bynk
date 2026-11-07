@@ -928,17 +928,45 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 		.concat(reviewRequestChange(p))
 }
 
-// Replaces a pull request's review requests (#53) with the delivery's set,
-// users and teams, when it lists them and is strictly newer than the row (or
-// there is no row yet). Runs before the row moves, so it compares with the
-// row as it was. Several requests made in one second arrive as deliveries
-// with one `updated_at`, each listing the set at its moment in no guaranteed
-// order, so a tie never replaces the set: `reviewRequestChange` adds each.
+// Replaces a pull request's review requests (#53) with the set its fact
+// lists, users and teams, when it lists them and the row isn't newer. Runs
+// before the row moves, so it compares with the row as it was.
+//
+// A delivery replaces the set only when it is strictly newer than the row (or
+// there is no row yet). Several requests made in one second arrive as
+// deliveries with one `updated_at`, each listing the set at its moment in no
+// guaranteed order, so a tie never replaces the set: `reviewRequestChange`
+// adds each. The daily sync reads GitHub's current state, so at a tie its set
+// is the current one, and replaces the stored set unless the row is strictly
+// newer: that back-fills pull requests recorded before requests were.
 fn reviewRequestSet(p: PullFact) -> List[SqlStatement] {
 	let users = p.reviewers.map((us) => us.map((u) => [u, "0"]))
 	let teams = p.teams.map((ts) => ts.map((t) => [t, "1"]))
+	let requests = users.getOrElse([]).concat(teams.getOrElse([]))
 	if users.isNone() && teams.isNone() {
 		[]
+	} else if p.action == "sync" {
+		[
+			SqlStatement {
+				sql: """
+					DELETE FROM pull_request_review_requests
+					WHERE repo = ?1 AND number = ?2
+					  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?3)
+				""",
+				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
+			},
+		].concat(
+			requests.map(
+				(r) => SqlStatement {
+					sql: """
+						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
+						SELECT ?1, ?2, ?3, ?4
+						WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?5)
+					""",
+					params: requestParams(p, r),
+				}
+			)
+		)
 	} else {
 		[
 			SqlStatement {
@@ -950,27 +978,29 @@ fn reviewRequestSet(p: PullFact) -> List[SqlStatement] {
 				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
 			},
 		].concat(
-			users
-				.getOrElse([])
-				.concat(teams.getOrElse([]))
-				.map(
-					(r) => SqlStatement {
-						sql: """
-							INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
-							SELECT ?1, ?2, ?3, ?4
-							WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at >= ?5)
-						""",
-						params: [
-							Text(p.repo),
-							Integer(p.number),
-							Text(r.first().getOrElse("")),
-							Integer(if r.get(1) == Some("1") { 1 } else { 0 }),
-							Text(p.updatedAt),
-						],
-					}
-				)
+			requests.map(
+				(r) => SqlStatement {
+					sql: """
+						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
+						SELECT ?1, ?2, ?3, ?4
+						WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at >= ?5)
+					""",
+					params: requestParams(p, r),
+				}
+			)
 		)
 	}
+}
+
+// One request's parameters for `reviewRequestSet`: `r` is [reviewer, "1" for a team].
+fn requestParams(p: PullFact, r: List[String]) -> List[SqlValue] {
+	[
+		Text(p.repo),
+		Integer(p.number),
+		Text(r.first().getOrElse("")),
+		Integer(if r.get(1) == Some("1") { 1 } else { 0 }),
+		Text(p.updatedAt),
+	]
 }
 
 // The one review request a `review_requested` or `review_request_removed`
