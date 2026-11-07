@@ -8,12 +8,14 @@ stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
 ---
 accuser's open pull requests: #1 (CI failing on its head, though an older
-commit passed), #2 (passing, after a failed first attempt), #3 a draft with no
-runs, and #4 in a private repository, queued. Someone else's #5 asks accuser
-(and a team) to review; #6 asks someone else; #7 is closed but still lists
-accuser. accuser's issues: #10 stale (no update since October), #11 fresh, and
-someone else's #12. Merges: #20 after bynk-lang/bynk's latest final release,
-#21 before it, #22 already shipped, #23 in a repository that never releases.
+commit passed), #2 (passing, after a failed first attempt), #3 a draft whose
+only run lost its completion two days ago, and #4 in a private repository,
+queued. #2 also has a lint run that lost its completion: it doesn't hold the
+PR at "running". Someone else's #5 asks accuser (and a team) to review; #6
+asks someone else; #7 is closed but still lists accuser. accuser's issues: #10
+stale (no update since October), #11 fresh, and someone else's #12. Merges:
+#20 after bynk-lang/bynk's latest final release, #21 before it, #22 already
+shipped, #23 in a repository that never releases.
 ---
 fn seed() -> List[SqlStatement] {
 	[
@@ -68,7 +70,11 @@ fn seed() -> List[SqlStatement] {
 				  ('bynk-lang/bynk', 102, 2, 'CI', 'ci.yml', 'two', 'sha-2', 'pull_request', 'completed', 'success',
 				   '2026-11-04T00:10:00.000Z', '2026-11-04T00:10:00.000Z', '2026-11-04T00:10:00.000Z', '2026-11-04T00:15:00.000Z', '2026-11-04T00:15:00.000Z'),
 				  ('bynk-lang/secret', 104, 1, 'CI', 'ci.yml', 'four', 'sha-4', 'pull_request', 'in_progress', NULL,
-				   '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z', '2026-11-05T11:01:00.000Z', NULL, '2026-11-05T11:01:00.000Z')
+				   '2026-11-05T11:00:00.000Z', '2026-11-05T11:00:00.000Z', '2026-11-05T11:01:00.000Z', NULL, '2026-11-05T11:01:00.000Z'),
+				  ('bynk-lang/bynk', 105, 1, 'Lint', 'lint.yml', 'two', 'sha-2', 'pull_request', 'in_progress', NULL,
+				   '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', '2026-11-03T00:01:00.000Z', NULL, '2026-11-03T00:01:00.000Z'),
+				  ('bynk-lang/bynk', 106, 1, 'CI', 'ci.yml', 'three', 'sha-3', 'pull_request', 'queued', NULL,
+				   '2026-11-03T00:00:00.000Z', '2026-11-03T00:00:00.000Z', NULL, NULL, '2026-11-03T00:00:00.000Z')
 			""",
 			params: [],
 		},

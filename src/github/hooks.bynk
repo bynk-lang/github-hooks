@@ -5002,6 +5002,11 @@ const FIGURES_CACHE_SECONDS: Int = 60
 
 // `GET /maintainers/mine`'s lists, for `login`, read one after another: each
 // is small, and a failure in any is the answer's.
+//
+// A pull request's CI counts an attempt still going only if it was queued
+// in the last day, as `/metrics/ci/now` does: one whose `completed` delivery
+// was lost would otherwise pin it at "running". Such an attempt is unknown,
+// so a commit with nothing else is `None`.
 fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clock {
 	let now <- Clock.now()
 	let Ok(pullRows) <- Deliveries.all(
@@ -5010,7 +5015,7 @@ fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clo
 		  SELECT * FROM pull_requests WHERE state = 'open' AND author = ?1 COLLATE NOCASE
 		),
 		latest AS (
-		  SELECT w.repo, w.sha, w.status, w.conclusion,
+		  SELECT w.repo, w.sha, w.status, w.conclusion, w.queued_at,
 		    row_number() OVER (PARTITION BY w.repo, w.sha, w.path ORDER BY w.run_id DESC, w.attempt DESC) AS rn
 		  FROM workflow_runs w JOIN mine p ON p.repo = w.repo AND p.head_sha = w.sha
 		),
@@ -5018,8 +5023,8 @@ fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clo
 		  SELECT repo, sha,
 		    CASE
 		      WHEN sum(status = 'completed' AND conclusion IN ('failure', 'timed_out', 'startup_failure')) > 0 THEN 'failing'
-		      WHEN sum(status != 'completed') > 0 THEN 'running'
-		      ELSE 'passing'
+		      WHEN sum(status != 'completed' AND queued_at >= ?4) > 0 THEN 'running'
+		      WHEN sum(status = 'completed') > 0 THEN 'passing'
 		    END AS state
 		  FROM latest WHERE rn = 1 GROUP BY repo, sha
 		),
@@ -5041,7 +5046,12 @@ fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clo
 		ORDER BY s.draft, coalesce(s.ready_since, s.opened_at), s.repo, s.number
 		LIMIT ?3
 		""",
-		[Text(login), Text((now - QUEUE_TIMEOUT).toIso()), Integer(MAX_MINE)]
+		[
+			Text(login),
+			Text((now - QUEUE_TIMEOUT).toIso()),
+			Integer(MAX_MINE),
+			Text((now - 1.days).toIso()),
+		]
 	) else match {
 		Err(e) => mineFailed("pull requests", login, sqlError(e)),
 	}

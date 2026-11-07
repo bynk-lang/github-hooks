@@ -231,13 +231,16 @@ most 50.
   Each has its stage (`draft`, `queued` or `ready`) and its CI.
   - **Matching:** CI is matched by the head commit (`head_sha`, recorded
     since step 4), from the latest attempt of each workflow run on it.
-  - **The state:** `failing` if any failed, else `running` if any is still
-    going, else `passing`. It's `null` when nothing has run on it, or its
-    head isn't recorded yet (an older pull request until its next delivery
-    or the daily sync).
+  - **The state:** `failing` if any failed, else `running` if any queued in
+    the last day is still going, else `passing`. An attempt still going a day
+    after it was queued lost its completion and counts as unknown, as on
+    `/metrics/ci/now`. It's `null` when nothing is known: nothing has run on
+    it, or its head isn't recorded yet (an older pull request until its next
+    delivery or the daily sync).
 - **`reviews`:** open pull requests waiting on their review. Only requests
   made to them by name count: a team's request isn't attributed to its
-  members.
+  members. A request whose removal arrived before it can linger for up to a
+  day, until the daily sync ([pr-flow.md](pr-flow.md)).
 - **`issues`:** their open issues, the stale first (no update for 14 days).
 - **`unreleased`:** their pull requests merged since their repository's
   latest final release, waiting to ship. A repository that has never

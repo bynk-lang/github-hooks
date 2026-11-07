@@ -165,8 +165,10 @@ type Mine = {
 ---
 One of a maintainer's open pull requests. `stage` is `draft`, `queued` or
 `ready`. `ci` is the latest attempt of each workflow on its head commit, taken
-together: `failing` if any failed, else `running` if any is still going, else
-`passing`; `None` when nothing has run on it (or its head isn't known yet).
+together: `failing` if any failed, else `running` if any queued in the last
+day is still going, else `passing` if any completed; `None` when nothing has
+run on it (or its head isn't known yet). An attempt still "going" a day
+after it was queued lost its completion, and counts as unknown.
 ---
 type MyPull = {
 	repo: String,

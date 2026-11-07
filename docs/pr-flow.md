@@ -41,6 +41,12 @@ indefinitely (retention prunes `deliveries`, not these).
     as issue labels are kept ([issues.md](issues.md)). A submitted review
     takes its reviewer's own request off, as GitHub does. The review's own
     pull request isn't saved, being a partial view.
+  - **Out of order:** a request, its removal and a review each apply as they
+    arrive. So if a removal or a review arrives before the request it
+    undoes (a CODEOWNERS auto-request withdrawn a moment later, say), the
+    request stays. "Waiting on your review" can then be wrong until the next
+    strictly newer delivery or the daily sync replaces the set, so for up to
+    a day.
   - **The daily sync** fills both for open pull requests. It reads GitHub's
     current state, so at a tie its set of requests replaces the stored one,
     which back-fills pull requests recorded before requests were.
