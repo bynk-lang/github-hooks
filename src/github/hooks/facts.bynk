@@ -105,13 +105,16 @@ fn eventWith(e: LiveEvent, refetch: Int) -> LiveEvent {
 // Records that a change the public pages don't show has happened (#68), on
 // its kind's slot (`purgeSlotOf`'s names), so the maintainers' shared figures
 // (`sharedFigures`) move on to a fresh key: nothing at the edge holds them, so
-// no purge is needed. `true` when recorded.
+// no purge is needed. At most once per the slot's gap, as an edge purge is, so
+// a busy private repository can't make the shared figures miss on every
+// request, nor every signed-in page refetch every few seconds. `true` when it
+// moved; otherwise the pages wait for the kept answers to expire.
 fn hiddenChange(kind: String) -> Effect[Bool] given Deliveries, Logger, Clock {
 	let slot = purgeSlotOf(kind)
 	let now <- Clock.now()
 	let recorded <- Deliveries.run(
-		"UPDATE hidden_changes SET at = ?1 WHERE slot = ?2",
-		[Text(now.toIso()), Text(slot.name)]
+		"UPDATE hidden_changes SET at = ?1 WHERE slot = ?2 AND at <= ?3",
+		[Text(now.toIso()), Text(slot.name), Text((now - slot.gap).toIso())]
 	)
 	let Ok(run) = recorded else match {
 		Err(e) => {
@@ -123,6 +126,6 @@ fn hiddenChange(kind: String) -> Effect[Bool] given Deliveries, Logger, Clock {
 }
 
 // How long a maintainer's page waits to refetch after a hidden change that
-// couldn't be recorded: until the shared figures' key has expired, and a
-// second's margin.
+// didn't move the shared figures on (within its slot's gap, or not recorded):
+// until any answer kept before it has expired, and a second's margin.
 const HIDDEN_REFETCH_MS: Int = 61000

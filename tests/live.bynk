@@ -62,6 +62,31 @@ case "a private repository's run is pushed to the maintainers' board only, and m
 	expect moved == Ok(Some("{\"slot\":\"runs\"}"))
 }
 
+case "a second hidden change within its slot's gap doesn't move the maintainers' figures again" {
+	stub Edge.purge(_) returns true
+	let first <- api.POST(
+		"/github",
+		runHeaders("private-a"),
+		Bytes.fromUtf8(completedRun.replace("\"private\": false", "\"private\": true"))
+	) by GitHub
+	expect first is Accepted(_)
+	let movedAt <- Deliveries.first("SELECT at FROM hidden_changes WHERE slot = 'runs'", [])
+	let second <- api.POST(
+		"/github",
+		runHeaders("private-b"),
+		Bytes.fromUtf8(completedRun
+			.replace("\"private\": false", "\"private\": true")
+			.replace("\"id\": 41978704067", "\"id\": 41978704068"))
+	) by GitHub
+	expect second is Accepted(_)
+	// The first moves the key, at once; the second, inside the 20 seconds,
+	// leaves it, and its pages wait for the kept answers to expire.
+	expect LiveFeed.publishMaintainers called with e.run_id == 41978704067 && e.refetch_ms == 3000
+	expect LiveFeed.publishMaintainers called with e.run_id == 41978704068 && e.refetch_ms == 61000
+	let stillAt <- Deliveries.first("SELECT at FROM hidden_changes WHERE slot = 'runs'", [])
+	expect stillAt == movedAt
+}
+
 case "a public run reaches only the public board, which signed-in pages hear too (#68)" {
 	stub Edge.purge(_) returns true
 	let _ <- api.POST("/github", runHeaders("public-1"), Bytes.fromUtf8(completedRun)) by GitHub

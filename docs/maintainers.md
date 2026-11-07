@@ -239,7 +239,11 @@ and only signed-in maintainers may join it.
   is purged, and signed-in pages hear it there too. Any other (private, or in
   `DASHBOARD_EXCLUDE`) is the `maintainers` board's: nothing is purged, since
   the edge never held it, and the maintainers' shared figures move on to a
-  fresh key instead (`hidden_changes`).
+  fresh key instead (`hidden_changes`). That's limited like an edge purge, at
+  most once per the slot's gap (20 seconds for runs, a minute for the
+  others), so a busy private repository can't make every request miss the
+  shared cache. A change inside the gap tells pages to wait the cache's
+  minute before refetching.
 - **Joining:** a signed-in page first asks `POST /maintainers/live` with its
   token and a fresh random client id. That makes every check a maintainer
   route makes (their limit, a session not signed out, membership), and has the

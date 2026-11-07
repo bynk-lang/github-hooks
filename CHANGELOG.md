@@ -13,7 +13,8 @@ All notable changes to github-hooks. The format follows
   (private repositories, and those in `DASHBOARD_EXCLUDE`), so they're live
   too and the page polls as the public one does. Each change goes to one
   board: a hidden one purges nothing at the edge and moves the maintainers'
-  shared figures on instead (migration `0021`, `hidden_changes`). A page joins
+  shared figures on instead (migration `0021`, `hidden_changes`), at most once
+  per its purge slot's gap, as an edge purge is. A page joins
   through `POST /maintainers/live`, which makes every maintainer check and has
   the board expect its random client id for a minute; the board closes any
   socket it doesn't expect, a login's sockets when they sign out, and every
