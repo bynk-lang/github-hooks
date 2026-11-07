@@ -1,4 +1,5 @@
-// An excluded repository's runs are never pushed, as they're never shown.
+// An excluded repository's runs are never pushed to the public board, as
+// they're never shown there; the maintainers' board hears them (#68).
 suite github.hooks
 
 env {
@@ -7,11 +8,12 @@ env {
 
 fixture completedRun = "fixtures/github/workflow_run.completed.json"
 
-case "an excluded repository's run is never pushed" {
+case "an excluded repository's run is pushed to the maintainers' board only" {
 	let _ <- api.POST(
 		"/github",
 		RequestHeaders.of(["X-GitHub-Event: workflow_run", "X-GitHub-Delivery: ex-1"]),
 		Bytes.fromUtf8(completedRun)
 	) by GitHub
 	expect LiveFeed.publish never called
+	expect LiveFeed.publishMaintainers called once with e.repo == "bynk-lang/github-hooks"
 }

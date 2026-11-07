@@ -3,10 +3,20 @@ context github.hooks
 // The board is a route parameter (`?board=ci`) rather than written in: the
 // upgrade's Durable Object is resolved from the route, and a literal or
 // `const` key there routes to the wrong instance or doesn't compile
-// (bynk-lang/bynk#2959). `LiveBoardKey` admits only "ci".
+// (bynk-lang/bynk#2959).
+//
+// Two boards share the one WebSocket service a context may have (#68): `ci`
+// for everyone, and `maintainers` for a signed-in maintainer, carrying the
+// changes the public board leaves out (private and excluded repositories).
+// The upgrade itself can't check a maintainer (it runs inside the board's
+// Durable Object, with no capabilities), so a signed-in page first asks
+// `POST /maintainers/live`, which makes every maintainer check and expects
+// its client id on the board for `LIVE_EXPECT_MS`. The board admits a
+// `maintainers` connection only with an id it expects, once, and closes any
+// other at once.
 service live from websocket(in: LiveHello, out: LiveEvent) {
 	on open(board: LiveBoardKey, client: LiveClient) -> Effect[()] by v: Visitor {
-		let _ <- LiveBoard(board).join(client, connection)
+		let _ <- LiveBoard(board).join(client, board, connection)
 	}
 
 	on close(board: LiveBoardKey, client: LiveClient) -> Effect[()] by v: Visitor {
@@ -14,11 +24,37 @@ service live from websocket(in: LiveHello, out: LiveEvent) {
 	}
 }
 
+// A signed-in page asking to join the maintainers' live board: the client id
+// it will open the socket with (#68).
+type LiveRequest = {
+	client: LiveClient,
+}
+
+// The answer: the board expects `client` to join within `within_ms`.
+type LiveExpected = {
+	client: LiveClient,
+	within_ms: Int,
+}
+
+// A maintainer's socket on the `maintainers` board, expected or admitted:
+// whose it is, and when `POST /maintainers/live` expected it (epoch
+// milliseconds), so sign-out and age can close it.
+type LiveOwner = {
+	login: String,
+	at_ms: Int,
+}
+
 ---
-Holds every open dashboard's connection (one Durable Object; connections
-survive hibernation) and fans each event out to all of them in parallel. A
-public endpoint must not grow without bound, so past `LIVE_LIMIT` connections a
-new one is closed at once and that page keeps polling instead.
+Holds every open page's connection to one board (a Durable Object per
+board; connections survive hibernation) and fans each event out to all of
+them in parallel. A public endpoint must not grow without bound, so past
+`LIVE_LIMIT` connections the oldest is closed to make room.
+
+On the `maintainers` board each connection has an owner (#68), checked by
+`POST /maintainers/live` before it may join: at most `MAINTAINER_SOCKETS` per
+login, closed when their owner signs out, and closed once
+`MAINTAINER_SOCKET_MS` old, so the page asks again through a fresh session
+and membership check.
 ---
 agent LiveBoard {
 	key id: LiveBoardKey
@@ -27,37 +63,141 @@ agent LiveBoard {
 	// When each connection joined, as a running count, so the oldest can go.
 	store joined: Map[LiveClient, Int]
 	store joins: Cell[Int]
+	// The `maintainers` board's expected and admitted sockets; empty on `ci`.
+	store expected: Map[LiveClient, LiveOwner]
+	store owners: Map[LiveClient, LiveOwner]
 
 	// Past `LIVE_LIMIT` the oldest connection is closed to make room, rather
 	// than the newcomer refused: a client that vanished without a close (a
 	// shut laptop, a dropped network) would otherwise hold its slot for good,
 	// and enough of them would shut every new page out. A live page that is
 	// evicted sees its socket close and reconnects, polling meanwhile.
-	on call join(c: LiveClient, conn: Connection[LiveEvent]) -> Effect[()] {
-		let open <- conns.size()
-		let room = if open >= LIVE_LIMIT { 1 } else { 0 }
-		let oldest <- joined.entries.sortBy((e) => e.value).take(room).map((e) => e.key).collect()
-		let _ <- oldest.traverseAll((k: LiveClient) => {
-			let _ <- joined.remove(k)
-			let _ <- conns.remove(k)
-			let r: Result[(), String] = Ok(())
-			Effect.pure(r)
-		})
-		let n = joins
-		joins := n + 1
-		let _ <- joined.put(c, n)
-		let _ <- conns.put(c, conn)
+	//
+	// `board` is the agent's own key, as the upgrade routed it. `ci` admits
+	// everyone; `maintainers`, only a client id it awaits (`await`), once.
+	on call join(c: LiveClient, board: LiveBoardKey, conn: Connection[LiveEvent]) -> Effect[()] {
+		let nobody: Option[LiveOwner] = None
+		let awaited <- expected.get(c)
+		let owner = if board == "maintainers" { awaited } else { nobody }
+		let admitted = board == "ci" || owner is Some(_)
+		if !admitted {
+			conn.close()
+		} else {
+			let _ <- expected.remove(c)
+			let open <- conns.size()
+			let room = if open >= LIVE_LIMIT { 1 } else { 0 }
+			let oldest <- joined.entries
+				.sortBy((e) => e.value)
+				.take(room)
+				.map((e) => e.key)
+				.collect()
+			let _ <- oldest.traverseAll((k: LiveClient) => {
+				let _ <- joined.remove(k)
+				let _ <- owners.remove(k)
+				let _ <- conns.remove(k)
+				let r: Result[(), String] = Ok(())
+				Effect.pure(r)
+			})
+			let n = joins
+			joins := n + 1
+			let _ <- joined.put(c, n)
+			let _ <- match owner {
+				Some(o) => owners.put(c, o),
+				None => Effect.pure(()),
+			}
+			let _ <- conns.put(c, conn)
+		}
 	}
 
 	on call leave(c: LiveClient) -> Effect[()] {
 		let _ <- joined.remove(c)
+		let _ <- owners.remove(c)
 		let _ <- conns.remove(c)
 	}
 
+	// Expects a maintainer's socket (#68), checked by `POST /maintainers/live`:
+	// `c` may join within `LIVE_EXPECT_MS`. Past `MAINTAINER_SOCKETS` of
+	// theirs, expected or open, their oldest go first. Expectations that have
+	// lapsed are dropped.
+	on call await(c: LiveClient, login: String, now: Int) -> Effect[()] {
+		let lapsed <- expected.entries
+			.filter((e) => now - e.value.at_ms >= LIVE_EXPECT_MS)
+			.map((e) => e.key)
+			.collect()
+		let _ <- lapsed.traverseAll((k: LiveClient) => {
+			let _ <- expected.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		let who = login.toLower()
+		let waiting <- expected.entries
+			.filter((e) => e.value.login == who)
+			.sortBy((e) => e.value.at_ms)
+			.map((e) => e.key)
+			.collect()
+		let open <- owners.entries
+			.filter((e) => e.value.login == who)
+			.sortBy((e) => e.value.at_ms)
+			.map((e) => e.key)
+			.collect()
+		let over = waiting.length() + open.length() - MAINTAINER_SOCKETS + 1
+		let dropWaiting = waiting.take(if over > 0 { over } else { 0 })
+		let left = over - dropWaiting.length()
+		let dropOpen = open.take(if left > 0 { left } else { 0 })
+		let _ <- dropWaiting.traverseAll((k: LiveClient) => {
+			let _ <- expected.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		let _ <- dropOpen.traverseAll((k: LiveClient) => {
+			let _ <- joined.remove(k)
+			let _ <- owners.remove(k)
+			let _ <- conns.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		let _ <- expected.put(c, LiveOwner { login: who, at_ms: now })
+	}
+
+	// Closes every socket a login holds, and forgets the ones it expects, when
+	// they sign out. Answers how many were open.
+	on call closeLogin(login: String) -> Effect[Int] {
+		let who = login.toLower()
+		let waiting <- expected.entries
+			.filter((e) => e.value.login == who)
+			.map((e) => e.key)
+			.collect()
+		let _ <- waiting.traverseAll((k: LiveClient) => {
+			let _ <- expected.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		let theirs <- owners.entries.filter((e) => e.value.login == who).map((e) => e.key).collect()
+		let _ <- theirs.traverseAll((k: LiveClient) => {
+			let _ <- joined.remove(k)
+			let _ <- owners.remove(k)
+			let _ <- conns.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
+		Effect.pure(theirs.length())
+	}
+
 	// Each send's outcome is gathered rather than raised, so one dead
-	// connection can't stop the rest from hearing. Answers how many sends
-	// succeeded.
-	on call publish(e: LiveEvent) -> Effect[Int] {
+	// connection can't stop the rest from hearing. A maintainer's socket past
+	// its age is closed first, unsent. Answers how many sends succeeded.
+	on call publish(e: LiveEvent, now: Int) -> Effect[Int] {
+		let aged <- owners.entries
+			.filter((o) => now - o.value.at_ms >= MAINTAINER_SOCKET_MS)
+			.map((o) => o.key)
+			.collect()
+		let _ <- aged.traverseAll((k: LiveClient) => {
+			let _ <- joined.remove(k)
+			let _ <- owners.remove(k)
+			let _ <- conns.remove(k)
+			let r: Result[(), String] = Ok(())
+			Effect.pure(r)
+		})
 		let sent <- conns.parTraverseAll((c: Connection[LiveEvent]) => {
 			do c.send(e)
 			let r: Result[(), String] = Ok(())
@@ -69,16 +209,48 @@ agent LiveBoard {
 
 const LIVE_LIMIT: Int = 500
 
+// How many live sockets one maintainer may hold at once: a few tabs.
+const MAINTAINER_SOCKETS: Int = 5
+
+// How long a socket `POST /maintainers/live` expects may take to join.
+const LIVE_EXPECT_MS: Int = 60000
+
+// How long a maintainer's socket lasts before it's closed and the page
+// reconnects through a fresh check: an hour, so a leaver or an ended session
+// stops hearing within the hour, as the routes' kept membership allows.
+const MAINTAINER_SOCKET_MS: Int = 3600000
+
 ---
-Pushes a changed run to every open dashboard. A capability (not a direct agent
-call) so the rule for *when* to push is observable in tests.
+Pushes a change to every open page: `publish` to the public board,
+`publishMaintainers` to the maintainers' board. `awaitSocket` lets a checked
+maintainer's socket join the maintainers' board, and `signedOut` closes a
+login's sockets there. A capability (not direct agent calls) so the rules for
+*when* are observable in tests.
 ---
 capability LiveFeed {
 	fn publish(e: LiveEvent) -> Effect[()]
+	fn publishMaintainers(e: LiveEvent) -> Effect[()]
+	fn awaitSocket(client: LiveClient, login: String) -> Effect[()]
+	fn signedOut(login: String) -> Effect[()]
 }
 
-provides LiveFeed = BoardFeed {
+provides LiveFeed = BoardFeed given Clock {
 	fn publish(e: LiveEvent) -> Effect[()] {
-		let _ <- LiveBoard("ci").publish(e)
+		let now <- Clock.now()
+		let _ <- LiveBoard("ci").publish(e, now.toEpochMillis())
+	}
+
+	fn publishMaintainers(e: LiveEvent) -> Effect[()] {
+		let now <- Clock.now()
+		let _ <- LiveBoard("maintainers").publish(e, now.toEpochMillis())
+	}
+
+	fn awaitSocket(client: LiveClient, login: String) -> Effect[()] {
+		let now <- Clock.now()
+		let _ <- LiveBoard("maintainers").await(client, login, now.toEpochMillis())
+	}
+
+	fn signedOut(login: String) -> Effect[()] {
+		let _ <- LiveBoard("maintainers").closeLogin(login)
 	}
 }

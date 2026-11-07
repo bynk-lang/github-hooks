@@ -8,7 +8,7 @@ fn recordPull(
 	d: Delivery,
 	body: Bytes,
 	fresh: Bool
-) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets {
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger {
 	let nothing: Option[LiveEvent] = None
 	let Ok(p) = pullOf(body) else match {
 		Err(why) => {
@@ -46,10 +46,8 @@ fn recordPull(
 		},
 	}
 	// Tell open pages of a delivery's first arrival only (a redelivery tells
-	// nothing new), and only for a repository the public pages may show.
+	// nothing new); which board hears it is `Facts`' call.
 	let true = fresh else { Effect.pure(nothing) }
-	let shown <- shownLive(p.repo)
-	let true = shown else { Effect.pure(nothing) }
 	Effect.pure(Some(pullEventOf(p)))
 }
 

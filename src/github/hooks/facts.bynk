@@ -39,19 +39,26 @@ provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge
 			Effect.pure(nothing)
 		}
 		let Some(e) = changed else { Effect.pure(()) }
-		let purged <- purgeFor(e.kind)
-		let _ <- LiveFeed.publish(LiveEvent {
-			refetch_ms: if purged { PURGED_REFETCH_MS } else { EXPIRED_REFETCH_MS },
-			kind: e.kind,
-			repo: e.repo,
-			number: e.number,
-			path: e.path,
-			workflow: e.workflow,
-			run_id: e.run_id,
-			attempt: e.attempt,
-			status: e.status,
-			conclusion: e.conclusion,
-		})
+		// A repository the public pages show: purge their cache, and tell the
+		// public board (signed-in pages listen there too). Any other (private,
+		// or excluded): only the maintainers' board, whose figures move on to
+		// a fresh shared key, so their refetch reads afresh (#68).
+		let shown <- shownLive(e.repo)
+		let _ <- if shown {
+			let purged <- purgeFor(e.kind)
+			LiveFeed.publish(eventWith(e, if purged {
+				PURGED_REFETCH_MS
+			} else {
+				EXPIRED_REFETCH_MS
+			}))
+		} else {
+			let moved <- hiddenChange(e.kind)
+			LiveFeed.publishMaintainers(eventWith(e, if moved {
+				PURGED_REFETCH_MS
+			} else {
+				HIDDEN_REFETCH_MS
+			}))
+		}
 	}
 }
 
@@ -78,3 +85,44 @@ fn recordVisibility(body: Bytes) -> Effect[()] given Deliveries, Logger {
 	}
 	Effect.pure(())
 }
+
+// A live event, with how long a page should wait to refetch.
+fn eventWith(e: LiveEvent, refetch: Int) -> LiveEvent {
+	LiveEvent {
+		refetch_ms: refetch,
+		kind: e.kind,
+		repo: e.repo,
+		number: e.number,
+		path: e.path,
+		workflow: e.workflow,
+		run_id: e.run_id,
+		attempt: e.attempt,
+		status: e.status,
+		conclusion: e.conclusion,
+	}
+}
+
+// Records that a change the public pages don't show has happened (#68), on
+// its kind's slot (`purgeSlotOf`'s names), so the maintainers' shared figures
+// (`sharedFigures`) move on to a fresh key: nothing at the edge holds them, so
+// no purge is needed. `true` when recorded.
+fn hiddenChange(kind: String) -> Effect[Bool] given Deliveries, Logger, Clock {
+	let slot = purgeSlotOf(kind)
+	let now <- Clock.now()
+	let recorded <- Deliveries.run(
+		"UPDATE hidden_changes SET at = ?1 WHERE slot = ?2",
+		[Text(now.toIso()), Text(slot.name)]
+	)
+	let Ok(run) = recorded else match {
+		Err(e) => {
+			let _ <- Logger.error("could not record a hidden \(slot.name) change: \(sqlError(e))")
+			Effect.pure(false)
+		},
+	}
+	Effect.pure(run.changes > 0)
+}
+
+// How long a maintainer's page waits to refetch after a hidden change that
+// couldn't be recorded: until the shared figures' key has expired, and a
+// second's margin.
+const HIDDEN_REFETCH_MS: Int = 61000

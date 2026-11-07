@@ -63,6 +63,9 @@
   // excluded repositories included; otherwise the public route (signin.js).
   const figures = (path, query) => window.bynkMetrics(path, query);
   const signedIn = () => Boolean(window.bynkMaintainer && window.bynkMaintainer());
+  // Signed in, private and not-public repositories are live too once the
+  // maintainers' board is open (#68); until then they're polled.
+  const privateLive = () => !signedIn() || Boolean(window.bynkMaintainersLiveOpen && window.bynkMaintainersLiveOpen());
   const repoMark = (name) => (window.bynkRepoMark ? window.bynkRepoMark(name) : null);
 
   async function refreshMetrics() {
@@ -179,7 +182,7 @@
       f.textContent = `${problems.join("; ")}.`;
     } else if (latest) {
       f.textContent = live
-        ? `${signedIn() ? "Public repositories live, private and not-public ones polled" : "Live"} · updated ${clock(latest)} UTC as runs change`
+        ? `${privateLive() ? "Live" : "Public repositories live, private and not-public ones polled"} · updated ${clock(latest)} UTC as runs change`
         : `Updated ${clock(latest)} UTC · refreshes every 30 seconds`;
     } else {
       f.textContent = "Loading…";
@@ -763,7 +766,7 @@
   function poll() {
     timers.forEach(clearInterval);
     timers = [
-      ...(live && !signedIn()
+      ...(live && privateLive()
         ? [setInterval(refreshWindow, LIVE_POLL_MS), setInterval(refreshNow, LIVE_POLL_MS)]
         : [setInterval(refreshWindow, METRICS_EVERY_MS), setInterval(refreshNow, NOW_EVERY_MS)]),
       setInterval(refreshRunners, METRICS_EVERY_MS),
@@ -843,6 +846,29 @@
     else latestDue = 0;
   }
 
+  // A live frame, from the public board or, signed in, the maintainers' (#68).
+  function onLiveMessage(m) {
+    let e = null;
+    try {
+      e = JSON.parse(m.data);
+    } catch {
+      // unreadable: assume the worst and refetch it all, after the longest wait
+    }
+    if (e && e.kind && e.kind !== "run") return; // pull requests and releases are the other pages'
+    if (!e || e.status === "completed") completedSince = true;
+    onLiveEvent(e ? e.refetch_ms : undefined, () => {
+      refreshNow();
+      if (completedSince) refreshWindow();
+      completedSince = false;
+    });
+  }
+  if (window.bynkMaintainersLive) window.bynkMaintainersLive(onLiveMessage);
+
+  document.addEventListener("bynk:maintainers-live", () => {
+    if (!document.hidden && timers.length) poll();
+    renderFreshness();
+  });
+
   function connect() {
     if (socket || !("WebSocket" in globalThis)) return;
     const scheme = location.protocol === "https:" ? "wss" : "ws";
@@ -856,21 +882,7 @@
     };
     // Only a completed run moves the window's figures and history; any
     // change moves what is running.
-    ws.onmessage = (m) => {
-      let e = null;
-      try {
-        e = JSON.parse(m.data);
-      } catch {
-        // unreadable: assume the worst and refetch it all, after the longest wait
-      }
-      if (e && e.kind && e.kind !== "run") return; // pull requests and releases are the other pages'
-      if (!e || e.status === "completed") completedSince = true;
-      onLiveEvent(e ? e.refetch_ms : undefined, () => {
-        refreshNow();
-        if (completedSince) refreshWindow();
-        completedSince = false;
-      });
-    };
+    ws.onmessage = onLiveMessage;
     ws.onclose = () => {
       if (socket !== ws) return;
       socket = null;

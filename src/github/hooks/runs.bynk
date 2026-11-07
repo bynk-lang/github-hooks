@@ -63,10 +63,7 @@ fn recordJob(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 
 // Records the run, and answers the event to push to open dashboards: `None`
 // unless a public, non-excluded run's row actually changed.
-fn recordRun(
-	d: Delivery,
-	body: Bytes
-) -> Effect[Option[LiveEvent]] given Deliveries, Logger, Secrets {
+fn recordRun(d: Delivery, body: Bytes) -> Effect[Option[LiveEvent]] given Deliveries, Logger {
 	let nothing: Option[LiveEvent] = None
 	let Ok(r) = runOf(body) else match {
 		Err(why) => {
@@ -147,10 +144,8 @@ fn recordRun(
 		},
 	}
 	// Tell open dashboards, but only of a change (a redelivery or a late
-	// delivery that moved nothing says nothing), and only for a repository the
-	// public page may show.
+	// delivery that moved nothing says nothing); which board hears it is
+	// `Facts`' call.
 	let true = written.changes > 0 else { Effect.pure(nothing) }
-	let shown <- shownLive(r.repo)
-	let true = shown else { Effect.pure(nothing) }
 	Effect.pure(Some(liveEventOf(r)))
 }

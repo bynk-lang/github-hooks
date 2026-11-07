@@ -112,7 +112,8 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 | `POST /maintainers/metrics/…` | a maintainer | each public metrics route's figures, private and excluded repositories included ([below](#the-maintainers-figures)) |
 | `GET /maintainers/repositories` | a maintainer | every repository: `[{repo, public, excluded}]` |
 | `GET /maintainers/mine` | a maintainer | what is theirs to act on ([below](#whats-yours)) |
-| `POST /maintainers/signout` | a maintainer | ends every session of their login ([below](#sessions)) |
+| `POST /maintainers/signout` | a maintainer | ends every session of their login ([below](#sessions)), and closes their live sockets |
+| `POST /maintainers/live` | a maintainer | lets their page join the maintainers' live board: `{client}` in, `{client, within_ms}` out ([below](#live-updates)) |
 | `POST /maintainers/actions/rerun` | a maintainer | re-runs a failed run's failed jobs: `{repo, run_id}` in ([below](#actions)) |
 
 **`/maintainers/token`:**
@@ -189,11 +190,12 @@ and those `DASHBOARD_EXCLUDE` keeps off the public pages.
 - **Live, through the cache:** each key carries the route's purge
   generation, when its slot last claimed an edge purge (`edge_purge_slots`:
   `runs` for CI and runner routes, `flow` for PR flow and releases, `issues`
-  for issues). A live change that purges the
-  public routes moves the maintainers' figures to a fresh key too, so a
-  signed-in page's refetch after a live event reads afresh, as a public one
-  does at the edge. Older entries are never read again and expire. That costs
-  one primary-key read per request.
+  for issues), and when a change only the maintainers' board hears last
+  happened on that slot (`hidden_changes`, #68). A live change that purges
+  the public routes, or one to a private or excluded repository, moves the
+  maintainers' figures to a fresh key, so a signed-in page's refetch after a
+  live event reads afresh, as a public one does at the edge. Older entries are
+  never read again and expire. That costs one primary-key read per request.
 - **Marking:** `GET /maintainers/repositories` says which repositories are
   public and which are excluded, so the signed-in pages (step 3) can mark the
   ones only maintainers see.
@@ -214,15 +216,58 @@ for the public.
 - **The wording:** signed in, each page's subtitle says it covers every
   repository, private ones included (`for-maintainers`, shown when
   `signin.js` marks the page `signed-in`).
-- **Freshness:** the live feed carries only public, non-excluded
-  repositories. Signed in, a page keeps the live feed for those, but no
-  longer slows its polling to the live feed's two-minute safety net, so
-  private and not-public repositories refresh at the pages' usual 30 to 60
-  seconds. The freshness line says so: "Public repositories live, private and
+- **Freshness:** signed in, a page also joins the maintainers' live board
+  ([below](#live-updates)), which carries the private and not-public
+  repositories' changes. With both boards open it polls only as the public
+  pages do, at the live feed's two-minute safety net, and says "Live". While
+  the maintainers' board is closed (asking again, or refused) it polls at the
+  usual 30 to 60 seconds, and says "Public repositories live, private and
   not-public ones polled".
 - **A refused token:** if a twin answers `401` (an expired or forged token)
   or `403` (someone who has left the organisation), the page signs out and
   fetches the public figures instead.
+
+## Live updates
+
+The public live feed (`/live?board=ci`, see
+[ci-metrics.md](ci-metrics.md#live-feed)) carries only public, non-excluded
+repositories. A second board, `maintainers`, carries every other change (#68),
+and only signed-in maintainers may join it.
+
+- **What goes where:** each live change goes to exactly one board. A
+  repository the public pages show is the `ci` board's: its routes' edge cache
+  is purged, and signed-in pages hear it there too. Any other (private, or in
+  `DASHBOARD_EXCLUDE`) is the `maintainers` board's: nothing is purged, since
+  the edge never held it, and the maintainers' shared figures move on to a
+  fresh key instead (`hidden_changes`).
+- **Joining:** a signed-in page first asks `POST /maintainers/live` with its
+  token and a fresh random client id. That makes every check a maintainer
+  route makes (their limit, a session not signed out, membership), and has the
+  board expect the id for 60 seconds. The page then opens
+  `/live?board=maintainers&client=<id>`. The board admits a socket only with
+  an id it expects, once; any other is closed at once.
+- **Why not a token on the socket:** Bynk can carry a `Bearer` token on a
+  WebSocket upgrade (in `Sec-WebSocket-Protocol`), but on Workers an upgrade
+  that admits either a maintainer or a visitor doesn't build yet, and the
+  upgrade can't make the membership checks itself. The expected id is that
+  check, made by an ordinary route.
+- **Closing:** signing out closes that login's sockets at once, and forgets
+  the ids it expects. Each maintainer's socket is closed after an hour
+  whatever happens, and the page asks again, so a leaver, or a session ended
+  elsewhere, stops hearing within the hour. At most 5 sockets per login (a
+  few tabs); a sixth closes their oldest.
+- **Ids are single-use secrets:** a page makes a new random id each time. A
+  second socket opened with an id already admitted is closed, and its close
+  takes the admitted socket with it, so someone who learned a page's id could
+  at most make that page reconnect, through a fresh check.
+- **Testing:** suites can't drive a WebSocket, so `tests/live.bynk` tests
+  which board hears each change through the `LiveFeed` capability, and
+  `tests/maintainer-live.bynk` the joining route. `scripts/live.mjs` checks
+  the board end to end against the local Worker: a socket it doesn't expect
+  is closed, a checked maintainer hears a private repository's run that the
+  public board doesn't, and signing out closes their socket. It seeds the
+  maintainer's membership into the local D1, as the local Worker can't ask
+  GitHub.
 
 ## What's yours
 
