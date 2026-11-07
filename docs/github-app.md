@@ -92,6 +92,10 @@ the service asks GitHub whether they belong to the organisation
 ([docs](issues.md)). Without it, only public members, owners and
 collaborators count.
 
+Maintainers' actions ([maintainers.md](maintainers.md#actions)) need
+**Actions** raised to **Read and write**, to re-run failed jobs. Without it
+GitHub refuses each re-run with a `403`, which the dashboard reports.
+
 Phase 3 will need some of these raised to **Read and write** (Issues and Pull
 requests, for comments and labels). Changing an App's permissions asks an
 organisation owner to approve the change on the installation; nothing else has

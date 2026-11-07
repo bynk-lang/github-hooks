@@ -81,6 +81,13 @@ writes queue behind reads. Shared by every route `forMaintainer` guards.
 capability MaintainerLimit = RateLimit @limit(60) @period(60.seconds)
 
 ---
+Maintainers' actions' per-login limit (#53, step 5): each is a change on
+GitHub, so far fewer than the figures' reads. 10 a minute is a burst of
+re-runs after a bad night, and bounds a runaway page.
+---
+capability ActionLimit = RateLimit @limit(10) @period(60.seconds)
+
+---
 Cloudflare's edge cache for this Worker. Declaring it turns Workers Cache on,
 so the public metrics routes' `@cache(scope: public)` answers are kept at the
 edge for 30 seconds and served without running the Worker, and heavy viewing
@@ -2173,29 +2180,41 @@ service api from http {
 			)
 		}
 		let now <- Clock.now()
-		let token <- sessionToken(signing, user.login, now)
+		let Ok(version) <- sessionVersion(user.login) else match {
+			Err(why) => {
+				let _ <- Logger.error("could not read \(user.login)'s session: \(why)")
+				ServiceUnavailable("could not start your sign-in; try again")
+			},
+		}
+		let token <- sessionToken(signing, "\(user.login):\(version)", now)
 		Ok(SignedIn { token: token, expires_in: SESSION_SECONDS, login: user.login })
 	}
 
 	// Who is signed in (#53): their GitHub login, the token's subject, if
 	// they still belong to the organisation (an answer kept a day; only a
 	// miss looks for an installation to ask with).
-	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock {
-		let login = "\(m.identity)"
-		let Ok(member) <- maintainerMember(login, false) else match {
-			Err(why) => {
-				let _ <- Logger.error(
-					"could not tell whether \(login) belongs to \(MAINTAINER_ORG): \(why)"
-				)
-				ServiceUnavailable("GitHub could not say whether you belong to \(MAINTAINER_ORG)")
+	on GET("/maintainers/me") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit {
+		forMaintainer("\(m.identity)", (login) => Effect.pure(Ok(Me { login: login })))
+	}
+
+	// Signs a maintainer out everywhere (#53, step 5): their session moves to
+	// the next version, so every token issued before now is refused, on every
+	// device, though it hasn't expired. Needs only a valid token, not one that
+	// is still current or a membership: ending a session is always allowed.
+	on POST("/maintainers/signout") () -> Effect[HttpResult[Me]] by m: Maintainer given Deliveries, Logger, Clock {
+		let login = sessionOf("\(m.identity)").login
+		let now <- Clock.now()
+		let Ok(_) <- Deliveries.run(
+			"""
+			INSERT INTO maintainer_sessions (login, version, signed_out_at) VALUES (?1, 1, ?2)
+			ON CONFLICT (login) DO UPDATE SET version = maintainer_sessions.version + 1, signed_out_at = excluded.signed_out_at
+			""",
+			[Text(login), Text(now.toIso())]
+		) else match {
+			Err(e) => {
+				let _ <- Logger.error("could not sign \(login) out: \(sqlError(e))")
+				ServerError("could not sign you out; try again")
 			},
-		}
-		let true = member else {
-			RawError(
-				Forbidden,
-				refusal403("not_a_member", "\(login) doesn't belong to \(MAINTAINER_ORG)"),
-				"application/json"
-			)
 		}
 		Ok(Me { login: login })
 	}
@@ -2206,7 +2225,7 @@ service api from http {
 	// `@cache`d, so they're sent `no-store` and can't be kept at the edge for
 	// the public. Limited per login (`MaintainerLimit`), not per address.
 	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/ci",
 			Json.encode(body),
 			() => metricsCi(body, true)
@@ -2214,7 +2233,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/ci/now",
 			Json.encode(body),
 			() => metricsCiNow(body, true)
@@ -2222,7 +2241,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/ci/history",
 			Json.encode(body),
 			() => metricsCiHistory(body, true)
@@ -2230,7 +2249,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/prs",
 			Json.encode(body),
 			() => metricsPrs(body, true)
@@ -2238,7 +2257,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/prs/open",
 			Json.encode(body),
 			() => metricsPrsOpen(body, true)
@@ -2246,7 +2265,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/issues",
 			Json.encode(body),
 			() => metricsIssues(body, true)
@@ -2254,7 +2273,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/issues/open",
 			Json.encode(body),
 			() => metricsIssuesOpen(body, true)
@@ -2262,7 +2281,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/releases",
 			Json.encode(body),
 			() => metricsReleases(body, true)
@@ -2270,7 +2289,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/releases/recent",
 			Json.encode(body),
 			() => metricsReleasesRecent(body, true)
@@ -2278,7 +2297,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/runners",
 			Json.encode(body),
 			() => metricsRunners(body, true)
@@ -2286,7 +2305,7 @@ service api from http {
 	}
 
 	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
-		forMaintainer("\(m.identity)", () => sharedFigures(
+		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/runners/now",
 			Json.encode(body),
 			() => metricsRunnersNow(body, true)
@@ -2299,7 +2318,17 @@ service api from http {
 	// repository. It's theirs alone, so it isn't shared (`sharedFigures`), but
 	// it shares their per-login limit, and every list reads by an index.
 	on GET("/maintainers/mine") () -> Effect[HttpResult[Mine]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => mine("\(m.identity)"))
+		forMaintainer("\(m.identity)", (login) => mine(login))
+	}
+
+	// Re-runs a failed run's failed jobs (#53, step 5), for a maintainer, as
+	// the GitHub App. Only the latest attempt of a run this service recorded,
+	// and only if it failed; an attempt already re-run from here is refused.
+	// Every outcome, GitHub's refusals included, is kept in
+	// `maintainer_actions`. Limited per login (`ActionLimit`) besides the
+	// maintainer routes' own limit, and confirmed in the page before it's sent.
+	on POST("/maintainers/actions/rerun") (body: RerunRequest) -> Effect[HttpResult[RerunDone]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit, ActionLimit, AppAuth, GitHubHttp {
+		forMaintainer("\(m.identity)", (login) => rerunFailedJobs(login, body))
 	}
 
 	// Every repository the service has heard from (#53), for a maintainer:
@@ -2307,7 +2336,7 @@ service api from http {
 	// public pages, so the signed-in pages can mark the ones only maintainers
 	// see. Not `@cache`d, so it is sent `no-store`.
 	on GET("/maintainers/repositories") () -> Effect[HttpResult[List[ShownRepository]]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, Secrets, MaintainerLimit {
-		forMaintainer("\(m.identity)", () => shownRepositories())
+		forMaintainer("\(m.identity)", (login) => shownRepositories())
 	}
 
 	on GET("/about") () -> Effect[HttpResult[String]] by v: Visitor {
@@ -4868,15 +4897,33 @@ fn metricsRunnersNow(
 }
 
 // Lets a maintainer request through (#53), within their per-login limit,
-// once GitHub still counts them a member of the organisation (a kept answer
-// first), else answers why not.
+// with a session that hasn't been signed out (checked, or refused if it
+// can't be), once GitHub still counts them a
+// member of the organisation (a kept answer first), else answers why not.
+// `who` is the token's subject, `login:version` (see `sessionOf`); `answer`
+// is given the login.
 fn forMaintainer[T](
-	login: String,
-	answer: () -> Effect[HttpResult[T]]
+	who: String,
+	answer: String -> Effect[HttpResult[T]]
 ) -> Effect[HttpResult[T]] given Deliveries, GitHubApi, Clock, Logger, MaintainerLimit {
+	let session = sessionOf(who)
+	let login = session.login
 	let allowed <- MaintainerLimit.allow("maintainer:\(login.toLower())")
 	let true = allowed else {
 		TooManyRequests("too many requests for your figures; try again in a minute")
+	}
+	let Ok(current) <- sessionVersion(login) else match {
+		Err(why) => {
+			let _ <- Logger.error("could not read \(login)'s session: \(why)")
+			ServiceUnavailable("could not check your sign-in; try again")
+		},
+	}
+	let true = session.version == current else {
+		RawError(
+			Forbidden,
+			refusal403("signed_out", "this sign-in has ended; sign in again"),
+			"application/json"
+		)
 	}
 	let Ok(member) <- maintainerMember(login, false) else match {
 		Err(why) => {
@@ -4893,7 +4940,29 @@ fn forMaintainer[T](
 			"application/json"
 		)
 	}
-	answer()
+	answer(login)
+}
+
+// A login's current session version (#53, step 5): 0 until they first sign
+// out. A read that fails is an error, never 0: 0 would let a signed-out
+// token back in, so callers refuse rather than guess (fail closed).
+fn sessionVersion(login: String) -> Effect[Result[Int, String]] given Deliveries {
+	let stored <- Deliveries.first(
+		"SELECT version FROM maintainer_sessions WHERE login = ?1",
+		[Text(login)]
+	)
+	match stored {
+		Ok(None) => Effect.pure(Ok(0)),
+		Ok(Some(row)) => match Json.decodeSql[SessionRow](row) {
+			Ok(r) => Effect.pure(Ok(r.version)),
+			Err(e) => Effect.pure(Err(jsonError(e))),
+		},
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+}
+
+type SessionRow = {
+	version: Int,
 }
 
 // The exclusion list a metrics query is given: `DASHBOARD_EXCLUDE`'s names,
@@ -5126,4 +5195,163 @@ fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clo
 fn mineFailed(what: String, login: String, why: String) -> Effect[HttpResult[Mine]] given Logger {
 	let _ <- Logger.error("could not read \(login)'s \(what): \(why)")
 	ServerError("could not read your \(what)")
+}
+
+// `POST /maintainers/actions/rerun`'s work, for `login`.
+fn rerunFailedJobs(login: String, r: RerunRequest) -> Effect[HttpResult[RerunDone]] given Deliveries, Logger, Clock, ActionLimit, AppAuth, GitHubHttp {
+	let allowed <- ActionLimit.allow("action:\(login.toLower())")
+	let true = allowed else { TooManyRequests("too many actions; try again in a minute") }
+	let found <- Deliveries.first(
+		"""
+		SELECT w.repo, w.attempt, w.status, w.conclusion,
+		  (SELECT d.installation FROM deliveries d
+		   WHERE d.repo = w.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		   ORDER BY d.received_at DESC LIMIT 1) AS installation,
+		  EXISTS (SELECT 1 FROM maintainer_actions a
+		          WHERE a.repo = w.repo AND a.run_id = w.run_id AND a.attempt = w.attempt AND a.claimed = 1) AS rerun
+		FROM workflow_runs w
+		WHERE w.repo = ?1 COLLATE NOCASE AND w.run_id = ?2
+		ORDER BY w.attempt DESC LIMIT 1
+		""",
+		[Text(r.repo), Integer(r.run_id)]
+	)
+	let Ok(Some(row)) = found else match {
+		Ok(None) => NotFound,
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not find \(r.repo) run \(r.run_id) to re-run: \(sqlError(e))"
+			)
+			ServerError("could not read the run")
+		},
+	}
+	let Ok(run) = Json.decodeSql[RunToRerun](row) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode \(r.repo) run \(r.run_id): \(jsonError(e))")
+			ServerError("could not read the run")
+		},
+	}
+	let failed = run.status == "completed"
+		&& (run.conclusion == Some("failure")
+			|| run.conclusion == Some("timed_out")
+			|| run.conclusion == Some("startup_failure"))
+	let true = failed else {
+		Conflict(
+			"attempt \(run.attempt) of run \(r.run_id) hasn't failed, so there are no failed jobs to re-run"
+		)
+	}
+	let true = run.rerun == 0 else {
+		Conflict("attempt \(run.attempt) of run \(r.run_id) has already been re-run")
+	}
+	let Some(installation) = run.installation else {
+		ServiceUnavailable("no installation of the App has delivered for \(run.repo)")
+	}
+	// Claim the attempt before asking GitHub: two requests close together
+	// (a double click, two tabs, two maintainers) can both pass the check
+	// above, but only one claim is kept (`maintainer_actions_claimed`), so
+	// only one reaches GitHub. A refusal gives the claim up, so it can be
+	// tried again.
+	let claimedAt <- Clock.now()
+	let claim <- Deliveries.run(
+		"""
+		INSERT OR IGNORE INTO maintainer_actions (login, action, repo, run_id, attempt, at, status, outcome, claimed)
+		VALUES (?1, 'rerun-failed-jobs', ?2, ?3, ?4, ?5, NULL, 'pending', 1)
+		""",
+		[
+			Text(login),
+			Text(run.repo),
+			Integer(r.run_id),
+			Integer(run.attempt),
+			Text(claimedAt.toIso()),
+		]
+	)
+	let Ok(claimed) = claim else match {
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not claim \(run.repo) run \(r.run_id) for a re-run: \(sqlError(e))"
+			)
+			ServerError("could not record the re-run; nothing was asked of GitHub")
+		},
+	}
+	let true = claimed.changes > 0 else {
+		Conflict("attempt \(run.attempt) of run \(r.run_id) is already being re-run")
+	}
+	let url = "https://api.github.com/repos/\(run.repo)/actions/runs/\(r.run_id)/rerun-failed-jobs"
+	let sent <- asApp(installation, (token) => GitHubHttp.post(token, url, "{}"))
+	let now <- Clock.now()
+	let answer = match sent {
+		Ok(res) => if res.status == 201 {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: "re-run requested",
+			}
+		} else {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: refusal(res.status, res.body),
+			}
+		},
+		Err(why) => ActionOutcome {
+			status: None,
+			outcome: why,
+		},
+	}
+	let status = answer.status
+	let outcome = answer.outcome
+	// GitHub's answer completes the claim: kept for a success, given up for
+	// a refusal, so the attempt can be asked for again.
+	let kept <- Deliveries.run(
+		"""
+		UPDATE maintainer_actions SET at = ?4, status = ?5, outcome = ?6, claimed = ?7
+		WHERE repo = ?1 AND run_id = ?2 AND attempt = ?3 AND claimed = 1 AND outcome = 'pending'
+		""",
+		[
+			Text(run.repo),
+			Integer(r.run_id),
+			Integer(run.attempt),
+			Text(now.toIso()),
+			integer(status),
+			Text(outcome),
+			Boolean(status == Some(201)),
+		]
+	)
+	let _ <- match kept {
+		Ok(_) => Effect.pure(()),
+		Err(e) => Logger.error(
+			"could not record \(login)'s re-run of \(run.repo) run \(r.run_id): \(sqlError(e))"
+		),
+	}
+	let _ <- Logger.info(
+		"\(login) asked to re-run \(run.repo) run \(r.run_id) attempt \(run.attempt): \(outcome)"
+	)
+	match status {
+		Some(201) => Ok(RerunDone {
+			repo: run.repo,
+			run_id: r.run_id,
+			attempt: run.attempt,
+			message: "Re-running the failed jobs of run \(r.run_id)",
+		}),
+		Some(403) => BadGateway(
+			"GitHub refused the re-run (does the App have Actions: Read and write?): \(outcome)"
+		),
+		Some(_) => BadGateway("GitHub refused the re-run: \(outcome)"),
+		None => BadGateway("the App couldn't ask GitHub to re-run it; the Worker's log says why"),
+	}
+}
+
+// The run `rerunFailedJobs` was asked about: its latest attempt, the
+// installation to act through, and whether that attempt was re-run already.
+type RunToRerun = {
+	repo: String,
+	attempt: Int,
+	status: String,
+	conclusion: Option[String],
+	installation: Option[Int],
+	rerun: Int,
+}
+
+// What GitHub answered an action: its HTTP status (none when it couldn't be
+// reached), and why, in words.
+type ActionOutcome = {
+	status: Option[Int],
+	outcome: String,
 }

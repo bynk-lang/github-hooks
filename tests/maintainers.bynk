@@ -88,6 +88,11 @@ fn accuserToken() -> String {
 	"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2N1c2VyIiwiaWF0IjoxNzkzODgwMDAwLCJleHAiOjE3OTM5MDg4MDB9.58EvP933ALbPj3WRgb9W9zqzABcubuRcXnySl5RN2wI"
 }
 
+--- As `accuserToken`, for the subject sign-in gives it: `accuser:0`, their first session.
+fn accuserSessionToken() -> String {
+	"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhY2N1c2VyOjAiLCJpYXQiOjE3OTM4ODAwMDAsImV4cCI6MTc5MzkwODgwMH0.C0naEnkeq3iuR95l4FdCaVua6gzdSPpU3-CXvGLkjZo"
+}
+
 case "the sign-in settings name GitHub and the App's client ID" {
 	let r <- api.GET("/maintainers/config") by Visitor
 	expect r == Ok(SignInConfig {
@@ -109,7 +114,8 @@ case "a member who signs in with GitHub gets a token for their login" {
 	let seeded <- Deliveries.batch(installed())
 	expect seeded is Ok(_)
 	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
-	expect r == Ok(SignedIn { token: accuserToken(), expires_in: 28800, login: "accuser" })
+	// The token's subject carries accuser's session version, 0 before they first sign out.
+	expect r == Ok(SignedIn { token: accuserSessionToken(), expires_in: 28800, login: "accuser" })
 	expect GitHubSignIn.exchange called once with clientId == "Iv23liTestClient"
 	expect GitHubSignIn.exchange called once with clientSecret == "test-client-secret"
 	expect GitHubSignIn.user called once with token == "ghu_user"
@@ -342,4 +348,67 @@ case "the callback page loads the sign-in script, and every dashboard has the si
 	// Signed in, each page says it covers every repository.
 	expect pages.all((p) => p.contains("class=\"subtitle for-public\"")
 		&& p.contains("class=\"subtitle for-maintainers\""))
+}
+
+case "signing out ends every earlier token for the login, though none has expired" {
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	// A token from before sessions (a plain login) is the first session's.
+	let before <- api.GET("/maintainers/me") by Maintainer("accuser")
+	expect before == Ok(Me { login: "accuser" })
+	let out <- api.POST("/maintainers/signout") by Maintainer("accuser:0")
+	expect out == Ok(Me { login: "accuser" })
+	let old <- api.GET("/maintainers/me") by Maintainer("accuser")
+	expect old is RawError(403, _, _)
+	let RawError(_, body, _) = old else {
+		expect false
+	}
+	expect body.decodeUtf8().getOrElse("").contains("signed_out")
+	let stillOld <- api.POST(
+		"/maintainers/metrics/ci/now",
+		NowQuery { repo: None }
+	) by Maintainer("accuser:0")
+	expect stillOld is RawError(403, _, _)
+	// The next session's token is let in; another maintainer's is untouched.
+	let next <- api.GET("/maintainers/me") by Maintainer("Accuser:1")
+	expect next == Ok(Me { login: "Accuser" })
+	let other <- api.GET("/maintainers/me") by Maintainer("someone-else")
+	expect other == Ok(Me { login: "someone-else" })
+}
+
+case "signing in after signing out issues the next session's token" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let out <- api.POST("/maintainers/signout") by Maintainer("accuser")
+	expect out is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	let Ok(signed) = r else {
+		expect false
+	}
+	// The subject is the token's middle part: {"sub":"accuser:1",...}.
+	let claims = signed.token
+		.split(".")
+		.get(1)
+		.andThen((p) => Bytes.fromBase64Url(p))
+		.andThen((b) => b.decodeUtf8())
+	expect claims.getOrElse("").contains("\"sub\":\"accuser:1\"")
+}
+
+case "a sign-in whose session can't be read is refused, not issued an old version's token" {
+	stub GitHubSignIn.exchange(_, _, _) returns granted()
+	stub GitHubSignIn.user(_) returns Ok(GitHubUser { login: "accuser" })
+	stub AppAuth.token(_) returns Ok("ghs_test")
+	stub GitHubHttp.get(_, _) returns member()
+	let seeded <- Deliveries.batch(installed())
+	expect seeded is Ok(_)
+	let broken <- Deliveries.run("DROP TABLE maintainer_sessions", [])
+	expect broken is Ok(_)
+	let r <- api.POST("/maintainers/token", deployed(), viewer()) by Visitor
+	expect r is ServiceUnavailable(_)
 }

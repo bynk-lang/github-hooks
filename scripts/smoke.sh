@@ -152,6 +152,18 @@ if [ -n "${MAINTAINER_TOKEN_SECRET:-}" ]; then
   check 503 "$(mpost /maintainers/metrics/issues "$MTOKEN")" "a maintainer token reaches the figures' membership check"
   get 401 "what's yours needs a maintainer's token" /maintainers/mine "$RTOKEN"
   get 503 "a maintainer token reaches what's theirs, past the membership check" /maintainers/mine "$MTOKEN"
+  # Actions and sign-out (#53 step 5).
+  rerun() {
+    curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
+      ${1:+-H "Authorization: Bearer $1"} -d '{"repo":"bynk-lang/github-hooks","run_id":1}' "$BASE/maintainers/actions/rerun" || echo 000
+  }
+  check 401 "$(rerun)" "re-running a run needs a maintainer's token"
+  check 503 "$(rerun "$MTOKEN")" "a maintainer token reaches a re-run's membership check"
+  # Signing out ends that login's earlier tokens: its own, minted here, not the token above.
+  OTOKEN=$(bynk token Maintainer --sub smoke-signout --lifetime 5m --input "$PROJECT")
+  out=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $OTOKEN" "$BASE/maintainers/signout") || out=000
+  check 200 "$out" "a maintainer signs out on the server"
+  get 403 "a token from before signing out is refused" /maintainers/me "$OTOKEN"
   stored=$(curl -s -o /dev/null -D - -H "Authorization: Bearer $MTOKEN" "$BASE/maintainers/repositories" \
     | tr -d '\r' | awk -F': ' 'tolower($1) == "cache-control" { print $2 }') || stored=none
   check no-store "$stored" "the maintainers' repository list is never cached"

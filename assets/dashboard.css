@@ -109,6 +109,11 @@ h2 { font-size: 1.15rem; margin: 0; }
   padding: 16px; margin-bottom: 20px;
 }
 .repo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 12px; }
+/* Maintainers' actions (#53, step 5). */
+.rerun h4 { margin: 12px 0 4px; font-size: 0.95rem; }
+.rerun-list { margin: 0; padding-left: 1.2em; }
+.rerun-list li { margin: 4px 0; }
+.rerun-note { color: var(--ink-2); }
 /* What is the signed-in maintainer's (#53, step 4). */
 .mine h3 { margin: 12px 0 4px; font-size: 1rem; }
 .mine-list { margin: 0; padding-left: 1.2em; }

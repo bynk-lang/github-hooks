@@ -460,7 +460,48 @@
         rows)));
     const slow = slowestJobs(repoName, name);
     if (slow) panel.append(slow);
+    const rerun = signedIn() ? rerunList(entry) : null;
+    if (rerun) panel.append(rerun);
     return panel;
+  }
+
+  // Signed in (#53, step 5): the workflow's recent runs whose latest attempt
+  // failed, newest first, each with a button that re-runs its failed jobs,
+  // after asking. What happened stays beside the run across redraws.
+  const actionNotes = new Map(); // "repo run_id" -> text
+  const FAILED = new Set(["failure", "timed_out", "startup_failure"]);
+  function rerunList(entry) {
+    if (!entry || entry.recent.length === 0) return null;
+    const latest = new Map();
+    for (const r of entry.recent) {
+      const seen = latest.get(r.run_id);
+      if (!seen || r.attempt > seen.attempt) latest.set(r.run_id, r);
+    }
+    const failed = [...latest.values()].filter((r) => FAILED.has(r.conclusion))
+      .sort((a, b) => b.completed_at.localeCompare(a.completed_at)).slice(0, 5);
+    if (failed.length === 0) return null;
+    const list = el("ul", { class: "rerun-list" });
+    for (const r of failed) {
+      const key = `${r.repo} ${r.run_id}`;
+      const note = el("span", { class: "rerun-note", "aria-live": "polite" }, actionNotes.get(key) || "");
+      const button = el("button", { type: "button", class: "link-button" }, "Re-run failed jobs");
+      button.addEventListener("click", async () => {
+        const what = `run ${r.run_id}${r.attempt > 1 ? ` (attempt ${r.attempt})` : ""} of ${r.repo}`;
+        if (!window.confirm(`Re-run the failed jobs of ${what} on GitHub?`)) return;
+        button.disabled = true;
+        note.textContent = "Asking GitHub…";
+        const done = await window.bynkAct("/maintainers/actions/rerun", { repo: r.repo, run_id: r.run_id });
+        actionNotes.set(key, done.message);
+        note.textContent = done.message;
+        button.disabled = false;
+      });
+      list.append(el("li", {},
+        el("a", { href: `https://github.com/${r.repo}/actions/runs/${r.run_id}/attempts/${r.attempt}` },
+          `Run ${r.run_id}${r.attempt > 1 ? ` attempt ${r.attempt}` : ""}`),
+        ` ${conclusionText(r.conclusion)} ${when(r.completed_at)}${r.branch ? ` on ${r.branch}` : ""} · `,
+        button, " ", note));
+    }
+    return el("div", { class: "rerun" }, el("h4", {}, "Failed recently"), list);
   }
 
   // Median to 95th percentile as a thin range on a shared scale, with a point

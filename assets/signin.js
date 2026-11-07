@@ -63,7 +63,26 @@
 
   // Signing out forgets this service's token. The GitHub sign-in itself is
   // GitHub's: the next sign-in may not ask again.
-  function signOut() {
+  // Signing out ends the session on the server (#53, step 5): every token
+  // issued to this login before now is refused, on any device. The tab
+  // forgets its token only once the Worker has done that, or once the token
+  // is refused anyway (401, 403). Otherwise the person is told, and stays
+  // signed in to try again, so "Sign out" never claims more than it did.
+  async function signOut() {
+    const m = current();
+    if (m) {
+      let ended = false;
+      try {
+        const res = await fetch("/maintainers/signout", { method: "POST", cache: "no-store", headers: { authorization: `Bearer ${m.token}` } });
+        ended = res.ok || res.status === 401 || res.status === 403;
+      } catch (e) {
+        console.warn("Couldn't end the session on the server:", e.message);
+      }
+      if (!ended) {
+        window.alert("The sign-out didn't reach the server, so your other devices may still be signed in. You're still signed in here: try again in a moment.");
+        return;
+      }
+    }
     store.drop(KEY);
     location.reload();
   }
@@ -272,7 +291,32 @@
     slot.hidden = false;
   }
 
+  // A maintainer's action (#53, step 5): POSTs `body` as JSON with the
+  // token, and answers `{ ok, message }` in words for the page to show. A
+  // refused token signs the page out.
+  async function act(path, body) {
+    const m = current();
+    if (!m) return { ok: false, message: "Sign in to do this." };
+    try {
+      const res = await fetch(path, {
+        method: "POST",
+        cache: "no-store",
+        headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${m.token}` },
+        body: JSON.stringify(body),
+      });
+      const answer = await res.json().catch(() => ({}));
+      // A 401 or 403 is the maintainer check refusing (a session ended, or
+      // someone who has left); GitHub's own refusals come back as a 502.
+      if (res.status === 401 || res.status === 403) forget();
+      if (res.ok) return { ok: true, message: answer.message || "Done." };
+      return { ok: false, message: answer.message || answer.error || (res.status === 429 ? "Too many actions; try again in a minute." : `HTTP ${res.status}`) };
+    } catch (e) {
+      return { ok: false, message: `Couldn't reach the service: ${e.message}` };
+    }
+  }
+
   window.bynkMaintainer = current;
+  window.bynkAct = act;
   window.bynkMetrics = metrics;
   window.bynkRepoMark = repoMark;
 
