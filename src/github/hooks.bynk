@@ -73,6 +73,14 @@ D1 read by varying the query string past the cache.
 capability MetricsLimit = RateLimit @limit(60) @period(60.seconds)
 
 ---
+The maintainers' figures' per-login limit (#53): they skip the edge cache, so
+every request is a D1 read. 60 a minute is several signed-in tabs polling, and
+bounds what one person's tabs (or a runaway one) can put on D1, where webhook
+writes queue behind reads. Shared by every route `forMaintainer` guards.
+---
+capability MaintainerLimit = RateLimit @limit(60) @period(60.seconds)
+
+---
 Cloudflare's edge cache for this Worker. Declaring it turns Workers Cache on,
 so the public metrics routes' `@cache(scope: public)` answers are kept at the
 edge for 30 seconds and served without running the Worker, and heavy viewing
@@ -2070,48 +2078,48 @@ service api from http {
 	// signed-in maintainer who still belongs to the organisation, including
 	// private repositories and those `DASHBOARD_EXCLUDE` names. Never
 	// `@cache`d, so they're sent `no-store` and can't be kept at the edge for
-	// the public; nor rate-limited per address, as they need a token.
-	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	// the public. Limited per login (`MaintainerLimit`), not per address.
+	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsCi(body, true))
 	}
 
-	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsCiNow(body, true))
 	}
 
-	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsCiHistory(body, true))
 	}
 
-	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsPrs(body, true))
 	}
 
-	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsPrsOpen(body, true))
 	}
 
-	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsIssues(body, true))
 	}
 
-	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsIssuesOpen(body, true))
 	}
 
-	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsReleases(body, true))
 	}
 
-	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock {
+	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsReleasesRecent(body, true))
 	}
 
-	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock {
+	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsRunners(body, true))
 	}
 
-	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi {
+	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => metricsRunnersNow(body, true))
 	}
 
@@ -2119,7 +2127,7 @@ service api from http {
 	// whether it is public, and whether `DASHBOARD_EXCLUDE` keeps it off the
 	// public pages, so the signed-in pages can mark the ones only maintainers
 	// see. Not `@cache`d, so it is sent `no-store`.
-	on GET("/maintainers/repositories") () -> Effect[HttpResult[List[ShownRepository]]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, Secrets {
+	on GET("/maintainers/repositories") () -> Effect[HttpResult[List[ShownRepository]]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, Secrets, MaintainerLimit {
 		forMaintainer("\(m.identity)", () => shownRepositories())
 	}
 
@@ -4680,12 +4688,17 @@ fn metricsRunnersNow(
 	Ok(RunnersNow { waiting: waiting })
 }
 
-// Lets a maintainer request through (#53) once GitHub still counts them a
-// member of the organisation (a kept answer first), else answers why not.
+// Lets a maintainer request through (#53), within their per-login limit,
+// once GitHub still counts them a member of the organisation (a kept answer
+// first), else answers why not.
 fn forMaintainer[T](
 	login: String,
 	answer: () -> Effect[HttpResult[T]]
-) -> Effect[HttpResult[T]] given Deliveries, GitHubApi, Clock, Logger {
+) -> Effect[HttpResult[T]] given Deliveries, GitHubApi, Clock, Logger, MaintainerLimit {
+	let allowed <- MaintainerLimit.allow("maintainer:\(login.toLower())")
+	let true = allowed else {
+		TooManyRequests("too many requests for your figures; try again in a minute")
+	}
 	let Ok(member) <- maintainerMember(login, false) else match {
 		Err(why) => {
 			let _ <- Logger.error(

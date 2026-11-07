@@ -56,7 +56,8 @@ All notable changes to github-hooks. The format follows
   - **`GET /maintainers/repositories`:** every repository, marked public or
     not and excluded or not, for the signed-in pages to mark.
   - **Access:** every maintainer request rechecks membership (`forMaintainer`,
-    a kept answer first). Nothing is cached: no `@cache`, so `no-store` or a
+    a kept answer first), within a per-login limit of 60 a minute
+    (`MaintainerLimit`), as nothing is cached: no `@cache`, so `no-store` or a
     `POST`.
   - **Testing:** each metrics suite compares every public route with its twin
     on one seed, and smoke checks the twins refuse a missing or reader's

@@ -169,8 +169,17 @@ and those `DASHBOARD_EXCLUDE` keeps off the public pages.
 - **Never cached:** the twins carry no `@cache`. A `POST` answer is never kept
   by Cloudflare's cache or a browser's, and `GET /maintainers/repositories` is
   sent `no-store`. Nothing purges them, as nothing keeps them.
-- **No per-address limit:** they need a maintainer's token, and every request
-  checks membership (a kept answer first).
+- **Limited per login:** they skip the edge cache, so every request is a D1
+  read, and D1 runs one query at a time, with webhook writes queuing behind.
+  `MaintainerLimit` allows each login 60 requests a minute across every
+  maintainer route, a few signed-in tabs' polling, so no one person's tabs
+  (or a runaway one) can keep D1 busy. Over the limit is a `429`. There's no
+  per-address limit, as they need a token, and every request checks
+  membership (a kept answer first).
+- **Not yet shared:** a maintainer's figures are the same for every
+  maintainer, so a short server-side cache of each answer would bound D1
+  load further. That's left for step 3, once the signed-in pages' polling is
+  known.
 - **Marking:** `GET /maintainers/repositories` says which repositories are
   public and which are excluded, so the signed-in pages (step 3) can mark the
   ones only maintainers see.

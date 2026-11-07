@@ -680,3 +680,17 @@ case "the maintainer figures are refused to someone who has left, and unavailabl
 	) by Maintainer("someone")
 	expect unknown is ServiceUnavailable(_)
 }
+
+case "a maintainer's requests are limited per login, before anything is read" {
+	stub MaintainerLimit.allow(_) returns each [true, false]
+	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
+	expect seeded is Ok(_)
+	let first <- api.POST(
+		"/maintainers/metrics/ci/now",
+		NowQuery { repo: None }
+	) by Maintainer("Accuser")
+	expect first is Ok(_)
+	let second <- api.GET("/maintainers/repositories") by Maintainer("accuser")
+	expect second is TooManyRequests(_)
+	expect MaintainerLimit.allow called 2 times with key == "maintainer:accuser"
+}
