@@ -58,8 +58,10 @@ jobs:
 
   # The same checks as CI, on the commit being deployed. Repeated here rather
   # than calling ci.yml, whose concurrency group would cancel a run on `main`.
+  # Named apart from CI's checks: on a pull request these jobs are skipped, and
+  # a skipped check of the same name could stand in for a required one.
   test:
-    name: check, format and test
+    name: deploy checks / check, format and test
     if: github.event_name != 'pull_request' && !inputs.check-only
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -73,6 +75,7 @@ jobs:
           source: .
 
   smoke:
+    name: deploy checks
     if: github.event_name != 'pull_request' && !inputs.check-only
     uses: ./.github/workflows/smoke.yml
 
