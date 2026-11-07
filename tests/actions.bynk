@@ -1,0 +1,146 @@
+// Phase 4, slice 6, step 5 (#53): re-running a failed run's failed jobs from
+// the dashboard, `POST /maintainers/actions/rerun`, against an in-memory D1
+// with the migrations applied. GitHub is stubbed at the wire; accuser is a
+// maintainer (a kept membership answer).
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+---
+Installation 42 delivered for `bynk-lang/secret`, a private repository. Its
+run 500 failed; run 501's first attempt failed but its second passed; run 502
+is still going.
+---
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/secret', 0, 'main')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'push', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion,
+				                           created_at, queued_at, started_at, completed_at, updated_at) VALUES
+				  ('bynk-lang/secret', 500, 1, 'CI', 'ci.yml', 'main', 'a', 'push', 'completed', 'failure',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:05:00.000Z', '2026-11-05T10:05:00.000Z'),
+				  ('bynk-lang/secret', 501, 1, 'CI', 'ci.yml', 'main', 'b', 'push', 'completed', 'failure',
+				   '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:00:00.000Z', '2026-11-05T10:05:00.000Z', '2026-11-05T10:05:00.000Z'),
+				  ('bynk-lang/secret', 501, 2, 'CI', 'ci.yml', 'main', 'b', 'push', 'completed', 'success',
+				   '2026-11-05T10:10:00.000Z', '2026-11-05T10:10:00.000Z', '2026-11-05T10:10:00.000Z', '2026-11-05T10:15:00.000Z', '2026-11-05T10:15:00.000Z'),
+				  ('bynk-lang/secret', 502, 1, 'CI', 'ci.yml', 'main', 'c', 'push', 'in_progress', NULL,
+				   '2026-11-05T11:50:00.000Z', '2026-11-05T11:50:00.000Z', '2026-11-05T11:51:00.000Z', NULL, '2026-11-05T11:51:00.000Z')
+			""",
+			params: [],
+		},
+	]
+}
+
+fn rerun(run: Int) -> RerunRequest {
+	RerunRequest {
+		repo: "bynk-lang/secret",
+		run_id: run,
+	}
+}
+
+fn created() -> Result[Response, String] {
+	Ok(Response { status: 201, headers: Map.empty(), body: "{}" })
+}
+
+--- What `maintainer_actions` holds, in order, as `login:run:attempt:status:outcome`.
+fn actionsSql() -> String {
+	"SELECT group_concat(login || ':' || run_id || ':' || attempt || ':' || coalesce(status, '-') || ':' || outcome, ' | ') AS done FROM (SELECT * FROM maintainer_actions ORDER BY id)"
+}
+
+case "a maintainer re-runs a failed run's failed jobs, and it is recorded" {
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect r == Ok(RerunDone {
+		repo: "bynk-lang/secret",
+		run_id: 500,
+		attempt: 1,
+		message: "Re-running the failed jobs of run 500",
+	})
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/secret/actions/runs/500/rerun-failed-jobs"
+	expect AppAuth.token called once with installation == 42
+	let done <- Deliveries.first(actionsSql(), [])
+	expect done == Ok(Some("{\"done\":\"accuser:500:1:201:re-run requested\"}"))
+}
+
+case "an attempt is re-run once: asking again is a conflict, and GitHub isn't asked" {
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let first <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect first is Ok(_)
+	let again <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect again is Conflict("attempt 1 of run 500 has already been re-run")
+	expect GitHubHttp.post called once
+}
+
+case "only a run whose latest attempt failed can be re-run, and only a run the service knows" {
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let passed <- api.POST("/maintainers/actions/rerun", rerun(501)) by Maintainer("accuser")
+	expect passed is Conflict("attempt 2 of run 501 hasn't failed, so there are no failed jobs to re-run")
+	let going <- api.POST("/maintainers/actions/rerun", rerun(502)) by Maintainer("accuser")
+	expect going is Conflict(_)
+	let unknown <- api.POST("/maintainers/actions/rerun", rerun(999)) by Maintainer("accuser")
+	expect unknown is NotFound
+	expect GitHubHttp.post never called
+}
+
+case "GitHub refusing is a bad gateway, recorded with its reason, and may be tried again" {
+	stub AppAuth.forget(_) returns ()
+	stub GitHubHttp.post(_, _, _) returns each [Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), Ok(Response { status: 403, headers: Map.empty(), body: "{\"message\": \"Resource not accessible by integration\"}" }), created()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let refused <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect refused is BadGateway(_)
+	let BadGateway(why) = refused else {
+		expect false
+	}
+	expect why.contains("Actions: Read and write")
+	// A refusal isn't a re-run, so asking again goes to GitHub again.
+	let retried <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
+	expect retried is Ok(_)
+	let done <- Deliveries.first(actionsSql(), [])
+	expect done == Ok(Some("{\"done\":\"accuser:500:1:403:403 Resource not accessible by integration | accuser:500:1:201:re-run requested\"}"))
+}
+
+case "actions are limited per login, before the run is even read" {
+	stub ActionLimit.allow(_) returns false
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("Accuser")
+	expect r is TooManyRequests(_)
+	expect ActionLimit.allow called once with key == "action:accuser"
+	expect GitHubHttp.post never called
+}
+
+case "someone who has left, or whose session has ended, can't act" {
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })
+	stub GitHubHttp.post(_, _, _) returns created()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let leaver <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("a-leaver")
+	expect leaver is RawError(403, _, _)
+	let out <- api.POST("/maintainers/signout") by Maintainer("accuser")
+	expect out is Ok(_)
+	let ended <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser:0")
+	expect ended is RawError(403, _, _)
+	expect GitHubHttp.post never called
+}

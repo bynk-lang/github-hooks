@@ -43,6 +43,20 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 4, slice 6, step 5 (#53): sessions and actions.
+  - **Server-side sign-out:** a maintainer token's subject is
+    `login:version`, checked against `maintainer_sessions` (migration
+    `0018`) on every maintainer request. `POST /maintainers/signout` moves
+    the login on, ending every earlier token on every device; the page's
+    *Sign out* calls it.
+  - **Re-running failed jobs:** `POST /maintainers/actions/rerun` asks GitHub
+    to re-run a run's failed jobs, as the App, for the latest attempt of a
+    run that failed, once. Every outcome is kept in `maintainer_actions`. It's
+    limited to 10 a minute per login (`ActionLimit`).
+  - **The page:** signed in, each workflow's trend panel on CI health lists
+    its recent failed runs with a *Re-run failed jobs* button, confirmed
+    before it's sent.
+  - **Permission:** re-runs need the App's **Actions: Read and write**.
 - Phase 4, slice 6, step 4 (#53): the per-person view.
   - **`GET /maintainers/mine`:** what is the signed-in maintainer's to act
     on, across every repository: their open pull requests with stage and CI

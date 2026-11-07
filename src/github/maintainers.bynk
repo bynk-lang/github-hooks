@@ -211,3 +211,38 @@ type MyMerge = {
 
 --- The most of each kind `GET /maintainers/mine` lists.
 const MAX_MINE: Int = 50
+
+---
+A maintainer token's subject, read (#53, step 5): `login:version`, where
+`version` is the login's session version when the token was issued. A plain
+login (a token from before sessions, or `bynk token Maintainer --sub login`)
+is version 0. GitHub logins never contain `:`.
+---
+type Session = {
+	login: String,
+	version: Int,
+}
+
+fn sessionOf(who: String) -> Session {
+	let parts = who.split(":")
+	let login = parts.first().getOrElse(who)
+	let version = parts.get(1).andThen((v) => Int.parse(v)).getOrElse(0)
+	Session {
+		login: login,
+		version: version,
+	}
+}
+
+--- `POST /maintainers/actions/rerun`'s body: the run whose failed jobs to re-run.
+type RerunRequest = {
+	repo: String,
+	run_id: Int,
+}
+
+--- `POST /maintainers/actions/rerun`'s answer: GitHub accepted the re-run of `attempt`'s failed jobs.
+type RerunDone = {
+	repo: String,
+	run_id: Int,
+	attempt: Int,
+	message: String,
+}

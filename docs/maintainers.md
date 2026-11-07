@@ -5,7 +5,7 @@ The last slice of the dashboard
 for bynk-lang's maintainers, covering private repositories, what is theirs to
 act on, and actions such as re-running a flaky run. This page covers signing
 in (step 1), the maintainers' figures (step 2), the signed-in pages (step
-3) and the per-person view (step 4). The actions follow in step 5.
+3), the per-person view (step 4), and sessions and actions (step 5).
 
 ## Who may sign in
 
@@ -90,12 +90,10 @@ login · Sign out*.
    organisation. It answers its own token, how long it lasts, and the login.
    The page keeps them in `sessionStorage`, so they last as long as the tab,
    and goes back to where the sign-in started.
-4. **Signing out:** this forgets the token in the tab. GitHub's own session is
-   GitHub's, so the next sign-in may not ask again.
-   - **Not yet server-side:** a token copied elsewhere stays valid until it
-     expires, up to 8 hours, or until a membership recheck refuses it. Ending
-     a session on the server (a per-login token version, bumped on sign-out
-     or a membership change) is planned before step 5's actions.
+4. **Signing out:** this ends the session on the server
+   (`POST /maintainers/signout`, see [Sessions](#sessions)), then forgets the
+   token in the tab. GitHub's own session is GitHub's, so the next sign-in may
+   not ask again.
 
 Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 (`null` when signed out or expired). They send the token as
@@ -112,6 +110,8 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 | `POST /maintainers/metrics/…` | a maintainer | each public metrics route's figures, private and excluded repositories included ([below](#the-maintainers-figures)) |
 | `GET /maintainers/repositories` | a maintainer | every repository: `[{repo, public, excluded}]` |
 | `GET /maintainers/mine` | a maintainer | what is theirs to act on ([below](#whats-yours)) |
+| `POST /maintainers/signout` | a maintainer | ends every session of their login ([below](#sessions)) |
+| `POST /maintainers/actions/rerun` | a maintainer | re-runs a failed run's failed jobs: `{repo, run_id}` in ([below](#actions)) |
 
 **`/maintainers/token`:**
 - **Callback only:** the `redirect_uri` must be `/maintainers/callback` on
@@ -262,6 +262,51 @@ page is visible, and draws it into the page's `#mine` section (its
 | Issues | their open issues, stale ones marked |
 | Releases | their merges waiting to ship |
 
+## Sessions
+
+A maintainer token's subject is `login:version` (step 5). Each login has a
+session version in `maintainer_sessions` (migration `0018`), 0 until they
+first sign out. A token for an earlier version is refused with a `403`
+(`signed_out`), before the membership check.
+
+- **Signing out:** `POST /maintainers/signout` moves the login to the next
+  version. Every token issued to it before then is refused, on every device,
+  though none has expired. It needs only a valid token, not a current one, so
+  ending a session is always allowed.
+- **Signing in** issues a token for the login's current version.
+- **Older tokens:** a plain login, a token from before sessions or from
+  `bynk token Maintainer --sub login`, counts as version 0. It stays valid
+  until that login's first sign-out.
+- **The check** is one primary-key read per maintainer request, in
+  `forMaintainer`. A failed read counts as version 0, so it never signs
+  anyone out by itself.
+
+## Actions
+
+Signed in, the CI health page lists, in each workflow's trend panel, its
+recent runs whose latest attempt failed (failed, timed out, or failed to
+start), newest first, at most 5. Each has a **Re-run failed jobs** button,
+which asks for confirmation, then calls `POST /maintainers/actions/rerun`.
+The answer shows beside the run.
+
+`POST /maintainers/actions/rerun` takes `{repo, run_id}`:
+- **What it re-runs:** the run's latest attempt, through GitHub's
+  `POST /repos/{repo}/actions/runs/{run_id}/rerun-failed-jobs`, as the
+  installation that last delivered for the repository.
+- **Refusals:**
+  - `404` for a run this service never recorded.
+  - `409` when its latest attempt hasn't failed, or was already re-run from
+    here. Asking twice doesn't re-run twice.
+  - `429` past the per-login limit: `ActionLimit`, 10 actions a minute,
+    besides the maintainer routes' own 60.
+- **GitHub's answer:** a `201` is success. Any refusal is a `502` with
+  GitHub's reason; a `403` means the App lacks **Actions: Read and write**
+  ([github-app.md](github-app.md)). A refusal isn't a re-run, so it may be
+  tried again.
+- **The audit:** every outcome, refusals included, is kept in
+  `maintainer_actions`: who, what, which run attempt, when, GitHub's status
+  and its reason.
+
 ## Settings
 
 | Setting | Meaning |
@@ -285,6 +330,11 @@ page is visible, and draws it into the page's `#mine` section (its
     private or the excluded repository; the maintainer's names them.
     `tests/metrics.bynk` also covers `/maintainers/repositories`, and refusing
     a leaver.
+  - `tests/actions.bynk` covers re-running: GitHub's call and the record, a
+    second request, runs that haven't failed or aren't known, GitHub
+    refusing, the per-login limit, and someone who has left or signed out.
+    `tests/maintainers.bynk` covers sessions: signing out ends earlier
+    tokens, and the next sign-in issues the next version.
 - **End to end:** with `MAINTAINER_TOKEN_SECRET` set, `scripts/smoke.sh`
   mints tokens with `bynk token Maintainer` and checks that a missing, forged,
   expired or reader's token is refused with a `401`, and that a valid one
