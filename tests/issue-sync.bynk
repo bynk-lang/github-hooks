@@ -129,11 +129,6 @@ fn heldOpen(number: Int, updated: String) -> List[SqlStatement] {
 	]
 }
 
---- Every issue, in order, as `number:state:labels`.
-fn rows() -> String {
-	"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i"
-}
-
 case "open issues the service never saw are filled in, with their labels; pull requests in the listing aren't" {
 	stub AppAuth.token(_) returns Ok("ghs_test")
 	stub GitHubHttp.get(_, _) returns ok(listing([listed(12, "2026-11-05T08:30:00Z", ["bug", "accepted"]), issueIn("bynk-lang/bynk", 11, "open", "2026-11-05T08:20:00Z", "null", [], true), listed(10, "2026-11-05T08:00:00Z", [])]))
@@ -143,7 +138,10 @@ case "open issues the service never saw are filled in, with their labels; pull r
 	expect r == Ok(())
 	expect AppAuth.token called once with installation == 42
 	expect GitHubHttp.get called once with url == "https://api.github.com/repos/bynk-lang/bynk/issues?state=open&per_page=100&page=1"
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"10:open:- 12:open:accepted+bug\"}"))
 	let row <- Deliveries.first(
 		"SELECT title, author, author_association, opened_at, updated_at FROM issues WHERE number = 12",
@@ -160,7 +158,10 @@ case "a listing older than what deliveries recorded changes nothing" {
 	expect seeded is Ok(_)
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r == Ok(())
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:open:stale-label\"}"))
 	let updated <- Deliveries.first("SELECT title, updated_at FROM issues", [])
 	expect updated == Ok(Some("{\"title\":\"Issue held open\",\"updated_at\":\"2026-11-05T09:00:00.000Z\"}"))
@@ -174,7 +175,10 @@ case "an issue held open that GitHub no longer lists is read and saved as it is 
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r == Ok(())
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/issues/5"
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:closed:bug\"}"))
 	let closed <- Deliveries.first("SELECT state_reason, closed_at FROM issues", [])
 	expect closed == Ok(Some("{\"state_reason\":\"completed\",\"closed_at\":\"2026-11-04T12:00:00.000Z\"}"))
@@ -188,7 +192,10 @@ case "an issue GitHub no longer has becomes a deleted tombstone, with no labels"
 	expect seeded is Ok(_)
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r == Ok(())
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:deleted:-\"}"))
 	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 1 repaired"
 }
@@ -201,7 +208,10 @@ case "an issue GitHub answers for from another repository was transferred, and b
 	expect seeded is Ok(_)
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r == Ok(())
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:transferred:-\"}"))
 }
 
@@ -257,7 +267,10 @@ case "a repair GitHub refuses is counted as failed, and fails the run once the r
 	expect seeded is Ok(_)
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r is Err(_)
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:open:stale-label 10:open:-\"}"))
 	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 1 open, 0 repaired, 1 failed"
 }
@@ -270,7 +283,10 @@ case "an issue GitHub still has open, though the listing missed it, is saved but
 	expect seeded is Ok(_)
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r == Ok(())
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:open:bug\"}"))
 	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 0 repaired"
 }
@@ -285,7 +301,10 @@ case "a renamed repository with nothing open leaves its held-open issues alone, 
 	expect seeded is Ok(_)
 	let r <- issueSync.schedule("53 4 * * *", 1793880000000)
 	expect r == Ok(())
-	let all <- Deliveries.first(rows(), [])
+	let all <- Deliveries.first(
+		"SELECT group_concat(number || ':' || state || ':' || coalesce((SELECT group_concat(label, '+') FROM (SELECT label FROM issue_labels l WHERE l.repo = i.repo AND l.number = i.number ORDER BY label)), '-'), ' ') AS rows FROM (SELECT * FROM issues ORDER BY number) i",
+		[]
+	)
 	expect all == Ok(Some("{\"rows\":\"5:open:stale-label\"}"))
 	expect Logger.info called once with msg == "issue sync: bynk-lang/bynk has 0 open, 0 repaired"
 }

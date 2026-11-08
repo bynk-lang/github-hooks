@@ -56,11 +56,6 @@ fn created() -> Result[Response, String] {
 	Ok(Response { status: 201, headers: Map.empty(), body: "{}" })
 }
 
---- What `maintainer_actions` holds, in order, as `login:run:attempt:status:outcome`.
-fn actionsSql() -> String {
-	"SELECT group_concat(login || ':' || run_id || ':' || attempt || ':' || coalesce(status, '-') || ':' || outcome, ' | ') AS done FROM (SELECT * FROM maintainer_actions ORDER BY id)"
-}
-
 case "a maintainer re-runs a failed run's failed jobs, and it is recorded" {
 	stub GitHubHttp.post(_, _, _) returns created()
 	let seeded <- Deliveries.batch(seed())
@@ -74,7 +69,10 @@ case "a maintainer re-runs a failed run's failed jobs, and it is recorded" {
 	})
 	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/secret/actions/runs/500/rerun-failed-jobs"
 	expect AppAuth.token called once with installation == 42
-	let done <- Deliveries.first(actionsSql(), [])
+	let done <- Deliveries.first(
+		"SELECT group_concat(login || ':' || run_id || ':' || attempt || ':' || coalesce(status, '-') || ':' || outcome, ' | ') AS done FROM (SELECT * FROM maintainer_actions ORDER BY id)",
+		[]
+	)
 	expect done == Ok(Some("{\"done\":\"accuser:500:1:201:re-run requested\"}"))
 }
 
@@ -116,7 +114,10 @@ case "GitHub refusing is a bad gateway, recorded with its reason, and may be tri
 	// A refusal isn't a re-run, so asking again goes to GitHub again.
 	let retried <- api.POST("/maintainers/actions/rerun", rerun(500)) by Maintainer("accuser")
 	expect retried is Ok(_)
-	let done <- Deliveries.first(actionsSql(), [])
+	let done <- Deliveries.first(
+		"SELECT group_concat(login || ':' || run_id || ':' || attempt || ':' || coalesce(status, '-') || ':' || outcome, ' | ') AS done FROM (SELECT * FROM maintainer_actions ORDER BY id)",
+		[]
+	)
 	expect done == Ok(Some("{\"done\":\"accuser:500:1:403:403 Resource not accessible by integration | accuser:500:1:201:re-run requested\"}"))
 }
 

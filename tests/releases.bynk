@@ -69,11 +69,6 @@ fn recordingBegan(at: String) -> SqlStatement {
 	}
 }
 
---- Each pull request as `repo#number:released_in`, in order.
-fn releasedIn() -> String {
-	"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)"
-}
-
 --- Each pull request untouched by a release.
 fn untouched() -> String {
 	"{\"rows\":\"bynk-lang/bynk#2776:-:- bynk-lang/bynk#2900:-:- bynk-lang/bynk#2941:-:- bynk-lang/bynk#2942:v0.508.4:2026-11-04T21:16:39.000Z bynk-lang/bynk#2943:-:- bynk-lang/other#2948:-:-\"}"
@@ -98,7 +93,10 @@ case "a published release is recorded and matched to the pull requests it shippe
 		[]
 	)
 	expect row == Ok(Some("{\"repo\":\"bynk-lang/bynk\",\"tag\":\"v0.510.2\",\"release_id\":435386663,\"name\":\"v0.510.2\",\"draft\":0,\"prerelease\":0,\"created_at\":\"2026-11-05T13:53:38.000Z\",\"published_at\":\"2026-11-05T15:33:58.000Z\",\"author_is_bot\":1,\"previous_tag\":\"v0.508.4\",\"shipped\":2,\"deleted_at\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some("{\"rows\":\"bynk-lang/bynk#2776:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2900:-:- bynk-lang/bynk#2941:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2942:v0.508.4:2026-11-04T21:16:39.000Z bynk-lang/bynk#2943:-:- bynk-lang/other#2948:-:-\"}"))
 	expect Logger.error never called
 }
@@ -128,7 +126,10 @@ case "a pre-release is recorded, but ships nothing and asks GitHub nothing" {
 	expect GitHubHttp.get never called
 	let row <- Deliveries.first("SELECT prerelease, previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"prerelease\":1,\"previous_tag\":null,\"shipped\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some(untouched()))
 }
 
@@ -185,7 +186,10 @@ case "a repository's first release has nothing to compare, and ships nothing cou
 	expect Logger.info called with msg == "bynk-lang/bynk v0.510.2 is its first release: nothing to compare it with"
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":\"\",\"shipped\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some(untouched()))
 }
 
@@ -199,7 +203,10 @@ case "a comparison GitHub refuses is logged, and leaves the release's PRs unknow
 	expect Logger.error called once with msg == "could not match bynk-lang/bynk v0.510.2 to pull requests: GitHub refused to compare bynk-lang/bynk v0.508.4...v0.510.2: 500 Server Error"
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":null,\"shipped\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some(untouched()))
 }
 
@@ -278,7 +285,10 @@ case "no final release within the pages read is a warning, not a first release" 
 	expect Logger.warn called once with msg == "bynk-lang/bynk v0.510.2: no earlier final release among its latest 90 releases; its pull requests are left unknown"
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":\"\",\"shipped\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some(untouched()))
 }
 
@@ -292,7 +302,10 @@ case "a release whose previous one came before PRs were recorded marks its PRs, 
 	let _ <- api.POST("/github", headers("release", "rel-1"), Bytes.fromUtf8(released)) by GitHub
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some("{\"rows\":\"bynk-lang/bynk#2776:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2900:-:- bynk-lang/bynk#2941:v0.510.2:2026-11-05T15:33:58.000Z bynk-lang/bynk#2942:v0.508.4:2026-11-04T21:16:39.000Z bynk-lang/bynk#2943:-:- bynk-lang/other#2948:-:-\"}"))
 }
 
@@ -307,7 +320,10 @@ case "a comparison GitHub no longer has is a warning, and the release isn't trie
 	expect Logger.error never called
 	let row <- Deliveries.first("SELECT previous_tag, shipped FROM releases", [])
 	expect row == Ok(Some("{\"previous_tag\":\"v0.508.4\",\"shipped\":null}"))
-	let rows <- Deliveries.first(releasedIn(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(repo || '#' || number || ':' || coalesce(released_in, '-') || ':' || coalesce(released_at, '-'), ' ') AS rows FROM (SELECT * FROM pull_requests ORDER BY repo, number)",
+		[]
+	)
 	expect rows == Ok(Some(untouched()))
 }
 

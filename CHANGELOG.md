@@ -22,6 +22,12 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- Built and tested with Bynk v0.512.10 (v0.512.9 first), which requires a database call's SQL
+  to be a string literal (`bynk.types.sql_not_literal`), so it can't be built
+  at run time. The Worker's own SQL already was; the suites' helpers that
+  returned SQL for a case to read are inlined at their calls. v0.512.9 also
+  fixes bynk-lang/bynk#3041 and bynk-lang/bynk#3042, found building the
+  maintainers' live board.
 - `src/github/hooks.bynk` (5,400 lines) is split into 25 files under
   `src/github/hooks/`, one per part of the Worker, each opening
   `context github.hooks`, which Bynk joins into one context. Nothing else

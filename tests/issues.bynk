@@ -95,16 +95,6 @@ fn commentBy(
 	)
 }
 
---- The issue's row, every column but its key.
-fn row() -> String {
-	"SELECT title, author, author_is_bot, author_association, state, state_reason, opened_at, closed_at, updated_at, comments, first_response_at, first_responder FROM issues"
-}
-
---- The issue's labels, in order, as one string.
-fn labels() -> String {
-	"SELECT group_concat(label, ',') AS labels FROM (SELECT label FROM issue_labels ORDER BY label)"
-}
-
 case "a closed issue is recorded with its labels, its times and who opened it" {
 	let r <- api.POST(
 		"/github",
@@ -112,9 +102,15 @@ case "a closed issue is recorded with its labels, its times and who opened it" {
 		Bytes.fromUtf8(closedIssue)
 	) by GitHub
 	expect r is Accepted(_)
-	let issue <- Deliveries.first(row(), [])
+	let issue <- Deliveries.first(
+		"SELECT title, author, author_is_bot, author_association, state, state_reason, opened_at, closed_at, updated_at, comments, first_response_at, first_responder FROM issues",
+		[]
+	)
 	expect issue == Ok(Some("{\"title\":\"Crate hygiene D1: move bynk_emit::project into bynk-driver (four PRs)\",\"author\":\"accuser\",\"author_is_bot\":0,\"author_association\":\"MEMBER\",\"state\":\"closed\",\"state_reason\":\"completed\",\"opened_at\":\"2026-11-05T21:46:31.000Z\",\"closed_at\":\"2026-11-06T08:51:18.000Z\",\"updated_at\":\"2026-11-06T08:51:18.000Z\",\"comments\":2,\"first_response_at\":null,\"first_responder\":null}"))
-	let names <- Deliveries.first(labels(), [])
+	let names <- Deliveries.first(
+		"SELECT group_concat(label, ',') AS labels FROM (SELECT label FROM issue_labels ORDER BY label)",
+		[]
+	)
 	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
 	expect Logger.error never called
 }
@@ -141,7 +137,10 @@ case "an issue's life: opened, labelled, closed; a stale delivery changes neithe
 	) by GitHub
 	let issue <- Deliveries.first("SELECT state, state_reason, updated_at FROM issues", [])
 	expect issue == Ok(Some("{\"state\":\"closed\",\"state_reason\":\"completed\",\"updated_at\":\"2026-11-06T08:51:18.000Z\"}"))
-	let names <- Deliveries.first(labels(), [])
+	let names <- Deliveries.first(
+		"SELECT group_concat(label, ',') AS labels FROM (SELECT label FROM issue_labels ORDER BY label)",
+		[]
+	)
 	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
 }
 
@@ -159,7 +158,10 @@ case "removing a label replaces the set; removing the last leaves none" {
 			["accepted"]
 		)
 	) by GitHub
-	let one <- Deliveries.first(labels(), [])
+	let one <- Deliveries.first(
+		"SELECT group_concat(label, ',') AS labels FROM (SELECT label FROM issue_labels ORDER BY label)",
+		[]
+	)
 	expect one == Ok(Some("{\"labels\":\"accepted\"}"))
 	let _ <- api.POST(
 		"/github",
@@ -323,7 +325,10 @@ case "the author's own comment, bots' and an outsider's aren't responses, and a 
 		[]
 	)
 	expect issue == Ok(Some("{\"state\":\"open\",\"comments\":1,\"updated_at\":\"2026-11-06T07:33:30.000Z\",\"first_response_at\":null}"))
-	let names <- Deliveries.first(labels(), [])
+	let names <- Deliveries.first(
+		"SELECT group_concat(label, ',') AS labels FROM (SELECT label FROM issue_labels ORDER BY label)",
+		[]
+	)
 	expect names == Ok(Some("{\"labels\":\"accepted,proposal\"}"))
 	expect GitHubHttp.get called once with url == "https://api.github.com/orgs/bynk-lang/memberships/a-reader"
 }
