@@ -601,6 +601,44 @@ case "a late, older removal doesn't move a newer one back (#68)" {
 	expect waiting == requested("")
 }
 
+case "an old request redelivered after its tombstone has gone changes nothing (#68, #77 review)" {
+	// Asked at 09:00, withdrawn at 09:01; a newer delivery at 09:10 settles
+	// the tombstone, as retention would after a day. Then the 09:00 request is
+	// redelivered: the row is newer, so its set already said who is asked.
+	let asked = requesting(
+		"review_requested",
+		", \"requested_reviewer\": {\"login\": \"c-person\", \"type\": \"User\"}",
+		"2026-11-05T09:00:00Z",
+		["c-person"],
+		[]
+	)
+	let _ <- api.POST("/github", headers("pull_request", "rq-1"), asked) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "rm-1"),
+		requesting(
+			"review_request_removed",
+			", \"requested_reviewer\": {\"login\": \"c-person\", \"type\": \"User\"}",
+			"2026-11-05T09:01:00Z",
+			[],
+			[]
+		)
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "ed-1"),
+		requesting("edited", "", "2026-11-05T09:10:00Z", [], [])
+	) by GitHub
+	let settled <- Deliveries.first("SELECT count(*) AS n FROM pull_request_review_tombstones", [])
+	expect settled == Ok(Some("{\"n\":0}"))
+	let _ <- api.POST("/github", headers("pull_request", "rq-1-again"), asked) by GitHub
+	let waiting <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
+	expect waiting == requested("")
+}
+
 case "a newer set settles a removal: who it lists is asked again, and the tombstone goes (#68)" {
 	let _ <- api.POST(
 		"/github",

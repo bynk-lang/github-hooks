@@ -233,7 +233,10 @@ fn requestParams(p: PullFact, r: List[String]) -> List[SqlValue] {
 // ordered against the others by that time:
 // - a removal deletes the request only if it was made no later than the
 //   removal, and leaves a tombstone at its time;
-// - a request is added only if no tombstone is as new or newer. Within one
+// - a request is added only if no tombstone is as new or newer, and the pull
+//   request's row isn't strictly newer: that newer delivery's whole set has
+//   already accounted for it, so a late or redelivered request, however old,
+//   and long after its tombstone is pruned, changes nothing. Within one
 //   second the order is unknown, and the removal wins; the daily sync settles
 //   it.
 fn reviewRequestChange(p: PullFact) -> List[SqlStatement] {
@@ -255,6 +258,7 @@ fn reviewRequestChange(p: PullFact) -> List[SqlStatement] {
 					SELECT ?1, ?2, ?3, ?4, ?5
 					WHERE NOT EXISTS (SELECT 1 FROM pull_request_review_tombstones t
 					                  WHERE t.repo = ?1 AND t.number = ?2 AND t.reviewer = ?3 AND t.team = ?4 AND t.at >= ?5)
+					  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?5)
 					ON CONFLICT (repo, number, reviewer, team) DO UPDATE
 					  SET requested_at = max(coalesce(pull_request_review_requests.requested_at, ''), excluded.requested_at)
 				""",
