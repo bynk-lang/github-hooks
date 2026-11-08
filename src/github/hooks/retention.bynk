@@ -3,7 +3,8 @@ context github.hooks
 ---
 Retention, hourly: deletes `workflow_run` progress (`requested`,
 `in_progress`) older than 7 days and every delivery older than 90 days, at
-most `RETENTION_BATCH` rows of each per run, and actions older than 90 days.
+most `RETENTION_BATCH` rows of each per run, actions older than 90 days, and
+review-request tombstones older than a day (#68).
 `welcomed` is kept: it is what makes a welcome once per person. `at` is the
 scheduled time, so a run deletes against when it was due, not when it ran.
 ---
@@ -52,13 +53,21 @@ service retention from cron {
 		) else match {
 			Err(e) => retentionFailed("actions", e),
 		}
+		// Review-request tombstones (#68) older than a day: by then every
+		// delivery they guard against has arrived. A small table.
+		let Ok(settled) <- Deliveries.run(
+			"DELETE FROM pull_request_review_tombstones WHERE at < ?1",
+			[Text((Instant.fromEpochMillis(at) - 1.days).toIso())]
+		) else match {
+			Err(e) => retentionFailed("review-request tombstones", e),
+		}
 		let Ok(jobs) <- rollUpJobDay(c.jobDays) else match {
 			Err(why) => {
 				let _ <- Logger.error(why)
 				Err(why)
 			},
 		}
-		let removed = progress.changes + expired.changes + acted.changes + jobs.pruned
+		let removed = progress.changes + expired.changes + acted.changes + settled.changes + jobs.pruned
 		let true = removed > 0 else { Ok(()) }
 		let more = progress.changes == RETENTION_BATCH
 			|| expired.changes == RETENTION_BATCH
@@ -68,8 +77,13 @@ service retention from cron {
 		} else {
 			""
 		}
+		let tombstones = if settled.changes > 0 {
+			", \(settled.changes) review-request tombstones"
+		} else {
+			""
+		}
 		let _ <- Logger.info(
-			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(rolled)\(if more { "; more remain for the next run" } else { "" })"
+			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(tombstones)\(rolled)\(if more { "; more remain for the next run" } else { "" })"
 		)
 		Ok(())
 	}

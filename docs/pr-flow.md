@@ -41,12 +41,19 @@ indefinitely (retention prunes `deliveries`, not these).
     as issue labels are kept ([issues.md](issues.md)). A submitted review
     takes its reviewer's own request off, as GitHub does. The review's own
     pull request isn't saved, being a partial view.
-  - **Out of order:** a request, its removal and a review each apply as they
-    arrive. So if a removal or a review arrives before the request it
-    undoes (a CODEOWNERS auto-request withdrawn a moment later, say), the
-    request stays. "Waiting on your review" can then be wrong until the next
-    strictly newer delivery or the daily sync replaces the set, so for up to
-    a day.
+  - **Out of order** (migration `0022`, #68): a request, its removal and a
+    review are put in order by their times, whatever order they arrive in.
+    Each request keeps when it was made (`requested_at`, the delivery's
+    `updated_at`). A removal (at the pull request's `updated_at`) or the
+    reviewer's submitted review (at its `submitted_at`) deletes it only if it
+    was made no later, and leaves a tombstone
+    (`pull_request_review_tombstones`). A request isn't added if a tombstone
+    is as new or newer. So a CODEOWNERS auto-request withdrawn a moment later
+    stays withdrawn, whichever delivery comes first, and a re-request made
+    after a review stays. Within one second the order is unknown and the
+    removal wins, until the daily sync. A set (a strictly newer delivery's, or
+    the sync's) settles the tombstones no later than it. Retention prunes
+    those older than a day.
   - **The daily sync** fills both for open pull requests. It reads GitHub's
     current state, so at a tie its set of requests replaces the stored one,
     which back-fills pull requests recorded before requests were.

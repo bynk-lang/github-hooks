@@ -139,6 +139,10 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 // adds each. The daily sync reads GitHub's current state, so at a tie its set
 // is the current one, and replaces the stored set unless the row is strictly
 // newer: that back-fills pull requests recorded before requests were.
+//
+// A set says who is asked as of its `updated_at` (#68): each request it lists
+// is made then, unless a tombstone is newer, and the tombstones no later than
+// it are settled by it, so cleared.
 fn reviewRequestSet(p: PullFact) -> List[SqlStatement] {
 	let users = p.reviewers.map((us) => us.map((u) => [u, "0"]))
 	let teams = p.teams.map((ts) => ts.map((t) => [t, "1"]))
@@ -155,13 +159,23 @@ fn reviewRequestSet(p: PullFact) -> List[SqlStatement] {
 				""",
 				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
 			},
+			SqlStatement {
+				sql: """
+					DELETE FROM pull_request_review_tombstones
+					WHERE repo = ?1 AND number = ?2 AND at <= ?3
+					  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?3)
+				""",
+				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
+			},
 		].concat(
 			requests.map(
 				(r) => SqlStatement {
 					sql: """
-						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
-						SELECT ?1, ?2, ?3, ?4
+						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team, requested_at)
+						SELECT ?1, ?2, ?3, ?4, ?5
 						WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?5)
+						  AND NOT EXISTS (SELECT 1 FROM pull_request_review_tombstones t
+						                  WHERE t.repo = ?1 AND t.number = ?2 AND t.reviewer = ?3 AND t.team = ?4 AND t.at > ?5)
 					""",
 					params: requestParams(p, r),
 				}
@@ -177,13 +191,23 @@ fn reviewRequestSet(p: PullFact) -> List[SqlStatement] {
 				""",
 				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
 			},
+			SqlStatement {
+				sql: """
+					DELETE FROM pull_request_review_tombstones
+					WHERE repo = ?1 AND number = ?2 AND at <= ?3
+					  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at >= ?3)
+				""",
+				params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
+			},
 		].concat(
 			requests.map(
 				(r) => SqlStatement {
 					sql: """
-						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team)
-						SELECT ?1, ?2, ?3, ?4
+						INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team, requested_at)
+						SELECT ?1, ?2, ?3, ?4, ?5
 						WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at >= ?5)
+						  AND NOT EXISTS (SELECT 1 FROM pull_request_review_tombstones t
+						                  WHERE t.repo = ?1 AND t.number = ?2 AND t.reviewer = ?3 AND t.team = ?4 AND t.at > ?5)
 					""",
 					params: requestParams(p, r),
 				}
@@ -204,8 +228,14 @@ fn requestParams(p: PullFact, r: List[String]) -> List[SqlValue] {
 }
 
 // The one review request a `review_requested` or `review_request_removed`
-// delivery names, added or removed whatever the delivery's age: each such
-// delivery is one change.
+// delivery names, added or removed: each such delivery is one change, at the
+// pull request's `updated_at`. They may arrive out of order (#68), so each is
+// ordered against the others by that time:
+// - a removal deletes the request only if it was made no later than the
+//   removal, and leaves a tombstone at its time;
+// - a request is added only if no tombstone is as new or newer. Within one
+//   second the order is unknown, and the removal wins; the daily sync settles
+//   it.
 fn reviewRequestChange(p: PullFact) -> List[SqlStatement] {
 	let named = match p.requestedUser {
 		Some(u) => Some([u, "0"]),
@@ -214,23 +244,55 @@ fn reviewRequestChange(p: PullFact) -> List[SqlStatement] {
 	let Some(r) = named else { [] }
 	let reviewer = Text(r.first().getOrElse(""))
 	let team = Integer(if r.get(1) == Some("1") { 1 } else { 0 })
+	let at = Text(p.updatedAt)
 	if p.action == "review_request_removed" {
-		[
-			SqlStatement {
-				sql: "DELETE FROM pull_request_review_requests WHERE repo = ?1 AND number = ?2 AND reviewer = ?3 AND team = ?4",
-				params: [Text(p.repo), Integer(p.number), reviewer, team],
-			},
-		]
+		removeRequest(p.repo, p.number, reviewer, team, at)
 	} else if p.action == "review_requested" {
 		[
 			SqlStatement {
-				sql: "INSERT OR IGNORE INTO pull_request_review_requests (repo, number, reviewer, team) VALUES (?1, ?2, ?3, ?4)",
-				params: [Text(p.repo), Integer(p.number), reviewer, team],
+				sql: """
+					INSERT INTO pull_request_review_requests (repo, number, reviewer, team, requested_at)
+					SELECT ?1, ?2, ?3, ?4, ?5
+					WHERE NOT EXISTS (SELECT 1 FROM pull_request_review_tombstones t
+					                  WHERE t.repo = ?1 AND t.number = ?2 AND t.reviewer = ?3 AND t.team = ?4 AND t.at >= ?5)
+					ON CONFLICT (repo, number, reviewer, team) DO UPDATE
+					  SET requested_at = max(coalesce(pull_request_review_requests.requested_at, ''), excluded.requested_at)
+				""",
+				params: [Text(p.repo), Integer(p.number), reviewer, team, at],
 			},
 		]
 	} else {
 		[]
 	}
+}
+
+// Removes one review request as of `at` (#68): only if it was made no later
+// than `at` (or before requests had times), leaving a tombstone at `at`, so a
+// request that arrives later but was made earlier isn't added back.
+fn removeRequest(
+	repo: String,
+	number: Int,
+	reviewer: SqlValue,
+	team: SqlValue,
+	at: SqlValue
+) -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: """
+				DELETE FROM pull_request_review_requests
+				WHERE repo = ?1 AND number = ?2 AND reviewer = ?3 COLLATE NOCASE AND team = ?4
+				  AND (requested_at IS NULL OR requested_at <= ?5)
+			""",
+			params: [Text(repo), Integer(number), reviewer, team, at],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_request_review_tombstones (repo, number, reviewer, team, at) VALUES (?1, ?2, ?3, ?4, ?5)
+				ON CONFLICT (repo, number, reviewer, team) DO UPDATE SET at = max(pull_request_review_tombstones.at, excluded.at)
+			""",
+			params: [Text(repo), Integer(number), reviewer, team, at],
+		},
+	]
 }
 
 // Records a review (#26): submitted, edited or dismissed. Review payloads
@@ -266,12 +328,18 @@ fn recordReview(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger
 	// Reviewing takes the reviewer's request off the pull request (#53), as
 	// GitHub does. The review's own pull request is a partial view, so the row
 	// isn't saved from it; a later re-request arrives as `review_requested`.
+	// At the review's `submitted_at`, like a removal (#68): a re-request made
+	// after the review stays, whichever arrives first.
 	let Some(reviewer) = r.reviewer else { Effect.pure(()) }
 	let true = d.action == Some("submitted") else { Effect.pure(()) }
-	let Ok(_) <- Deliveries.run(
-		"DELETE FROM pull_request_review_requests WHERE repo = ?1 AND number = ?2 AND reviewer = ?3 COLLATE NOCASE AND team = 0",
-		[Text(r.repo), Integer(r.number), Text(reviewer)]
-	) else match {
+	let Some(at) = r.submittedAt else { Effect.pure(()) }
+	let Ok(_) <- Deliveries.batch(removeRequest(
+		r.repo,
+		r.number,
+		Text(reviewer),
+		Integer(0),
+		Text(at)
+	)) else match {
 		Err(e) => Logger.error(
 			"could not take \(reviewer)'s review request off \(r.repo)#\(r.number): \(sqlError(e))"
 		),

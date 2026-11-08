@@ -291,8 +291,9 @@ most 50.
     delivery or the daily sync).
 - **`reviews`:** open pull requests waiting on their review. Only requests
   made to them by name count: a team's request isn't attributed to its
-  members. A request whose removal arrived before it can linger for up to a
-  day, until the daily sync ([pr-flow.md](pr-flow.md)).
+  members. Deliveries that arrive out of order are put back in order by
+  their times, so a request whose removal or review arrived first doesn't
+  linger (#68, [pr-flow.md](pr-flow.md)).
 - **`issues`:** their open issues, the stale first (no update for 14 days).
 - **`unreleased`:** their pull requests merged since their repository's
   latest final release, waiting to ship. A repository that has never

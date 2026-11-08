@@ -226,3 +226,22 @@ case "a day already rolled up keeps its rollup when a late job for it is pruned"
 	)
 	expect left == Ok(Some("{\"n\":0}"))
 }
+
+case "review-request tombstones older than a day go (#68)" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO pull_request_review_tombstones (repo, number, reviewer, team, at) VALUES
+		  ('bynk-lang/bynk', 1, 'a-person', 0, '2026-11-03T23:59:59.000Z'),
+		  ('bynk-lang/bynk', 2, 'a-person', 0, '2026-11-04T12:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	let kept <- Deliveries.all(
+		"SELECT number FROM pull_request_review_tombstones ORDER BY number",
+		[]
+	)
+	expect kept == Ok("[{\"number\":2}]")
+	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, 1 review-request tombstones"
+}
