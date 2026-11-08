@@ -1,5 +1,5 @@
 #:schema https://bynk-lang.org/schemas/bynk.toml.json
-# Bynk project manifest — marks the project root for `bynkc` and the LSP.
+# Bynk project manifest — marks the project root for `bynk` and the LSP.
 [project]
 name = "github-hooks"
 version = "0.2.0"
