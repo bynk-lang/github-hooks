@@ -373,7 +373,7 @@ case "a maintainer's issue figures include private and excluded repositories; th
 		},
 		viewer()
 	) by Visitor
-	let mine0 <- api.POST("/maintainers/metrics/issues", IssueQuery {
+	let mine0 <- api.GET("/maintainers/metrics/issues", IssueQuery {
 		repo: None,
 		days: 7,
 	}) by Maintainer("accuser")
@@ -391,7 +391,7 @@ case "a maintainer's issue figures include private and excluded repositories; th
 	expect mt0.contains("bynk-lang/secret")
 	expect mt0.contains("bynk-lang/bynk")
 	let public1 <- api.GET("/metrics/issues/open", NowQuery { repo: None }, viewer()) by Visitor
-	let mine1 <- api.POST(
+	let mine1 <- api.GET(
 		"/maintainers/metrics/issues/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")

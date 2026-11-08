@@ -141,15 +141,16 @@ if [ -n "${MAINTAINER_TOKEN_SECRET:-}" ]; then
   get 401 "an expired maintainer token is refused" /maintainers/me "$MEXPIRED"
   get 401 "a reader's token is not a maintainer's" /maintainers/me "$RTOKEN"
   get 503 "a valid maintainer token reaches the membership check" /maintainers/me "$MTOKEN"
-  # The maintainer figures (#53 step 2): POSTed, so neither the edge nor a
-  # browser keeps them, and only past the token and membership checks.
-  mpost() {
-    curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' \
-      ${2:+-H "Authorization: Bearer $2"} -d '{"days":7}' "$BASE$1" || echo 000
-  }
-  check 401 "$(mpost /maintainers/metrics/ci)" "the maintainer CI figures without a token are refused"
-  check 401 "$(mpost /maintainers/metrics/prs "$RTOKEN")" "the maintainer PR figures refuse a reader's token"
-  check 503 "$(mpost /maintainers/metrics/issues "$MTOKEN")" "a maintainer token reaches the figures' membership check"
+  # The maintainer figures (#53 step 2; GETs since #68 step 3): the public
+  # route's query string, only past the token and membership checks, and
+  # never kept by the edge or a browser.
+  get 401 "the maintainer CI figures without a token are refused" "/maintainers/metrics/ci?days=7"
+  get 401 "the maintainer PR figures refuse a reader's token" "/maintainers/metrics/prs?days=7" "$RTOKEN"
+  get 400 "the maintainer figures check their query, as the public route does" "/maintainers/metrics/ci?days=91" "$MTOKEN"
+  get 503 "a maintainer token reaches the figures' membership check" "/maintainers/metrics/issues?days=7" "$MTOKEN"
+  stored=$(curl -s -o /dev/null -D - -H "Authorization: Bearer $MTOKEN" "$BASE/maintainers/metrics/ci/now" \
+    | tr -d '\r' | awk -F': ' 'tolower($1) == "cache-control" { print $2 }') || stored=none
+  check no-store "$stored" "the maintainer figures are never cached"
   get 401 "what's yours needs a maintainer's token" /maintainers/mine "$RTOKEN"
   get 503 "a maintainer token reaches what's theirs, past the membership check" /maintainers/mine "$MTOKEN"
   # Actions and sign-out (#53 step 5).

@@ -569,7 +569,7 @@ case "a maintainer's CI figures include private and excluded repositories; the p
 		},
 		viewer()
 	) by Visitor
-	let mine0 <- api.POST("/maintainers/metrics/ci", CiQuery {
+	let mine0 <- api.GET("/maintainers/metrics/ci", CiQuery {
 		repo: None,
 		branch: None,
 		event: None,
@@ -588,7 +588,7 @@ case "a maintainer's CI figures include private and excluded repositories; the p
 	expect mt0.contains("bynk-lang/secret") && mt0.contains("bynk-lang/sandbox")
 	expect mt0.contains("bynk-lang/bynk")
 	let public1 <- api.GET("/metrics/ci/now", NowQuery { repo: None }, viewer()) by Visitor
-	let mine1 <- api.POST(
+	let mine1 <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -614,7 +614,7 @@ case "a maintainer's CI figures include private and excluded repositories; the p
 		},
 		viewer()
 	) by Visitor
-	let mine2 <- api.POST("/maintainers/metrics/ci/history", CiQuery {
+	let mine2 <- api.GET("/maintainers/metrics/ci/history", CiQuery {
 		repo: None,
 		branch: None,
 		event: None,
@@ -667,14 +667,14 @@ case "the maintainer figures are refused to someone who has left, and unavailabl
 		[]
 	)
 	expect installed is Ok(_)
-	let leaver <- api.POST("/maintainers/metrics/ci", CiQuery {
+	let leaver <- api.GET("/maintainers/metrics/ci", CiQuery {
 		repo: None,
 		branch: None,
 		event: None,
 		days: 7,
 	}) by Maintainer("a-leaver")
 	expect leaver is RawError(403, _, _)
-	let unknown <- api.POST(
+	let unknown <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("someone")
@@ -685,7 +685,7 @@ case "a maintainer's requests are limited per login, before anything is read" {
 	stub MaintainerLimit.allow(_) returns each [true, false]
 	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
 	expect seeded is Ok(_)
-	let first <- api.POST(
+	let first <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("Accuser")
@@ -705,7 +705,7 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 		[]
 	)
 	expect installed is Ok(_)
-	let first <- api.POST(
+	let first <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -716,7 +716,7 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 	// The runs go; the shared answer doesn't, for the same route and query.
 	let cleared <- Deliveries.run("DELETE FROM workflow_runs", [])
 	expect cleared is Ok(_)
-	let again <- api.POST(
+	let again <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -727,7 +727,7 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 		[]
 	)
 	expect purged is Ok(_)
-	let afterPurge <- api.POST(
+	let afterPurge <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -751,13 +751,13 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 		[]
 	)
 	expect issuePurge is Ok(_)
-	let stillShared <- api.POST(
+	let stillShared <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
 	expect stillShared == afterPurge
 	// Another query is its own answer, read afresh.
-	let narrowed <- api.POST("/maintainers/metrics/ci/now", NowQuery {
+	let narrowed <- api.GET("/maintainers/metrics/ci/now", NowQuery {
 		repo: Some("bynk-lang/secret"),
 	}) by Maintainer("accuser")
 	let Ok(n) = narrowed else {
@@ -766,7 +766,7 @@ case "a maintainer's figures are shared for a minute, by route and query, and ne
 	// Read afresh, so the new running run is there.
 	expect Json.encode(n).contains("bynk-lang/secret")
 	// A kept answer is no way past the membership check.
-	let leaver <- api.POST(
+	let leaver <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("a-leaver")

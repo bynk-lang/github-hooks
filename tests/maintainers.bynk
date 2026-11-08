@@ -366,7 +366,7 @@ case "signing out ends every earlier token for the login, though none has expire
 		expect false
 	}
 	expect body.decodeUtf8().getOrElse("").contains("signed_out")
-	let stillOld <- api.POST(
+	let stillOld <- api.GET(
 		"/maintainers/metrics/ci/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser:0")

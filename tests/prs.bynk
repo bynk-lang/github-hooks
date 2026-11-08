@@ -254,7 +254,7 @@ case "a maintainer's PR flow includes private and excluded repositories; the pub
 	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
 	expect seeded is Ok(_)
 	let public0 <- api.GET("/metrics/prs", PrQuery { repo: None, days: 7 }, viewer()) by Visitor
-	let mine0 <- api.POST("/maintainers/metrics/prs", PrQuery {
+	let mine0 <- api.GET("/maintainers/metrics/prs", PrQuery {
 		repo: None,
 		days: 7,
 	}) by Maintainer("accuser")
@@ -271,7 +271,7 @@ case "a maintainer's PR flow includes private and excluded repositories; the pub
 	expect mt0.contains("bynk-lang/secret") && mt0.contains("bynk-lang/sandbox")
 	expect mt0.contains("bynk-lang/bynk")
 	let public1 <- api.GET("/metrics/prs/open", NowQuery { repo: None }, viewer()) by Visitor
-	let mine1 <- api.POST(
+	let mine1 <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -292,7 +292,7 @@ case "a maintainer's PR flow includes private and excluded repositories; the pub
 case "a maintainer's PR figures are shared until a pull request or release purge, not a run's (#62)" {
 	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
 	expect seeded is Ok(_)
-	let first <- api.POST(
+	let first <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -305,7 +305,7 @@ case "a maintainer's PR figures are shared until a pull request or release purge
 		[]
 	)
 	expect run is Ok(_)
-	let afterRun <- api.POST(
+	let afterRun <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -316,7 +316,7 @@ case "a maintainer's PR figures are shared until a pull request or release purge
 		[]
 	)
 	expect flow is Ok(_)
-	let afterFlow <- api.POST(
+	let afterFlow <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -326,7 +326,7 @@ case "a maintainer's PR figures are shared until a pull request or release purge
 case "a change only the maintainers' board hears moves their shared PR figures on too (#68)" {
 	let seeded <- Deliveries.batch(seed().concat([keptMaintainer()]))
 	expect seeded is Ok(_)
-	let first <- api.POST(
+	let first <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -339,7 +339,7 @@ case "a change only the maintainers' board hears moves their shared PR figures o
 		[]
 	)
 	expect run is Ok(_)
-	let afterRun <- api.POST(
+	let afterRun <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
@@ -350,7 +350,7 @@ case "a change only the maintainers' board hears moves their shared PR figures o
 		[]
 	)
 	expect flow is Ok(_)
-	let afterFlow <- api.POST(
+	let afterFlow <- api.GET(
 		"/maintainers/metrics/prs/open",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")

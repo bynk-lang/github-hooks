@@ -373,7 +373,7 @@ case "a maintainer's runner figures include private and excluded repositories; t
 		},
 		viewer()
 	) by Visitor
-	let mine0 <- api.POST("/maintainers/metrics/runners", RunnerQuery {
+	let mine0 <- api.GET("/maintainers/metrics/runners", RunnerQuery {
 		repo: None,
 		days: 7,
 	}) by Maintainer("accuser")
@@ -390,7 +390,7 @@ case "a maintainer's runner figures include private and excluded repositories; t
 	expect mt0.contains("bynk-lang/secret") && mt0.contains("bynk-lang/sandbox")
 	expect mt0.contains("bynk-lang/bynk")
 	let public1 <- api.GET("/metrics/runners/now", NowQuery { repo: None }, viewer()) by Visitor
-	let mine1 <- api.POST(
+	let mine1 <- api.GET(
 		"/maintainers/metrics/runners/now",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")
