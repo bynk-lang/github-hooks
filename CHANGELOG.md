@@ -8,6 +8,14 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Review requests stay right when GitHub's deliveries arrive out of order
+  (#68, step 2, migration `0022`). Each request keeps when it was made, and a
+  removal or a submitted review leaves a tombstone at its own time, so they
+  apply in the order they happened: a request withdrawn a moment later stays
+  withdrawn even when the withdrawal arrives first, and a re-request made
+  after a review stays. A newer set, or the daily sync, settles the
+  tombstones; retention prunes them after a day. "Waiting on your review" no
+  longer lingers for up to a day.
 - A live board for maintainers (#68, step 1). Signed in, a page also joins a
   `maintainers` board that carries the changes the public board leaves out
   (private repositories, and those in `DASHBOARD_EXCLUDE`), so they're live
