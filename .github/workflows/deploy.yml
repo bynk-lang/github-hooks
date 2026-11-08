@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: bynk-lang/bynk-deploy@20eebc8606e3298fbf0f38522e2f47a9482a9b4d # v2.1.0
+      - uses: bynk-lang/bynk-deploy@04ed36c10a284f40fdbf5883e2bf03e23e4681cd # v2.2.0
         with:
           version-file: BYNK_VERSION
           dry-run: "true"
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: bynk-lang/bynk-ci@5bb74c76051d513386506c41b9c2bbde5bef91c8 # v1
+      - uses: bynk-lang/bynk-ci@e23597e72c032e7ec1fe20a81fc0586a03b7fd38 # v1.2.0
         with:
           version-file: BYNK_VERSION
           source: .
@@ -199,7 +199,7 @@ jobs:
       - name: Deploy
         id: deploy
         if: ${{ !inputs.check-only }}
-        uses: bynk-lang/bynk-deploy@20eebc8606e3298fbf0f38522e2f47a9482a9b4d # v2.1.0
+        uses: bynk-lang/bynk-deploy@04ed36c10a284f40fdbf5883e2bf03e23e4681cd # v2.2.0
         with:
           version-file: BYNK_VERSION
           cloudflare-api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
