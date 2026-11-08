@@ -142,27 +142,25 @@
   }
 
   // The dashboards' figures (#53, step 3). Signed in, each comes from the
-  // public route's maintainer twin: POSTed, with the public query as JSON
-  // and the token, over every repository, private and excluded ones too.
+  // public route's maintainer twin: the same query string, with the token,
+  // over every repository, private and excluded ones too, and never kept.
   // Signed out, from the public route, as before. A token the Worker refuses
   // (expired, or its holder has left the organisation) signs the page out,
   // and the public figures are fetched instead.
   async function metrics(path, query = {}) {
     const m = current();
+    const pairs = Object.entries(query).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]);
+    const qs = new URLSearchParams(pairs).toString();
     if (!m) {
-      const pairs = Object.entries(query).filter(([, v]) => v != null).map(([k, v]) => [k, String(v)]);
-      const qs = new URLSearchParams(pairs).toString();
       // Always ask the edge, never the browser's own copy: a live change
       // purges the edge, which the browser's cache wouldn't know about.
       const res = await fetch(`${path}${qs ? `?${qs}` : ""}`, { cache: "no-cache", headers: { accept: "application/json" } });
       if (!res.ok) throw new Error(res.status === 429 ? "rate limited" : `HTTP ${res.status}`);
       return res.json();
     }
-    const res = await fetch(`/maintainers${path}`, {
-      method: "POST",
+    const res = await fetch(`/maintainers${path}${qs ? `?${qs}` : ""}`, {
       cache: "no-store",
-      headers: { accept: "application/json", "content-type": "application/json", authorization: `Bearer ${m.token}` },
-      body: JSON.stringify(query),
+      headers: { accept: "application/json", authorization: `Bearer ${m.token}` },
     });
     if (res.status === 401 || res.status === 403) {
       console.warn(`Maintainer figures refused (HTTP ${res.status}); signing out.`);

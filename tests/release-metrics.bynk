@@ -385,7 +385,7 @@ case "a maintainer's release figures include private and excluded repositories; 
 		},
 		viewer()
 	) by Visitor
-	let mine0 <- api.POST("/maintainers/metrics/releases", ReleaseQuery {
+	let mine0 <- api.GET("/maintainers/metrics/releases", ReleaseQuery {
 		repo: None,
 		days: 7,
 	}) by Maintainer("accuser")
@@ -402,7 +402,7 @@ case "a maintainer's release figures include private and excluded repositories; 
 	expect mt0.contains("bynk-lang/secret") && mt0.contains("bynk-lang/sandbox")
 	expect mt0.contains("bynk-lang/bynk")
 	let public1 <- api.GET("/metrics/releases/recent", NowQuery { repo: None }, viewer()) by Visitor
-	let mine1 <- api.POST(
+	let mine1 <- api.GET(
 		"/maintainers/metrics/releases/recent",
 		NowQuery { repo: None }
 	) by Maintainer("accuser")

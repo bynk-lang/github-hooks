@@ -4,6 +4,7 @@ suite github.hooks as system {
 	env {
 		APP_WEBHOOK_SECRET = "test-webhook-secret"
 		API_TOKEN_SECRET = "test-api-secret"
+		MAINTAINER_TOKEN_SECRET = "test-maintainer-secret"
 	}
 
 	case "a signed delivery is accepted" {
@@ -70,6 +71,24 @@ suite github.hooks as system {
 		expect notARepo is Rejected(_)
 		expect notATrigger is Rejected(_)
 		expect notABranch is Rejected(_)
+	}
+
+	// The maintainers' twins are `GET`s with a query string (#68, step 3):
+	// over the wire, a token is checked first, then the query, as the public
+	// route's is, and only then does the handler run.
+	case "a maintainer's figures need a maintainer's token, and their query is checked at the boundary" {
+		let none <- api.GET("/maintainers/metrics/ci", Wire("?days=7")) by Nobody
+		let forged <- api.GET("/maintainers/metrics/ci", Wire("?days=7")) by Forged
+		let expired <- api.GET("/maintainers/metrics/ci", Wire("?days=7")) by Expired
+		let tooLong <- api.GET("/maintainers/metrics/ci", Wire("?days=91")) by Maintainer
+		let notARepo <- api.GET("/maintainers/metrics/prs/open", Wire("?repo=bynk")) by Maintainer
+		let asked <- api.GET("/maintainers/metrics/ci/now", Wire("")) by Maintainer
+		expect none is Rejected(Unauthorized)
+		expect forged is Rejected(Unauthorized)
+		expect expired is Rejected(Unauthorized)
+		expect tooLong is Rejected(_)
+		expect notARepo is Rejected(_)
+		expect asked is Handled(_)
 	}
 
 	case "a digest day that is not a real YYYY-MM-DD date is refused at the boundary" {

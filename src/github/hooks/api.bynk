@@ -210,91 +210,91 @@ service api from http {
 	// private repositories and those `DASHBOARD_EXCLUDE` names. Never
 	// `@cache`d, so they're sent `no-store` and can't be kept at the edge for
 	// the public. Limited per login (`MaintainerLimit`), not per address.
-	on POST("/maintainers/metrics/ci") (body: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/ci") (query: CiQuery) -> Effect[HttpResult[CiMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/ci",
-			Json.encode(body),
-			() => metricsCi(body, true)
+			Json.encode(query),
+			() => metricsCi(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/ci/now") (body: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/ci/now") (query: NowQuery) -> Effect[HttpResult[CiNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/ci/now",
-			Json.encode(body),
-			() => metricsCiNow(body, true)
+			Json.encode(query),
+			() => metricsCiNow(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/ci/history") (body: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/ci/history") (query: CiQuery) -> Effect[HttpResult[CiHistory]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/ci/history",
-			Json.encode(body),
-			() => metricsCiHistory(body, true)
+			Json.encode(query),
+			() => metricsCiHistory(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/prs") (body: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/prs") (query: PrQuery) -> Effect[HttpResult[PrMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/prs",
-			Json.encode(body),
-			() => metricsPrs(body, true)
+			Json.encode(query),
+			() => metricsPrs(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/prs/open") (body: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/prs/open") (query: NowQuery) -> Effect[HttpResult[PrsOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/prs/open",
-			Json.encode(body),
-			() => metricsPrsOpen(body, true)
+			Json.encode(query),
+			() => metricsPrsOpen(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/issues") (body: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/issues") (query: IssueQuery) -> Effect[HttpResult[IssueMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/issues",
-			Json.encode(body),
-			() => metricsIssues(body, true)
+			Json.encode(query),
+			() => metricsIssues(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/issues/open") (body: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/issues/open") (query: NowQuery) -> Effect[HttpResult[IssuesOpen]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/issues/open",
-			Json.encode(body),
-			() => metricsIssuesOpen(body, true)
+			Json.encode(query),
+			() => metricsIssuesOpen(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/releases") (body: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/releases") (query: ReleaseQuery) -> Effect[HttpResult[ReleaseMetrics]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/releases",
-			Json.encode(body),
-			() => metricsReleases(body, true)
+			Json.encode(query),
+			() => metricsReleases(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/releases/recent") (body: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/releases/recent") (query: NowQuery) -> Effect[HttpResult[ReleasesRecent]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/releases/recent",
-			Json.encode(body),
-			() => metricsReleasesRecent(body, true)
+			Json.encode(query),
+			() => metricsReleasesRecent(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/runners") (body: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/runners") (query: RunnerQuery) -> Effect[HttpResult[RunnerMetrics]] by m: Maintainer given Deliveries, Logger, Secrets, GitHubApi, Clock, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/runners",
-			Json.encode(body),
-			() => metricsRunners(body, true)
+			Json.encode(query),
+			() => metricsRunners(query, true)
 		))
 	}
 
-	on POST("/maintainers/metrics/runners/now") (body: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
+	on GET("/maintainers/metrics/runners/now") (query: NowQuery) -> Effect[HttpResult[RunnersNow]] by m: Maintainer given Deliveries, Logger, Clock, Secrets, GitHubApi, MaintainerLimit, Tokens {
 		forMaintainer("\(m.identity)", (login) => sharedFigures(
 			"/metrics/runners/now",
-			Json.encode(body),
-			() => metricsRunnersNow(body, true)
+			Json.encode(query),
+			() => metricsRunnersNow(query, true)
 		))
 	}
 

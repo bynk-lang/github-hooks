@@ -30,6 +30,13 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- The maintainers' figures are `GET`s (#68, step 3): each
+  `/maintainers/metrics/…` twin takes its public route's query string, typed
+  and checked at the boundary as the public route's is, instead of a `POST`
+  with the query as JSON. They're still never cached: with no `@cache`,
+  they're sent `no-store`. Bynk v0.512.10 carries the fix for
+  bynk-lang/bynk#3024, which kept them `POST`s; the `system`-tier suite now
+  calls one over the wire.
 - Built and tested with Bynk v0.512.10 (v0.512.9 first), which requires a database call's SQL
   to be a string literal (`bynk.types.sql_not_literal`), so it can't be built
   at run time. The Worker's own SQL already was; the suites' helpers that
