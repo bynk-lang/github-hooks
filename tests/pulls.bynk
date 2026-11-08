@@ -361,11 +361,6 @@ fn requesting(
 		.replace("\"requested_teams\": []", "\"requested_teams\": [\(joined(ts, ", "))]"))
 }
 
---- The query for PR #25's review requests: "login" or "@slug", sorted and joined with commas, or null for none.
-fn requestsSql() -> String {
-	"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)"
-}
-
 --- `requestsSql`'s row for `names`.
 fn requested(names: String) -> Result[Option[String], SqlError] {
 	if names == "" { Ok(Some("{\"who\":null}")) } else { Ok(Some("{\"who\":\"\(names)\"}")) }
@@ -386,7 +381,10 @@ case "a pull request records its head commit and whose review it waits on" {
 	expect r is Accepted(_)
 	let sha <- Deliveries.first("SELECT head_sha FROM pull_requests WHERE number = 25", [])
 	expect sha == Ok(Some("{\"head_sha\":\"b65fe31d2f057a5af17713d14e71dae5b28fd600\"}"))
-	let first <- Deliveries.first(requestsSql(), [])
+	let first <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
 	expect first == requested("@core,a-person,b-person")
 }
 
@@ -416,7 +414,10 @@ case "requests made in the same second combine, and a removal or a review takes 
 			[]
 		)
 	) by GitHub
-	let both <- Deliveries.first(requestsSql(), [])
+	let both <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
 	expect both == requested("a-person,c-person")
 	let _ <- api.POST(
 		"/github",
@@ -440,7 +441,10 @@ case "requests made in the same second combine, and a removal or a review takes 
 			[]
 		)
 	) by GitHub
-	let removed <- Deliveries.first(requestsSql(), [])
+	let removed <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
 	expect removed == requested("a-person")
 	// Reviewing satisfies the request, as GitHub has it.
 	let reviewed = Bytes.fromUtf8(review.replace(
@@ -448,7 +452,10 @@ case "requests made in the same second combine, and a removal or a review takes 
 		"\"login\": \"A-Person\""
 	))
 	let _ <- api.POST("/github", headers("pull_request_review", "rv-9"), reviewed) by GitHub
-	let after <- Deliveries.first(requestsSql(), [])
+	let after <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
 	expect after == requested("")
 }
 
@@ -463,13 +470,19 @@ case "a strictly newer delivery's set replaces the requests, and an older one ch
 		headers("pull_request", "rq-6"),
 		requesting("edited", "", "2026-11-05T09:01:00Z", ["z-late"], [])
 	) by GitHub
-	let kept <- Deliveries.first(requestsSql(), [])
+	let kept <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
 	expect kept == requested("@core,a-person,b-person")
 	let _ <- api.POST(
 		"/github",
 		headers("pull_request", "rq-7"),
 		requesting("edited", "", "2026-11-05T09:10:00Z", [], [])
 	) by GitHub
-	let cleared <- Deliveries.first(requestsSql(), [])
+	let cleared <- Deliveries.first(
+		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
+		[]
+	)
 	expect cleared == requested("")
 }

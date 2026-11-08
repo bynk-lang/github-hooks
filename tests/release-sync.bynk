@@ -68,11 +68,6 @@ fn recorded() -> List[SqlStatement] {
 	]
 }
 
---- Each release as `tag:previous:shipped:deleted`, in order.
-fn releases() -> String {
-	"SELECT group_concat(tag || ':' || coalesce(previous_tag, '-') || ':' || coalesce(shipped, '-') || ':' || CASE WHEN deleted_at IS NULL THEN 'kept' ELSE 'deleted' END, ' ') AS rows FROM (SELECT * FROM releases ORDER BY tag)"
-}
-
 ---
 A full page of `n` pre-releases, as GitHub lists them: enough to leave the
 listing incomplete after `MAX_RELEASE_PAGES`.
@@ -107,7 +102,10 @@ case "every listed release is recorded, and each unmatched one since recording b
 	expect GitHubHttp.get called 2 times
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/releases?per_page=30&page=1"
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/bynk/compare/v0.508.4...v0.510.2?per_page=100&page=1"
-	let rows <- Deliveries.first(releases(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(tag || ':' || coalesce(previous_tag, '-') || ':' || coalesce(shipped, '-') || ':' || CASE WHEN deleted_at IS NULL THEN 'kept' ELSE 'deleted' END, ' ') AS rows FROM (SELECT * FROM releases ORDER BY tag)",
+		[]
+	)
 	expect rows == Ok(Some("{\"rows\":\"v0.508.4::-:kept v0.510.2:v0.508.4:2:kept\"}"))
 	let row <- Deliveries.first(
 		"SELECT release_id, name, draft, prerelease, created_at, published_at, author_is_bot FROM releases WHERE tag = 'v0.510.2'",
@@ -142,7 +140,10 @@ case "before any pull request is recorded, releases are recorded but none is mat
 	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
 	expect r == Ok(())
 	expect GitHubHttp.get called once
-	let rows <- Deliveries.first(releases(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(tag || ':' || coalesce(previous_tag, '-') || ':' || coalesce(shipped, '-') || ':' || CASE WHEN deleted_at IS NULL THEN 'kept' ELSE 'deleted' END, ' ') AS rows FROM (SELECT * FROM releases ORDER BY tag)",
+		[]
+	)
 	expect rows == Ok(Some("{\"rows\":\"v0.508.4:-:-:kept v0.510.2:-:-:kept\"}"))
 	expect Logger.info called once with msg == "release sync: bynk-lang/bynk has 2 releases, none to match before pull requests are recorded"
 }
@@ -169,7 +170,10 @@ case "a release a complete listing no longer has is marked deleted; a draft isn'
 	expect seeded is Ok(_)
 	let r <- releaseSync.schedule("47 4 * * *", 1793880000000)
 	expect r == Ok(())
-	let rows <- Deliveries.first(releases(), [])
+	let rows <- Deliveries.first(
+		"SELECT group_concat(tag || ':' || coalesce(previous_tag, '-') || ':' || coalesce(shipped, '-') || ':' || CASE WHEN deleted_at IS NULL THEN 'kept' ELSE 'deleted' END, ' ') AS rows FROM (SELECT * FROM releases ORDER BY tag)",
+		[]
+	)
 	expect rows == Ok(Some("{\"rows\":\"v0.400.0:-:-:deleted v0.508.4:-:-:kept v0.510.2:-:-:kept v0.600.0:-:-:kept\"}"))
 }
 
