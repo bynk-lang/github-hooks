@@ -6,6 +6,8 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-08
+
 ### Added
 
 - Review requests stay right when GitHub's deliveries arrive out of order
@@ -14,8 +16,11 @@ All notable changes to github-hooks. The format follows
   apply in the order they happened: a request withdrawn a moment later stays
   withdrawn even when the withdrawal arrives first, and a re-request made
   after a review stays. A newer set, or the daily sync, settles the
-  tombstones; retention prunes them after a day. "Waiting on your review" no
-  longer lingers for up to a day.
+  tombstones; retention prunes them after a day. A single request is also
+  held back when the pull request's row is already newer, as that newer
+  delivery's whole set has accounted for it, so a late or redelivered
+  `review_requested`, however old, changes nothing. "Waiting on your review"
+  no longer lingers for up to a day.
 - A live board for maintainers (#68, step 1). Signed in, a page also joins a
   `maintainers` board that carries the changes the public board leaves out
   (private repositories, and those in `DASHBOARD_EXCLUDE`), so they're live
@@ -30,6 +35,11 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- CI and deploys run on the organisation's current actions (#73, #76): Bynk
+  is installed by `setup-bynk` v2.0.0, checked by `bynk-ci` v1.2.0, and
+  deployed by `bynk-deploy` v2.2.0, all pinned by commit; the canary uses
+  the organisation's current canary workflow, which installs `setup-bynk` v2,
+  as v1 can't install Bynk 0.512.
 - The maintainers' figures are `GET`s (#68, step 3): each
   `/maintainers/metrics/…` twin takes its public route's query string, typed
   and checked at the boundary as the public route's is, instead of a `POST`
@@ -560,6 +570,7 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/bynk-lang/github-hooks/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bynk-lang/github-hooks/releases/tag/v0.1.0
