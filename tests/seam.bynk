@@ -29,11 +29,11 @@ suite github.hooks as system {
 		expect forged is Rejected(Unauthorized)
 	}
 
-	// The page's HTML and content type are checked in tests/hooks.bynk; over
-	// the wire, a 200 comes back as `Ok`.
+	// The page's HTML is checked in tests/hooks.bynk; over the wire, its `Raw`
+	// answer comes back as `Raw`, with the content type (bynk-lang/bynk#3050).
 	case "the root is public" {
 		let r <- api.GET("/")
-		expect r is Ok(_)
+		expect r is Raw(_, "text/html; charset=utf-8")
 	}
 
 	case "a reader with a valid token can read activity" {
@@ -80,9 +80,12 @@ suite github.hooks as system {
 		let none <- api.GET("/maintainers/metrics/ci", Wire("?days=7")) by Nobody
 		let forged <- api.GET("/maintainers/metrics/ci", Wire("?days=7")) by Forged
 		let expired <- api.GET("/maintainers/metrics/ci", Wire("?days=7")) by Expired
-		let tooLong <- api.GET("/maintainers/metrics/ci", Wire("?days=91")) by Maintainer
-		let notARepo <- api.GET("/maintainers/metrics/prs/open", Wire("?repo=bynk")) by Maintainer
-		let asked <- api.GET("/maintainers/metrics/ci/now", Wire("")) by Maintainer
+		let tooLong <- api.GET("/maintainers/metrics/ci", Wire("?days=91")) by Maintainer("accuser")
+		let notARepo <- api.GET(
+			"/maintainers/metrics/prs/open",
+			Wire("?repo=bynk")
+		) by Maintainer("accuser")
+		let asked <- api.GET("/maintainers/metrics/ci/now", Wire("")) by Maintainer("accuser")
 		expect none is Rejected(Unauthorized)
 		expect forged is Rejected(Unauthorized)
 		expect expired is Rejected(Unauthorized)

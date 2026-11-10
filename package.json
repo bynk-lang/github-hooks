@@ -1,0 +1,9 @@
+{
+  "name": "github-hooks-tools",
+  "private": true,
+  "description": "Pinned tools for bynk dev and bynk check --emit; not a Node project.",
+  "devDependencies": {
+    "typescript": "6.0.2",
+    "wrangler": "4.159.0"
+  }
+}

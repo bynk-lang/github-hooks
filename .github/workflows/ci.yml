@@ -25,10 +25,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version: 22
+      # The pinned tsc (package.json) for `bynk check --emit` below.
+      - run: npm ci --no-audit --no-fund
       - uses: bynk-lang/bynk-ci@16971dbe8db701e2cd3905f68f9e2f50e84ab366 # v1.2.1
         with:
           version-file: BYNK_VERSION   # the canary proposes moving it
           source: .
+      # Type-checks the generated Worker with tsc, so a codegen bug is caught
+      # here, at the Bynk source it came from (bynk.codegen.tsc_failed), not
+      # first in the smoke run or a deploy.
+      - name: Type-check the generated Worker
+        run: PATH="$PWD/node_modules/.bin:$PATH" bynk check --emit --format short .
 
   # No `name:` here, so the check reports as
   # "smoke / signed deliveries against the local Worker", whichever workflow

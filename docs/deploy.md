@@ -77,17 +77,19 @@ invalidates every token or session signed with the old value.
 
 `bynk.deploy.lock` records what the deploys have set up, and must be
 committed. It holds no secrets: the ids of the KV namespace, the D1 database
-and the rate limiters, the contexts deployed, and each static asset by its
-hashed file name. A deploy changes it when it creates something new, and
-whenever a page's script or styles change. So most releases that touch the
-pages change it.
+and the rate limiters, and the contexts deployed. A deploy changes it only when
+it creates something new, which is when a reviewer should look. Since Bynk
+v0.525 it no longer lists each static asset by its hashed name
+(bynk-lang/bynk#3072), so a release that only changes the pages leaves it as
+it is. (v0.2.0 and v0.3.0 each needed a follow-up pull request for just that.)
 
-**After a release.** A tag's deploy can't open a pull request for the new lock
-(a tag isn't a branch to open one against), so it keeps the lock as the run's
-`bynk.deploy.lock` artifact: download it from the run's page (*Artifacts*, at
-the bottom) or with `gh run download <run id> -n bynk.deploy.lock`, and commit
-it. Or run *Deploy* manually on `main`: it redeploys the same code, and opens
-the lock pull request itself, through the organisation's bump App.
+**After a release that creates something.** A tag's deploy can't open a pull
+request for the new lock (a tag isn't a branch to open one against), so it
+keeps the lock as the run's `bynk.deploy.lock` artifact: download it from the
+run's page (*Artifacts*, at the bottom) or with
+`gh run download <run id> -n bynk.deploy.lock`, and commit it. Or run *Deploy*
+manually on `main`: it redeploys the same code, and opens the lock pull
+request itself, through the organisation's bump App.
 
 **Before the first deploy from CI.** The committed lock must hold everything
 the last deploy by hand set up. The driver won't create again what a lock
@@ -95,6 +97,26 @@ should already record, such as a rate limiter, since a second one wouldn't be
 the one that's live: it stops, naming it, and asks for the lock. v0.2.0's
 first tag hit this, as the rate limiters had only ever been recorded in a
 local lock. So commit the lock from the last local deploy first.
+
+## Going back
+
+`bynk revert` makes the previous deployment live again, without a rebuild
+(bynk-lang/bynk#3073). It drives Cloudflare's version rollback, but checks
+first what would make that unsafe, and refuses, changing nothing, on any of
+them:
+- **D1 migrations** the live version applied: the previous code may not run on
+  the newer schema. Most of this Worker's releases add one, so a release that
+  did is usually not revertible; redeploy the previous tag instead, or fix
+  forward.
+- **Agent state** stamped with a newer schema version (the live boards), which
+  older code would fault on.
+- **A replaced resource id**, or **a secret change** since that deployment.
+
+Run `bynk revert --dry-run` first: it prints each check's verdict and stops.
+Both need `CLOUDFLARE_API_TOKEN` (with D1 read access) and
+`CLOUDFLARE_ACCOUNT_ID`. Only versions deployed by a Bynk that records deploy
+facts (v0.525 on) can be reverted, so the first revertible release is the
+first one deployed after this move.
 
 ## By hand
 

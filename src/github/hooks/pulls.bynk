@@ -64,14 +64,17 @@ fn savePull(p: PullFact) -> Effect[Result[(), String]] given Deliveries {
 }
 
 // The statements that save a pull request, so a run can save many in one
-// batch: the review requests the delivery lists (only if it is strictly
-// newer, checked before the row moves), the row itself, then `ready_at`,
-// which moves only earlier whatever the row's ordering says, then the one
-// request a `review_requested` or `review_request_removed` names.
+// batch. Their order matters; each says why it comes where it does.
 fn pullStatements(p: PullFact) -> List[SqlStatement] {
+	// First, the review requests the delivery lists: only if it is strictly
+	// newer, which is checked against the row before the row moves. Last
+	// (`reviewRequestChange`), the one request a `review_requested` or
+	// `review_request_removed` names: after the row, so its guard sees this
+	// delivery's own update.
 	reviewRequestSet(p)
 		.concat(
 			[
+				// Then the row itself, forward only, by `updated_at`.
 				SqlStatement {
 					sql: """
 						INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
@@ -116,6 +119,8 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 						text(p.headSha),
 					],
 				},
+				// Then `ready_at`, which moves only earlier, whatever the row's
+				// ordering says.
 				SqlStatement {
 					sql: """
 						UPDATE pull_requests SET ready_at = ?3

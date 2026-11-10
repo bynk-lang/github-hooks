@@ -20,14 +20,6 @@ namespace_id = "702297304"
 
 [environments.default.workers.github-hooks]
 deployed = true
-assets = [
-    "/_assets/dashboard.9ee2138759caf416.js",
-    "/_assets/dashboard.d7c37ad151974dd4.css",
-    "/_assets/issues.be8f4b081e47b7a7.js",
-    "/_assets/prs.3c0b6af0f5a31cd1.js",
-    "/_assets/releases.9b24c6feb598710b.js",
-    "/_assets/signin.d578af24b4dcaa48.js",
-]
 
 [environments.default.workers.github-hooks.contracts]
 

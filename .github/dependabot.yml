@@ -12,3 +12,17 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  # The pinned tools (package.json): wrangler, which `bynk dev` serves with,
+  # and tsc, for `bynk check --emit`. A new wrangler brings a new local
+  # runtime (#84), so it arrives as a pull request whose smoke run tests it.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # Minor and patch updates together; a major (TypeScript 7, a wrangler 5)
+    # comes in its own pull request, so one that fails `--emit` or the smoke
+    # run doesn't hold back the others.
+    groups:
+      tools:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
