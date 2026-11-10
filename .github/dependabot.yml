@@ -19,6 +19,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Minor and patch updates together; a major (TypeScript 7, a wrangler 5)
+    # comes in its own pull request, so one that fails `--emit` or the smoke
+    # run doesn't hold back the others.
     groups:
       tools:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
