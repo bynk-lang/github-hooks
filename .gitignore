@@ -6,3 +6,5 @@
 # Deploy-time secret values. Never commit these.
 *.secrets.env
 .secrets.env
+# Pinned tools (package.json): `npm ci` installs them.
+/node_modules

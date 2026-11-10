@@ -6,6 +6,34 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Built and tested with Bynk v0.525.22, which fixes the issues filed after
+  v0.3.0 (bynk-lang/bynk#3064 to #3073):
+  - the `system`-tier case calls the maintainers' figures `by
+    Maintainer("accuser")`, as every other suite does (#3064), and the root's
+    `Raw` page now comes back over the wire as `Raw`, with its content type
+    (#3050);
+  - the suites' long repeated queries are suite `const`s again, as before
+    0.512 inlined them, and four of them (who a pull request waits on, issues
+    with their labels, releases, and what each pull request shipped in) are
+    read with `firstAs` into suite types, not compared as JSON text
+    (#3065, #3066);
+  - `pullStatements` explains its order beside each statement (#3067);
+  - every SQL statement is checked against the schema the migrations build at
+    `bynk check` (#3070), and all pass;
+  - CI type-checks the generated Worker (`bynk check --emit`), so a codegen
+    bug is reported at its Bynk source (#3068);
+  - `bynk.deploy.lock` no longer lists the pages' hashed assets (#3072), so a
+    release that only changes the pages leaves it alone; `docs/deploy.md`
+    says so, and covers `bynk revert` and when it refuses (#3073);
+  - `docs/pr-flow.md` links Bynk's guide to applying out-of-order events
+    (#3071).
+- wrangler (4.159.0) and TypeScript (6.0.2) are pinned in `package.json`, and
+  CI installs them with `npm ci`: `bynk dev`, and so the smoke run, serves with
+  that wrangler rather than the latest from `npx`, so a new local runtime (as
+  in #84) arrives as a Dependabot pull request whose smoke run tests it.
+
 ### Fixed
 
 - `GET /metrics/prs` (and its maintainers' twin) failed with a 500 under the

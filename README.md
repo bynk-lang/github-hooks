@@ -99,6 +99,7 @@ forged and tokenless requests.
 ### Run it locally
 
 ```sh
+npm ci   # the pinned wrangler that `bynk dev` serves with, and tsc
 bynk dev -- --var APP_WEBHOOK_SECRET:dev-secret
 ```
 
@@ -204,6 +205,7 @@ tests/                   unit, integration and system suites
 scripts/smoke.sh         signed requests against a running Worker
 scripts/live.mjs         the live feed end to end (WebSocket), run by smoke.sh with SMOKE_LIVE=1
 BYNK_VERSION             the Bynk release CI and local work use; the canary proposes moving it
+package.json             pinned tools, not a Node project: wrangler for `bynk dev`, tsc for `bynk check --emit`
 .github/workflows/       CI (check, format, test; smoke), the deploy, and the Bynk canary
 docs/github-app.md       registering and installing the GitHub App
 docs/deploy.md           deploying from GitHub Actions: triggers, the production secrets, the lock
