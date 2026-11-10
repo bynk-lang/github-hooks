@@ -369,6 +369,11 @@ type Waiting = {
 	who: Option[String],
 }
 
+--- A pull request row's `updated_at`, as stored.
+type Updated = {
+	updated_at: String,
+}
+
 const WAITING_SQL: String = """
 	FROM (SELECT group_concat(who, ',') AS who
 	      FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who
@@ -688,8 +693,9 @@ case "a delivery without the lists leaves the requests; one with only reviewers 
 	) by GitHub
 	let asked <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect asked == requested("@core,a-person,b-person")
-	// Newer, but saying nothing about who is asked: nothing changes.
-	let _ <- api.POST(
+	// Newer, but saying nothing about who is asked: nothing changes. It is
+	// processed (the row moves to 09:05), so the requests are kept, not missed.
+	let none <- api.POST(
 		"/github",
 		headers("pull_request", "none-1"),
 		without(
@@ -700,6 +706,12 @@ case "a delivery without the lists leaves the requests; one with only reviewers 
 			"requested_teams"
 		)
 	) by GitHub
+	expect none is Accepted(_)
+	let moved <- Deliveries.firstAs[Updated](
+		"FROM pull_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25",
+		[]
+	)
+	expect moved == Ok(Some(Updated { updated_at: "2026-11-05T09:05:00.000Z" }))
 	let kept <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect kept == requested("@core,a-person,b-person")
 	// Newer still, with the reviewers alone: that is a set, and it applies.
@@ -745,6 +757,21 @@ case "within one second, the change a delivery names decides, team or person (#6
 	) by GitHub
 	let off <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect off == requested("")
+	// Asked again in that same second, the removal still wins: the order
+	// within a second is unknown, and the tombstone is as new (`>=`).
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "team-1-again"),
+		requesting(
+			"review_requested",
+			", \"requested_team\": {\"slug\": \"core\"}",
+			"2026-11-05T09:00:00Z",
+			[],
+			["core"]
+		)
+	) by GitHub
+	let stillOff <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect stillOff == requested("")
 	// And a request in that same second, which its set can't add either, is
 	// added by the change it names.
 	let _ <- api.POST(
