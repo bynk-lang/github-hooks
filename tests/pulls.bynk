@@ -361,9 +361,24 @@ fn requesting(
 		.replace("\"requested_teams\": []", "\"requested_teams\": [\(joined(ts, ", "))]"))
 }
 
---- `requestsSql`'s row for `names`.
-fn requested(names: String) -> Result[Option[String], SqlError] {
-	if names == "" { Ok(Some("{\"who\":null}")) } else { Ok(Some("{\"who\":\"\(names)\"}")) }
+---
+Who pull request 25 waits on: users by login, teams as `@slug`, sorted and
+comma-separated; `None` when nobody.
+---
+type Waiting = {
+	who: Option[String],
+}
+
+const WAITING_SQL: String = """
+	FROM (SELECT group_concat(who, ',') AS who
+	      FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who
+	            FROM pull_request_review_requests
+	            WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who))
+"""
+
+--- `WAITING_SQL`'s row for `names`.
+fn requested(names: String) -> Result[Option[Waiting], SqlReadError] {
+	Ok(Some(Waiting { who: if names == "" { None } else { Some(names) } }))
 }
 
 case "a pull request records its head commit and whose review it waits on" {
@@ -381,10 +396,7 @@ case "a pull request records its head commit and whose review it waits on" {
 	expect r is Accepted(_)
 	let sha <- Deliveries.first("SELECT head_sha FROM pull_requests WHERE number = 25", [])
 	expect sha == Ok(Some("{\"head_sha\":\"b65fe31d2f057a5af17713d14e71dae5b28fd600\"}"))
-	let first <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let first <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect first == requested("@core,a-person,b-person")
 }
 
@@ -414,10 +426,7 @@ case "requests made in the same second combine, and a removal or a review takes 
 			[]
 		)
 	) by GitHub
-	let both <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let both <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect both == requested("a-person,c-person")
 	let _ <- api.POST(
 		"/github",
@@ -441,10 +450,7 @@ case "requests made in the same second combine, and a removal or a review takes 
 			[]
 		)
 	) by GitHub
-	let removed <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let removed <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect removed == requested("a-person")
 	// Reviewing satisfies the request, as GitHub has it: a review submitted
 	// after the request was made.
@@ -455,10 +461,7 @@ case "requests made in the same second combine, and a removal or a review takes 
 			"\"submitted_at\": \"2026-11-05T09:03:00Z\""
 		))
 	let _ <- api.POST("/github", headers("pull_request_review", "rv-9"), reviewed) by GitHub
-	let after <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let after <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect after == requested("")
 }
 
@@ -486,10 +489,7 @@ case "a removal that arrives before the request it undoes still wins (#68)" {
 			[]
 		)
 	) by GitHub
-	let waiting <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let waiting <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect waiting == requested("")
 }
 
@@ -512,10 +512,7 @@ case "a review that arrives before the request it answers still takes it off (#6
 			[]
 		)
 	) by GitHub
-	let waiting <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let waiting <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect waiting == requested("")
 }
 
@@ -551,10 +548,7 @@ case "a request made after a removal or a review stays, whichever arrives first 
 			"\"submitted_at\": \"2026-11-05T09:03:00Z\""
 		))
 	let _ <- api.POST("/github", headers("pull_request_review", "rv-1"), reviewed) by GitHub
-	let waiting <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let waiting <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect waiting == requested("a-person")
 }
 
@@ -594,10 +588,7 @@ case "a late, older removal doesn't move a newer one back (#68)" {
 			[]
 		)
 	) by GitHub
-	let waiting <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let waiting <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect waiting == requested("")
 }
 
@@ -632,10 +623,7 @@ case "an old request redelivered after its tombstone has gone changes nothing (#
 	let settled <- Deliveries.first("SELECT count(*) AS n FROM pull_request_review_tombstones", [])
 	expect settled == Ok(Some("{\"n\":0}"))
 	let _ <- api.POST("/github", headers("pull_request", "rq-1-again"), asked) by GitHub
-	let waiting <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let waiting <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect waiting == requested("")
 }
 
@@ -656,10 +644,7 @@ case "a newer set settles a removal: who it lists is asked again, and the tombst
 		headers("pull_request", "ed-1"),
 		requesting("edited", "", "2026-11-05T09:10:00Z", ["c-person"], [])
 	) by GitHub
-	let waiting <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let waiting <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect waiting == requested("c-person")
 	let left <- Deliveries.first("SELECT count(*) AS n FROM pull_request_review_tombstones", [])
 	expect left == Ok(Some("{\"n\":0}"))
@@ -676,19 +661,13 @@ case "a strictly newer delivery's set replaces the requests, and an older one ch
 		headers("pull_request", "rq-6"),
 		requesting("edited", "", "2026-11-05T09:01:00Z", ["z-late"], [])
 	) by GitHub
-	let kept <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let kept <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect kept == requested("@core,a-person,b-person")
 	let _ <- api.POST(
 		"/github",
 		headers("pull_request", "rq-7"),
 		requesting("edited", "", "2026-11-05T09:10:00Z", [], [])
 	) by GitHub
-	let cleared <- Deliveries.first(
-		"SELECT group_concat(who, ',') AS who FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who FROM pull_request_review_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25 ORDER BY who)",
-		[]
-	)
+	let cleared <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect cleared == requested("")
 }

@@ -53,7 +53,9 @@ indefinitely (retention prunes `deliveries`, not these).
     after a review stays. Within one second the order is unknown and the
     removal wins, until the daily sync. A set (a strictly newer delivery's, or
     the sync's) settles the tombstones no later than it. Retention prunes
-    those older than a day.
+    those older than a day. Bynk's guide
+    [*Apply webhook events that arrive out of order*](https://bynk-lang.org/book/guides/effects-and-capabilities/apply-webhook-events-out-of-order/)
+    describes the pattern, from this work.
   - **The daily sync** fills both for open pull requests. It reads GitHub's
     current state, so at a tie its set of requests replaces the stored one,
     which back-fills pull requests recorded before requests were.
