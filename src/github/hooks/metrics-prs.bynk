@@ -99,27 +99,35 @@ fn metricsPrs(
 					    max(CASE WHEN rn = (50 * n + 99) / 100 THEN v END) AS p50,
 					    max(CASE WHEN rn = (95 * n + 99) / 100 THEN v END) AS p95
 					  FROM ranked GROUP BY repo, k
+					),
+					-- One row per repository, joined once: SQLite 3.54 (workerd's, from wrangler
+					-- 4.159) refuses a CTE that expands this deep when it is joined more than once
+					-- ("VIEWs and/or subqueries nested too deep"), as `pct` was, five times.
+					flow AS (
+					  SELECT repo,
+					    max(CASE WHEN k = 'ready' THEN n END) AS ready_n, max(CASE WHEN k = 'ready' THEN p50 END) AS ready_p50, max(CASE WHEN k = 'ready' THEN p95 END) AS ready_p95,
+					    max(CASE WHEN k = 'open' THEN p50 END) AS open_p50, max(CASE WHEN k = 'open' THEN p95 END) AS open_p95,
+					    max(CASE WHEN k = 'queue' THEN n END) AS queue_n, max(CASE WHEN k = 'queue' THEN p50 END) AS queue_p50, max(CASE WHEN k = 'queue' THEN p95 END) AS queue_p95,
+					    max(CASE WHEN k = 'size' THEN n END) AS size_n, max(CASE WHEN k = 'size' THEN p50 END) AS size_p50,
+					    max(CASE WHEN k = 'bot' THEN p50 END) AS bot_p50
+					  FROM pct GROUP BY repo
 					)
 					SELECT r.repo,
 					  coalesce(c.merged, 0) AS merged,
 					  coalesce(cc.n, 0) AS closed_unmerged,
-					  coalesce(rd.n, 0) AS ready_to_merge_counted, rd.p50 AS ready_to_merge_p50_seconds, rd.p95 AS ready_to_merge_p95_seconds,
-					  op.p50 AS open_to_merge_p50_seconds, op.p95 AS open_to_merge_p95_seconds,
-					  coalesce(qu.n, 0) AS queue_counted, qu.p50 AS queue_p50_seconds, qu.p95 AS queue_p95_seconds,
+					  coalesce(f.ready_n, 0) AS ready_to_merge_counted, f.ready_p50 AS ready_to_merge_p50_seconds, f.ready_p95 AS ready_to_merge_p95_seconds,
+					  f.open_p50 AS open_to_merge_p50_seconds, f.open_p95 AS open_to_merge_p95_seconds,
+					  coalesce(f.queue_n, 0) AS queue_counted, f.queue_p50 AS queue_p50_seconds, f.queue_p95 AS queue_p95_seconds,
 					  coalesce(c.requeued, 0) AS requeued,
-					  coalesce(sz.n, 0) AS size_counted, sz.p50 AS size_p50_lines,
+					  coalesce(f.size_n, 0) AS size_counted, f.size_p50 AS size_p50_lines,
 					  coalesce(c.bots_merged, 0) AS bots_merged,
 					  coalesce(bc.n, 0) AS bots_open,
-					  bt.p50 AS bots_merge_p50_seconds
+					  f.bot_p50 AS bots_merge_p50_seconds
 					FROM repos r
 					LEFT JOIN counts c ON c.repo = r.repo
 					LEFT JOIN closed_counts cc ON cc.repo = r.repo
 					LEFT JOIN bot_counts bc ON bc.repo = r.repo
-					LEFT JOIN pct rd ON rd.repo = r.repo AND rd.k = 'ready'
-					LEFT JOIN pct op ON op.repo = r.repo AND op.k = 'open'
-					LEFT JOIN pct qu ON qu.repo = r.repo AND qu.k = 'queue'
-					LEFT JOIN pct sz ON sz.repo = r.repo AND sz.k = 'size'
-					LEFT JOIN pct bt ON bt.repo = r.repo AND bt.k = 'bot'
+					LEFT JOIN flow f ON f.repo = r.repo
 					ORDER BY r.repo
 				""",
 				window

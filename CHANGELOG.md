@@ -6,6 +6,15 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /metrics/prs` (and its maintainers' twin) failed with a 500 under the
+  SQLite 3.54 in wrangler 4.159's workerd, which `bynk dev` fetches, so the
+  smoke run failed: "VIEWs and/or subqueries nested too deep". The query
+  joined its `pct` percentiles five times, once per measure; it now pivots
+  them into one row per repository and joins that once. The figures are
+  unchanged. Every other statement in the Worker prepares under 3.54.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
