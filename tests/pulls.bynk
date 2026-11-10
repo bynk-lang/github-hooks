@@ -369,6 +369,11 @@ type Waiting = {
 	who: Option[String],
 }
 
+--- A pull request row's `updated_at`, as stored.
+type Updated = {
+	updated_at: String,
+}
+
 const WAITING_SQL: String = """
 	FROM (SELECT group_concat(who, ',') AS who
 	      FROM (SELECT CASE WHEN team = 1 THEN '@' || reviewer ELSE reviewer END AS who
@@ -670,4 +675,131 @@ case "a strictly newer delivery's set replaces the requests, and an older one ch
 	) by GitHub
 	let cleared <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
 	expect cleared == requested("")
+}
+
+---
+`body` with its `key` list (`requested_reviewers` or `requested_teams`)
+renamed, so it reads as absent, as some payloads have it.
+---
+fn without(body: Bytes, key: String) -> Bytes {
+	Bytes.fromUtf8(body.decodeUtf8().getOrElse("").replace("\"\(key)\":", "\"not_\(key)\":"))
+}
+
+case "a delivery without the lists leaves the requests; one with only reviewers still sets them (#68)" {
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "set-1"),
+		requesting("edited", "", "2026-11-05T09:00:00Z", ["a-person", "b-person"], ["core"])
+	) by GitHub
+	let asked <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect asked == requested("@core,a-person,b-person")
+	// Newer, but saying nothing about who is asked: nothing changes. It is
+	// processed (the row moves to 09:05), so the requests are kept, not missed.
+	let none <- api.POST(
+		"/github",
+		headers("pull_request", "none-1"),
+		without(
+			without(
+				requesting("edited", "", "2026-11-05T09:05:00Z", [], []),
+				"requested_reviewers"
+			),
+			"requested_teams"
+		)
+	) by GitHub
+	expect none is Accepted(_)
+	let moved <- Deliveries.firstAs[Updated](
+		"FROM pull_requests WHERE repo = 'bynk-lang/github-hooks' AND number = 25",
+		[]
+	)
+	expect moved == Ok(Some(Updated { updated_at: "2026-11-05T09:05:00.000Z" }))
+	let kept <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect kept == requested("@core,a-person,b-person")
+	// Newer still, with the reviewers alone: that is a set, and it applies.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "users-1"),
+		without(
+			requesting("edited", "", "2026-11-05T09:10:00Z", ["a-person"], []),
+			"requested_teams"
+		)
+	) by GitHub
+	let narrowed <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect narrowed == requested("a-person")
+}
+
+case "within one second, the change a delivery names decides, team or person (#68)" {
+	// A set at 09:00 asks @core; a removal of @core in the same second can't
+	// apply as a set (it isn't strictly newer), so only the change it names
+	// takes the team off.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "team-1"),
+		requesting(
+			"review_requested",
+			", \"requested_team\": {\"slug\": \"core\"}",
+			"2026-11-05T09:00:00Z",
+			[],
+			["core"]
+		)
+	) by GitHub
+	let asked <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect asked == requested("@core")
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "team-1-off"),
+		requesting(
+			"review_request_removed",
+			", \"requested_team\": {\"slug\": \"core\"}",
+			"2026-11-05T09:00:00Z",
+			[],
+			["core"]
+		)
+	) by GitHub
+	let off <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect off == requested("")
+	// Asked again in that same second, the removal still wins: the order
+	// within a second is unknown, and the tombstone is as new (`>=`).
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "team-1-again"),
+		requesting(
+			"review_requested",
+			", \"requested_team\": {\"slug\": \"core\"}",
+			"2026-11-05T09:00:00Z",
+			[],
+			["core"]
+		)
+	) by GitHub
+	let stillOff <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect stillOff == requested("")
+	// And a request in that same second, which its set can't add either, is
+	// added by the change it names.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "person-1"),
+		requesting(
+			"review_requested",
+			", \"requested_reviewer\": {\"login\": \"c-person\", \"type\": \"User\"}",
+			"2026-11-05T09:00:00Z",
+			["c-person"],
+			[]
+		)
+	) by GitHub
+	let on <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect on == requested("c-person")
+	// Only `review_requested` adds: another action that names a reviewer
+	// anyway, in the same second, adds nothing.
+	let _ <- api.POST(
+		"/github",
+		headers("pull_request", "edited-1"),
+		requesting(
+			"edited",
+			", \"requested_reviewer\": {\"login\": \"d-person\", \"type\": \"User\"}",
+			"2026-11-05T09:00:00Z",
+			["c-person"],
+			[]
+		)
+	) by GitHub
+	let still <- Deliveries.firstAs[Waiting](WAITING_SQL, [])
+	expect still == requested("c-person")
 }
