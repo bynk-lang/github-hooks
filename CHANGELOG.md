@@ -8,6 +8,14 @@ All notable changes to github-hooks. The format follows
 
 ### Changed
 
+- Built and tested with Bynk v0.562.0. Nothing in the Worker changes but one
+  name: `JsonError` is now `DecodeError`, the error of `Json.decode` and the
+  new `Yaml.decode` (bynk-lang/bynk#3214), which #88's settings file will use.
+  Of the release's breaking changes, `MalformedForm` and the refusal of store
+  writes in `parTraverse` closures touch nothing here, and wrangler 4.159.0
+  (pinned) is past the new 4.120.1 minimum. The live boards' duplicate-id
+  limit (`docs/maintainers.md`) holds as documented: a held connection that is
+  replaced is now closed at once, and its close still takes the other.
 - Built and tested with Bynk v0.525.22, which fixes the issues filed after
   v0.3.0 (bynk-lang/bynk#3064 to #3073):
   - the `system`-tier case calls the maintainers' figures `by
