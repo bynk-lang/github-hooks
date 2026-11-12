@@ -8,6 +8,22 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Repository settings (#88, step 3): `.github/bynk-hooks.yml` on a
+  repository's default branch turns phase 5's features on and tunes them
+  (`triage`, `nudges`, `release_notes`; [settings.md](docs/settings.md)). No
+  feature reads them yet. Every feature is off without the file, with an
+  empty one, or with one that's refused.
+  - **Reading:** `Yaml.decode` into a typed record, through the contents API
+    as the repository's installation (**Contents: Read-only**, which the App
+    already has for `push` and `release`).
+  - **Caching:** the file's text is kept in KV for a day. A push to the
+    default branch that adds, changes or removes the file drops it and reads
+    the file again at once.
+  - **Mine:** each read is recorded (migration `0025`, `repo_settings`), and
+    Mine's new `settings` lists a file that was refused (with the decoder's
+    reason and where), one GitHub wouldn't give (naming the permission), and
+    keys the App ignored, which are found by reading the file's text. Every
+    signed-in page shows them under **Settings files to fix**.
 - The App's proposals (#88, step 2): what a phase 5 feature would do,
   waiting on a maintainer (migration `0024`, `proposals`). Mine shows them
   on every page under **Proposed by the App**, with **Approve** and

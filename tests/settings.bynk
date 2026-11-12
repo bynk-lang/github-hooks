@@ -1,0 +1,482 @@
+// #88, step 3: a repository's settings in `.github/bynk-hooks.yml`, read
+// through the contents API and cached in `Tokens`, against an in-memory D1 with
+// the migrations applied. GitHub is stubbed at the wire. It's 12:00 UTC on 5
+// November; accuser is a maintainer; installation 42 delivered for
+// `bynk-lang/secret`.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+const CONTENTS: String = "https://api.github.com/repos/bynk-lang/secret/contents/.github/bynk-hooks.yml"
+
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+	]
+}
+
+// The contents API's answer for a file, base64 in lines of 60 as GitHub sends it:
+//
+//   # The App's settings for this repository.
+//   triage:
+//     enabled: true
+//     labels: [bug, enhancement]
+//   nudges:
+//     enabled: true
+//     after_days: 5
+fn goodFile() -> Result[Response, String] {
+	contents(
+		"IyBUaGUgQXBwJ3Mgc2V0dGluZ3MgZm9yIHRoaXMgcmVwb3NpdG9yeS4KdHJp\\nYWdlOgogIGVuYWJsZWQ6IHRydWUKICBsYWJlbHM6IFtidWcsIGVuaGFuY2Vt\\nZW50XQpudWRnZXM6CiAgZW5hYmxlZDogdHJ1ZQogIGFmdGVyX2RheXM6IDUK\\n"
+	)
+}
+
+// `triage:` with `enabled: true` and `lables: [bug]`, and `release_note:` with `enabled: true`.
+fn misspeltFile() -> Result[Response, String] {
+	contents(
+		"dHJpYWdlOgogIGVuYWJsZWQ6IHRydWUKICBsYWJsZXM6IFtidWddCnJlbGVhc2Vfbm90ZToKICBlbmFibGVkOiB0cnVlCg=="
+	)
+}
+
+// `nudges:` with `after_days: 90`.
+fn badFile() -> Result[Response, String] {
+	contents("bnVkZ2VzOgogIGFmdGVyX2RheXM6IDkwCg==")
+}
+
+fn contents(base64: String) -> Result[Response, String] {
+	Ok(Response {
+		status: 200,
+		headers: Map.empty(),
+		body: "{\"type\": \"file\", \"encoding\": \"base64\", \"path\": \".github/bynk-hooks.yml\", \"content\": \"\(base64)\"}",
+	})
+}
+
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+--- What `repo_settings` says for a repository.
+type Recorded = {
+	state: String,
+	detail: Option[String],
+	unknown: String,
+}
+
+const RECORDED: String = "FROM repo_settings WHERE repo = 'bynk-lang/secret'"
+
+fn decoded(text: String) -> RepoSettings {
+	settingsOf(readSettings(text))
+}
+
+// Reading the text.
+
+case "a full file decodes to its settings, with nothing unknown" {
+	let file = readSettings(
+		"triage:\n  enabled: true\n  labels: [bug, enhancement]\nnudges:\n  enabled: true\n  after_days: 5\nrelease_notes:\n  enabled: true\n"
+	)
+	expect file == Decoded(
+		RepoSettings {
+			triage: TriageSettings {
+				enabled: true,
+				labels: ["bug", "enhancement"],
+			},
+			nudges: NudgeSettings {
+				enabled: true,
+				after_days: 5,
+			},
+			release_notes: ReleaseNotesSettings { enabled: true },
+		},
+		[]
+	)
+}
+
+case "a section or key left out takes its default, which is off" {
+	let s = decoded("triage:\n  enabled: true\n")
+	expect s == RepoSettings {
+		triage: TriageSettings {
+			enabled: true,
+			labels: [],
+		},
+		nudges: NudgeSettings {
+			enabled: false,
+			after_days: 3,
+		},
+		release_notes: ReleaseNotesSettings { enabled: false },
+	}
+	let n = decoded("nudges:\n  enabled: true\n")
+	expect n.nudges == NudgeSettings { enabled: true, after_days: 3 }
+	expect n.triage.enabled == false
+}
+
+case "an empty file, or one of only comments, is missing, and turns everything off" {
+	expect readSettings("") == Missing
+	expect readSettings("\n  \n") == Missing
+	expect readSettings("# Nothing yet.\n---\n  # indented\n...\n") == Missing
+	expect decoded("# Nothing yet.\n") == offSettings()
+}
+
+case "a value out of range is refused, saying where, and turns everything off" {
+	let file = readSettings(
+		"triage:\n  enabled: true\nnudges:\n  enabled: true\n  after_days: 90\n"
+	)
+	let Invalid(why) = file else {
+		expect false
+	}
+	expect why.startsWith("RefinementViolation at $.nudges.after_days: ")
+	expect settingsOf(file) == offSettings()
+}
+
+case "`on` and `yes` are text, not true, so they're refused" {
+	let file = readSettings("triage:\n  enabled: yes\n")
+	let Invalid(why) = file else {
+		expect false
+	}
+	expect why.startsWith("StructuralMismatch at $.triage.enabled: ")
+}
+
+case "a file that isn't YAML the App reads is refused, with its kind" {
+	let Invalid(tab) = readSettings("triage:\n\tenabled: true\n") else {
+		expect false
+	}
+	expect tab.startsWith("Malformed at ")
+	let Invalid(anchor) = readSettings("triage: &t\n  enabled: true\n") else {
+		expect false
+	}
+	expect anchor.startsWith("UnsupportedAnchor at ")
+	let Invalid(list) = readSettings("- triage\n") else {
+		expect false
+	}
+	expect list.startsWith("StructuralMismatch at $: ")
+}
+
+// Unknown keys.
+
+case "keys the App doesn't know are listed, top level and inside a section, in order" {
+	let file = readSettings(
+		"triage:\n  enabled: true\n  lables: [bug]\nrelease_note:\n  enabled: true\nnudges:\n  after_day: 5\n  enabled: true\n"
+	)
+	let Decoded(s, unknown) = file else {
+		expect false
+	}
+	expect unknown == ["triage.lables", "release_note", "nudges.after_day"]
+	// The misspelt keys are ignored, so their features keep their defaults.
+	expect s.triage == TriageSettings { enabled: true, labels: [] }
+	expect s.nudges == NudgeSettings { enabled: true, after_days: 3 }
+}
+
+case "a key is known only in its own section" {
+	expect unknownKeys(
+		"triage:\n  after_days: 3\nnudges:\n  labels: [bug]\nrelease_notes:\n  labels: [bug]\n"
+	) == ["triage.after_days", "nudges.labels", "release_notes.labels"]
+}
+
+case "a section's keys are those at its first key's indent" {
+	expect unknownKeys(
+		"triage:\n    enabled: true\n    labels:\n      - bug\n      - name: x\n"
+	) == []
+	expect unknownKeys(
+		"triage:\n  enabled: true\n  notes: |\n    labels: a\n    lable: b\n"
+	) == ["triage.notes"]
+}
+
+case "a quoted key is read without its quotes" {
+	expect unknownKeys(
+		"\"triage\":\n  'lables': [bug]\n\"tirage\": {}\n"
+	) == ["triage.lables", "tirage"]
+}
+
+case "keys inside an unknown section, list items and comments aren't listed" {
+	expect unknownKeys(
+		"extra:\n  enabled: true\n  more: 1\n# a: 1\ntriage:\n  # lables: x\n  - x\n"
+	) == ["extra"]
+}
+
+case "a section in flow style isn't looked inside" {
+	expect unknownKeys("triage: {enabled: true, lables: [bug]}\n") == []
+}
+
+case "a top-level value ends a section" {
+	expect unknownKeys("triage:\n  enabled: true\n[x]\n  lables: x\n") == []
+}
+
+case "Windows line endings read the same" {
+	expect unknownKeys(
+		"triage:\r\n  enabled: true\r\n  lables: [bug]\r\ntirage:\r\n"
+	) == ["triage.lables", "tirage"]
+	expect decoded("triage:\r\n  enabled: true\r\n").triage.enabled
+}
+
+// Reading from GitHub.
+
+case "the file is read from the default branch, decoded, cached for a day and recorded" {
+	stub GitHubHttp.get(_, _) returns goodFile()
+	let first <- settingsFor(42, "bynk-lang/secret")
+	let again <- settingsFor(42, "bynk-lang/Secret")
+	expect first == RepoSettings {
+		triage: TriageSettings {
+			enabled: true,
+			labels: ["bug", "enhancement"],
+		},
+		nudges: NudgeSettings {
+			enabled: true,
+			after_days: 5,
+		},
+		release_notes: ReleaseNotesSettings { enabled: false },
+	}
+	expect again == first
+	expect GitHubHttp.get called once with url == CONTENTS
+	expect AppAuth.token called once with installation == 42
+	expect Tokens.putTtl called once with key == "settings:bynk-lang/secret" && ttlSeconds == 86400 && value.startsWith("# The App's settings")
+	let row <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect row == Ok(Some(Recorded { state: "decoded", detail: None, unknown: "[]" }))
+}
+
+case "no file is every feature off, cached and recorded as missing" {
+	stub GitHubHttp.get(_, _) returns answer(404, "{\"message\": \"Not Found\"}")
+	let first <- settingsFor(42, "bynk-lang/secret")
+	let again <- settingsFor(42, "bynk-lang/secret")
+	expect first == offSettings()
+	expect again == offSettings()
+	expect GitHubHttp.get called once
+	expect Tokens.putTtl called once with key == "settings:bynk-lang/secret" && value == ""
+	let row <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect row == Ok(Some(Recorded { state: "missing", detail: None, unknown: "[]" }))
+}
+
+case "a file GitHub won't give is every feature off, not cached, and names the permission" {
+	stub GitHubHttp.get(_, _) returns answer(403, "{\"message\": \"Resource not accessible by integration\"}")
+	let first <- settingsFor(42, "bynk-lang/secret")
+	let again <- settingsFor(42, "bynk-lang/secret")
+	expect first == offSettings()
+	expect again == offSettings()
+	// Each read tries twice (the second with a fresh token), and the second read asks again.
+	expect GitHubHttp.get called 4 times
+	expect Tokens.putTtl never called
+	let row <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect row == Ok(Some(Recorded {
+		state: "unreadable",
+		detail: Some("GitHub refused the App the file (403 Resource not accessible by integration): it needs Contents: Read"),
+		unknown: "[]",
+	}))
+}
+
+case "GitHub's other refusals, and no answer, are recorded as they came" {
+	stub GitHubHttp.get(_, _) returns each [answer(500, "{\"message\": \"Server Error\"}"), Err("GitHub could not be reached")]
+	let s <- settingsFor(42, "bynk-lang/secret")
+	expect s == offSettings()
+	let row <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect row == Ok(Some(Recorded {
+		state: "unreadable",
+		detail: Some("500 Server Error"),
+		unknown: "[]",
+	}))
+	let _ <- settingsFor(42, "bynk-lang/secret")
+	let after <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect after == Ok(Some(Recorded {
+		state: "unreadable",
+		detail: Some("GitHub could not be reached"),
+		unknown: "[]",
+	}))
+}
+
+case "a directory, a file over 1 MB, and bytes that aren't base64 or text are refused" {
+	stub GitHubHttp.get(_, _) returns each [answer(200, "[{\"name\": \"x\"}]"), answer(200, "{\"encoding\": \"none\", \"content\": \"\"}"), contents("not base64!"), contents("/w==")]
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let dir <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect dir == Ok(Some(Recorded {
+		state: "invalid",
+		detail: Some(".github/bynk-hooks.yml is not a file"),
+		unknown: "[]",
+	}))
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let big <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect big == Ok(Some(Recorded {
+		state: "invalid",
+		detail: Some(".github/bynk-hooks.yml is over 1 MB"),
+		unknown: "[]",
+	}))
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let garbled <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect garbled == Ok(Some(Recorded {
+		state: "unreadable",
+		detail: Some("GitHub's copy of .github/bynk-hooks.yml is not base64"),
+		unknown: "[]",
+	}))
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let binary <- Deliveries.firstAs[Recorded](RECORDED, [])
+	expect binary == Ok(Some(Recorded {
+		state: "invalid",
+		detail: Some(".github/bynk-hooks.yml is not UTF-8 text"),
+		unknown: "[]",
+	}))
+	// None of those is cached.
+	expect Tokens.putTtl never called
+}
+
+// Mine.
+
+case "Mine lists a refused file with why, and a file with keys the App ignored" {
+	stub GitHubHttp.get(_, _) returns each [badFile(), misspeltFile(), goodFile(), answer(404, "{\"message\": \"Not Found\"}")]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/bynk")
+	let _ <- fetchSettings(42, "bynk-lang/fine")
+	let _ <- fetchSettings(42, "bynk-lang/none")
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.settings.map((p) => p.repo) == ["bynk-lang/bynk", "bynk-lang/secret"]
+	expect m.settings.first() == Some(SettingsProblem {
+		repo: "bynk-lang/bynk",
+		state: "decoded",
+		detail: None,
+		unknown: ["triage.lables", "release_note"],
+		read_at: "2026-11-05T12:00:00.000Z",
+	})
+	let Some(bad) = m.settings.skip(1).first() else {
+		expect false
+	}
+	expect bad.state == "invalid"
+	expect bad.unknown == []
+	expect bad.detail.getOrElse("").startsWith("RefinementViolation at $.nudges.after_days: ")
+}
+
+case "Mine lists a file GitHub won't give, and a read that mends it drops it" {
+	stub GitHubHttp.get(_, _) returns each [answer(403, "{\"message\": \"Resource not accessible by integration\"}"), answer(403, "{\"message\": \"Resource not accessible by integration\"}"), goodFile()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let before <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(b) = before else {
+		expect false
+	}
+	expect b.settings.map((p) => p.state) == ["unreadable"]
+	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let after <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(a) = after else {
+		expect false
+	}
+	expect a.settings == []
+}
+
+// Pushes.
+
+--- A `push` delivery's headers.
+fn pushHeaders(id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: push", "X-GitHub-Delivery: \(id)"])
+}
+
+--- A push of `commits` (JSON) to `ref` of `bynk-lang/secret`, whose default branch is `main`, by installation 42.
+fn push(ref: String, commits: String) -> Bytes {
+	Bytes.fromUtf8(
+		"{\"ref\": \"\(ref)\", \"repository\": {\"full_name\": \"bynk-lang/secret\", \"private\": true, \"default_branch\": \"main\"}, \"installation\": {\"id\": 42}, \"commits\": \(commits)}"
+	)
+}
+
+fn commit(added: String, modified: String, removed: String) -> String {
+	"{\"id\": \"abc\", \"added\": [\(added)], \"modified\": [\(modified)], \"removed\": [\(removed)]}"
+}
+
+const TOUCHED: String = "\".github/bynk-hooks.yml\""
+
+const ELSEWHERE: String = "\"README.md\""
+
+--- `n` commits that change only the README.
+fn elsewhere(n: Int) -> List[String] {
+	let none: List[String] = []
+	if n <= 0 { none } else { elsewhere(n - 1).append(commit(ELSEWHERE, "", "")) }
+}
+
+case "a push to the default branch that changes the file drops the cache and reads it again" {
+	stub GitHubHttp.get(_, _) returns each [goodFile(), badFile()]
+	let _ <- settingsFor(42, "bynk-lang/secret")
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-1"),
+		push("refs/heads/main", "[\(commit(ELSEWHERE, "", "")), \(commit("", TOUCHED, ""))]")
+	) by GitHub
+	expect Tokens.delete called once with key == "settings:bynk-lang/secret"
+	expect GitHubHttp.get called 2 times with url == CONTENTS
+	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.repo == "bynk-lang/secret" && e.status == "invalid"
+	// The new file is what the next feature reads, from the cache.
+	let s <- settingsFor(42, "bynk-lang/secret")
+	expect s == offSettings()
+	expect GitHubHttp.get called 2 times
+}
+
+case "adding or removing the file counts too" {
+	stub GitHubHttp.get(_, _) returns each [goodFile(), answer(404, "{\"message\": \"Not Found\"}")]
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-add"),
+		push("refs/heads/main", "[\(commit(TOUCHED, "", ""))]")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-rm"),
+		push("refs/heads/main", "[\(commit("", "", TOUCHED))]")
+	) by GitHub
+	expect Tokens.delete called 2 times with key == "settings:bynk-lang/secret"
+	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.status == "decoded"
+	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.status == "missing"
+}
+
+case "a push with as many commits as GitHub lists may hide the file, so it counts" {
+	stub GitHubHttp.get(_, _) returns goodFile()
+	let twenty = elsewhere(20)
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-big"),
+		push("refs/heads/main", "[\(joined(twenty, ", "))]")
+	) by GitHub
+	expect GitHubHttp.get called once with url == CONTENTS
+	let nineteen = elsewhere(19)
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-19"),
+		push("refs/heads/main", "[\(joined(nineteen, ", "))]")
+	) by GitHub
+	expect GitHubHttp.get called once
+}
+
+case "a push elsewhere, or that doesn't change the file, leaves the settings be" {
+	stub GitHubHttp.get(_, _) returns goodFile()
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-branch"),
+		push("refs/heads/feature", "[\(commit("", TOUCHED, ""))]")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-tag"),
+		push("refs/tags/main", "[\(commit("", TOUCHED, ""))]")
+	) by GitHub
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-readme"),
+		push("refs/heads/main", "[\(commit(ELSEWHERE, ELSEWHERE, ELSEWHERE))]")
+	) by GitHub
+	let _ <- api.POST("/github", pushHeaders("push-none"), push("refs/heads/main", "[]")) by GitHub
+	expect Tokens.delete never called
+	expect GitHubHttp.get never called
+	expect LiveFeed.publishMaintainers never called
+}
+
+case "a push without an installation drops the cache, and the next feature reads it" {
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-noinst"),
+		Bytes.fromUtf8(
+			"{\"ref\": \"refs/heads/main\", \"repository\": {\"full_name\": \"bynk-lang/secret\", \"default_branch\": \"main\"}, \"commits\": [\(commit("", TOUCHED, ""))]}"
+		)
+	) by GitHub
+	expect Tokens.delete called once with key == "settings:bynk-lang/secret"
+	expect GitHubHttp.get never called
+	expect LiveFeed.publishMaintainers never called
+}

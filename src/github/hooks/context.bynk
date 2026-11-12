@@ -11,6 +11,7 @@ uses github.releases
 uses github.jobs
 uses github.issues
 uses github.maintainers
+uses github.settings
 consumes bynk { Logger, Secrets, Clock, Fetch }
 consumes bynk.crypto { Crypto }
 consumes bynk.cloudflare { D1, Kv, RateLimit, EdgeCache }
@@ -25,6 +26,10 @@ capability Deliveries = D1
 Installation tokens, cached for `TOKEN_CACHE_SECONDS` so a burst of deliveries
 mints one token, not one each. Keyed `installation:<id>`. A token here is a
 credential: it expires within the hour and is never logged.
+
+It also caches what's cheap to keep and slow to fetch: each repository's
+settings file for a day (`settings:<repo>`, #88), and the maintainers'
+figures for a minute.
 ---
 capability Tokens = Kv
 

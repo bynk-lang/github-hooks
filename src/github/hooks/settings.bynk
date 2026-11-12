@@ -1,0 +1,244 @@
+context github.hooks
+
+---
+How long a repository's settings file is kept in `Tokens` once read: a day.
+A push to the default branch that touches the file drops it at once, so this
+is the backstop for a push the App never heard of.
+---
+const SETTINGS_CACHE_SECONDS: Int = 86400
+
+--- Where a repository's settings file is cached in `Tokens`: its text, or `""` when it has none.
+fn settingsKey(repo: String) -> String {
+	"settings:\(repo.toLower())"
+}
+
+---
+The settings `repo`'s `.github/bynk-hooks.yml` gives (#88), as installation
+`installation` reads them: from `Tokens` when they're cached, otherwise from
+GitHub. Every feature is off for a repository with no file, an empty one, one
+that's refused, or one GitHub won't give the App. Each feature asks for these
+when it needs them.
+---
+fn settingsFor(
+	installation: Int,
+	repo: String
+) -> Effect[RepoSettings] given Tokens, Deliveries, Logger, Clock, AppAuth, GitHubHttp {
+	let cached <- Tokens.get(settingsKey(repo))
+	match cached {
+		Some(text) => Effect.pure(settingsOf(readSettings(text))),
+		None => {
+			let file <- fetchSettings(installation, repo)
+			Effect.pure(settingsOf(file))
+		},
+	}
+}
+
+--- The contents API's answer for a file. `encoding` is `base64` for one of up to 1 MB, and `none` past that.
+type ContentsFile = {
+	content: String,
+	encoding: String,
+}
+
+---
+Reads `repo`'s settings file from its default branch through the contents
+API, which needs the App's **Contents: Read** permission, and records what it
+said in `repo_settings`, for Mine. The file's text (or `""` for no file) is
+cached for `SETTINGS_CACHE_SECONDS`. A file GitHub won't give is not cached,
+so the next feature to ask tries again.
+---
+fn fetchSettings(
+	installation: Int,
+	repo: String
+) -> Effect[SettingsFile] given Tokens, Deliveries, Logger, Clock, AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(repo)/contents/\(SETTINGS_PATH)"
+	let sent <- asApp(installation, (token) => GitHubHttp.get(token, url))
+	let fetched: Result[String, SettingsFile] = match sent {
+		Err(why) => Err(unreadableSettings(why)),
+		Ok(res) => if res.status == 404 {
+			Ok("")
+		} else if res.status == 403 {
+			Err(unreadableSettings(
+				"GitHub refused the App the file (\(refusal(res.status, res.body))): it needs Contents: Read"
+			))
+		} else if res.status != 200 {
+			Err(unreadableSettings(refusal(res.status, res.body)))
+		} else {
+			fileText(res.body)
+		},
+	}
+	let file = match fetched {
+		Ok(text) => readSettings(text),
+		Err(f) => f,
+	}
+	let _ <- match fetched {
+		Ok(text) => Tokens.putTtl(settingsKey(repo), text, SETTINGS_CACHE_SECONDS),
+		Err(_) => Effect.pure(()),
+	}
+	let _ <- recordSettings(repo, file)
+	Effect.pure(file)
+}
+
+--- The text of the contents API's answer for a file, or why it isn't a settings file.
+fn fileText(body: String) -> Result[String, SettingsFile] {
+	let Ok(f) = Json.decode[ContentsFile](body) else {
+		Err(invalidSettings("\(SETTINGS_PATH) is not a file"))
+	}
+	let true = f.encoding == "base64" else { Err(invalidSettings("\(SETTINGS_PATH) is over 1 MB")) }
+	let Some(bytes) = Bytes.fromBase64(f.content.replaceRegex(r"\s", "")) else {
+		Err(unreadableSettings("GitHub's copy of \(SETTINGS_PATH) is not base64"))
+	}
+	let Some(text) = bytes.decodeUtf8() else {
+		Err(invalidSettings("\(SETTINGS_PATH) is not UTF-8 text"))
+	}
+	Ok(text)
+}
+
+--- Records what `repo`'s settings file said, replacing what it said before.
+fn recordSettings(repo: String, file: SettingsFile) -> Effect[()] given Deliveries, Logger, Clock {
+	let now <- Clock.now()
+	let Ok(_) <- Deliveries.run(
+		"""
+		INSERT INTO repo_settings (repo, read_at, state, detail, unknown) VALUES (?1, ?2, ?3, ?4, ?5)
+		ON CONFLICT (repo) DO UPDATE
+		  SET read_at = excluded.read_at, state = excluded.state,
+		      detail = excluded.detail, unknown = excluded.unknown
+		""",
+		[
+			Text(repo),
+			Text(now.toIso()),
+			Text(settingsState(file)),
+			match file {
+				Invalid(why) => Text(why),
+				Unreadable(why) => Text(why),
+				_ => Null,
+			},
+			Text(Json.encode(ignoredKeys(file))),
+		]
+	) else match {
+		Err(e) => Logger.error("could not record \(repo)'s settings: \(sqlError(e))"),
+	}
+	Effect.pure(())
+}
+
+--- The parts of a `push` delivery that say whether it changed the settings file.
+type SettingsPush = {
+	ref: String,
+	repository: PushedRepo,
+	commits: List[PushedCommit] = [],
+}
+
+type PushedRepo = {
+	full_name: String,
+	default_branch: Option[String],
+}
+
+type PushedCommit = {
+	added: List[String] = [],
+	modified: List[String] = [],
+	removed: List[String] = [],
+}
+
+---
+GitHub lists at most this many commits in a `push` delivery. A push with that
+many may have more, so it's taken to touch the settings file.
+---
+const PUSH_COMMITS_LISTED: Int = 20
+
+---
+Whether a `push` delivery changed `repo`'s settings file: a push to its
+default branch with a commit that adds, changes or removes the file. Answers
+the repository when it did.
+---
+fn settingsPushed(body: Bytes) -> Option[String] {
+	let Some(text) = body.decodeUtf8() else { None }
+	let Ok(p) = Json.decode[SettingsPush](text) else { None }
+	let Some(branch) = p.repository.default_branch else { None }
+	let true = p.ref == "refs/heads/\(branch)" else { None }
+	let touched = p.commits.count() >= PUSH_COMMITS_LISTED
+		|| p.commits.any((c) => c.added.any((f) => f == SETTINGS_PATH)
+			|| c.modified.any((f) => f == SETTINGS_PATH)
+			|| c.removed.any((f) => f == SETTINGS_PATH))
+	if touched { Some(p.repository.full_name) } else { None }
+}
+
+---
+A push that changed a repository's settings file (#88): the cached copy is
+dropped, and the file read again at once, so Mine shows a refused file while
+its author is still looking. Open maintainers' pages hear of it and reload
+Mine.
+---
+fn rereadSettings(
+	d: Delivery,
+	body: Bytes
+) -> Effect[()] given Tokens, Deliveries, Logger, Clock, AppAuth, GitHubHttp, LiveFeed {
+	let Some(repo) = settingsPushed(body) else { Effect.pure(()) }
+	let _ <- Tokens.delete(settingsKey(repo))
+	let Some(installation) = d.installation else { Effect.pure(()) }
+	let file <- fetchSettings(installation, repo)
+	LiveFeed.publishMaintainers(settingsEvent(repo, file))
+}
+
+fn settingsEvent(repo: String, file: SettingsFile) -> LiveEvent {
+	LiveEvent {
+		refetch_ms: 0,
+		kind: "settings",
+		repo: repo,
+		number: 0,
+		path: "",
+		workflow: "",
+		run_id: 0,
+		attempt: 0,
+		status: settingsState(file),
+		conclusion: "",
+	}
+}
+
+fn ignoredKeys(file: SettingsFile) -> List[String] {
+	match file {
+		Decoded(_, keys) => keys,
+		_ => [],
+	}
+}
+
+fn settingsState(file: SettingsFile) -> String {
+	match file {
+		Missing => "missing",
+		Decoded(_, _) => "decoded",
+		Invalid(_) => "invalid",
+		Unreadable(_) => "unreadable",
+	}
+}
+
+type SettingsRow = {
+	repo: String,
+	state: String,
+	detail: Option[String],
+	unknown: String,
+	read_at: String,
+}
+
+--- The repositories whose settings file needs a maintainer, for Mine: refused, unreadable, or with keys the App ignored.
+fn settingsProblems() -> Effect[Result[List[SettingsProblem], String]] given Deliveries {
+	let rows <- Deliveries.all(
+		"""
+		SELECT repo, state, detail, unknown, read_at FROM repo_settings
+		WHERE state IN ('invalid', 'unreadable') OR (state = 'decoded' AND unknown != '[]')
+		ORDER BY repo
+		LIMIT ?1
+		""",
+		[Integer(MAX_MINE)]
+	)
+	let Ok(text) = rows else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	let Ok(found) = Json.decodeSql[List[SettingsRow]](text) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	Effect.pure(Ok(found.map((r) => SettingsProblem {
+		repo: r.repo,
+		state: r.state,
+		detail: r.detail,
+		unknown: Json.decode[List[String]](r.unknown).getOrElse([]),
+		read_at: r.read_at,
+	})))
+}

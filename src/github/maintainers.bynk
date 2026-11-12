@@ -165,6 +165,23 @@ type Mine = {
 	unreleased: List[MyMerge],
 	proposals: List[ProposalWaiting],
 	claude: ClaudeToday,
+	settings: List[SettingsProblem],
+}
+
+---
+A repository whose `.github/bynk-hooks.yml` needs a maintainer (#88), as the
+App last read it (`read_at`): `state` is `invalid` (it was refused, and
+`detail` says why, with where), `unreadable` (GitHub wouldn't give it to the
+App, and `detail` is GitHub's answer) or `decoded`, with keys the App
+ignored (`unknown`, such as `triage.label`). Either of the first two turns
+every feature off there.
+---
+type SettingsProblem = {
+	repo: String,
+	state: String,
+	detail: Option[String],
+	unknown: List[String],
+	read_at: String,
 }
 
 ---

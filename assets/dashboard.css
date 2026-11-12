@@ -123,6 +123,7 @@ h2 { font-size: 1.15rem; margin: 0; }
 .mine-ci.failing, .mine-stale { text-decoration: underline; text-decoration-style: dotted; }
 .proposal-reason { font-style: italic; }
 .proposal-note { color: var(--ink-2); }
+.settings-problem { overflow-wrap: anywhere; }
 .mine-claude { margin: 8px 0 0; font-size: 0.85em; color: var(--ink-2); }
 /* Signed in (#53), the page says it covers every repository (signin.js sets `signed-in`). */
 .for-maintainers { display: none; }

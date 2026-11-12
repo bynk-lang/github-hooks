@@ -95,6 +95,13 @@ the service asks GitHub whether they belong to the organisation
 ([docs](issues.md)). Without it, only public members, owners and
 collaborators count.
 
+Phase 5's repository settings ([settings.md](settings.md)) are read from
+each repository's `.github/bynk-hooks.yml` with **Contents: Read-only**,
+which `push` and `release` already need. Keep it, and keep `push` ticked: a
+push that changes the file is what tells the App to read it again. Without
+the permission, every phase 5 feature stays off, and the dashboard's Mine
+names the permission.
+
 Maintainers' actions ([maintainers.md](maintainers.md#actions)) need
 **Actions** raised to **Read and write**, to re-run failed jobs. Without it
 GitHub refuses each re-run with a `403`, which the dashboard reports.

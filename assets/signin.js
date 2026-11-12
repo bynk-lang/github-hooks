@@ -289,6 +289,8 @@
     // The App's proposals (#88) are every maintainer's, so every page shows
     // them, first; and, once Claude is in use, today's calls against the caps.
     const proposals = mine.proposals || [];
+    const settings = mine.settings || [];
+    if (settings.length > 0) parts.unshift(settingsList(settings));
     if (proposals.length > 0) parts.unshift(proposalList(proposals));
     const claude = mine.claude;
     if (claude && (claude.calls > 0 || proposals.length > 0)) {
@@ -329,6 +331,21 @@
         decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.repo}#${p.target}? The App does it on GitHub at once.`),
         " ", decide("Decline", "/maintainers/proposals/decline", null), " ", note,
       ];
+    });
+  }
+
+  // Repositories whose `.github/bynk-hooks.yml` needs a maintainer (#88): a
+  // file the App refused, or couldn't read, turns every feature off there,
+  // so it says why; one with keys the App ignored lists them, as they're
+  // most often misspelt. Each links to the file on its default branch.
+  const SETTINGS_PATH = ".github/bynk-hooks.yml";
+  function settingsList(settings) {
+    return list("Settings files to fix", settings, "", (s) => {
+      const file = node("a", { href: `https://github.com/${s.repo}/blob/HEAD/${SETTINGS_PATH}` }, `${s.repo}: ${SETTINGS_PATH}`);
+      const said = s.state === "invalid" ? `refused, so every feature is off: ${s.detail}`
+        : s.state === "unreadable" ? `the App can't read it, so every feature is off: ${s.detail}`
+        : `the App ignores ${s.unknown.join(", ")}`;
+      return [file, " · ", node("span", { class: "settings-problem" }, said), ` · read ${ago(s.read_at)} ago`];
     });
   }
 
@@ -401,8 +418,11 @@
     maintainersSocket = ws;
     ws.onopen = () => { maintainersRetryMs = 5_000; announceMaintainersLive(); };
     ws.onmessage = (frame) => {
-      // A proposal's change (#88) is Mine's, not a page's figures.
-      try { if (JSON.parse(frame.data).kind === "proposal") { loadMine(); return; } } catch { /* the pages' to judge */ }
+      // A proposal's change, or a settings file read again (#88), is Mine's, not a page's figures.
+      try {
+        const kind = JSON.parse(frame.data).kind;
+        if (kind === "proposal" || kind === "settings") { loadMine(); return; }
+      } catch { /* the pages' to judge */ }
       for (const handle of liveHandlers) handle(frame);
     };
     ws.onclose = () => {

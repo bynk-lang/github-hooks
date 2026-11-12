@@ -304,6 +304,9 @@ most 50.
   (#88, [below](#the-apps-proposals)). They're every maintainer's, not one's.
 - **`claude`:** today's Claude calls (UTC) across every repository, the
   busiest repository's, and the caps they're held to (#88).
+- **`settings`:** the repositories whose `.github/bynk-hooks.yml` needs a
+  maintainer: refused, unreadable, or with keys the App ignored, by name
+  (#88, [settings.md](settings.md#in-mine)). They're every maintainer's too.
 
 It's the maintainer's alone, so it isn't shared like the figures, but it
 counts against their per-login limit. Every list reads by an index on the
@@ -322,7 +325,9 @@ page is visible, and draws it into the page's `#mine` section (its
 | Releases | their merges waiting to ship |
 
 Every page also shows the App's proposals first, under **Proposed by the
-App**, and, once Claude is in use, a line with today's calls against the caps.
+App**, then any **Settings files to fix**, and, once Claude is in use, a line
+with today's calls against the caps. A `proposal` or `settings` frame on the
+maintainers' board reloads Mine.
 
 ## The App's proposals
 
