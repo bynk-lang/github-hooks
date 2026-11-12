@@ -113,10 +113,10 @@ All notable changes to github-hooks. The format follows
   - `docs/pr-flow.md` links Bynk's guide to applying out-of-order events
     (#3071).
 - wrangler (4.159.0) and TypeScript (6.0.2, since moved to 7.0.2 by #86) are
-  pinned in `package.json`, and
-  CI installs them with `npm ci`: `bynk dev`, and so the smoke run, serves with
-  that wrangler rather than the latest from `npx`, so a new local runtime (as
-  in #84) arrives as a Dependabot pull request whose smoke run tests it.
+  pinned in `package.json`, and CI installs them with `npm ci`: `bynk dev`,
+  and so the smoke run, serves with that wrangler rather than the latest from
+  `npx`, so a new local runtime (as in #84) arrives as a Dependabot pull
+  request whose smoke run tests it.
 
 ### Fixed
 

@@ -58,6 +58,11 @@ turns a Claude feature on. That applies to private repositories too: each
 repository's maintainers decide for it, by pull request. Without the file,
 nothing of that repository's is sent.
 
+What happens to it there is Anthropic's to say: API inputs and outputs are
+covered by Anthropic's [Commercial Terms](https://www.anthropic.com/legal/commercial-terms)
+and its policies on API data, which are worth reading before opting in a
+private repository.
+
 `askClaude` doesn't read the settings itself. Each feature reads its
 repository's settings (`settingsFor`) before it asks, and its tests show
 that a repository with the feature off sends nothing.
@@ -82,10 +87,17 @@ repository's data. The request goes straight from the Worker to
 `api.anthropic.com`, authenticated with the key in `ANTHROPIC_API_KEY` (a
 Worker secret), with `anthropic-version: 2026-10-21`.
 
-**Prompt injection's reach is a declined proposal.** An issue written to
-steer Claude can, at worst, earn a wrong suggestion. A maintainer sees it,
-with its reason, and declines it. The schema also limits what the reply can
-say.
+**Prompt injection.** Text written to steer Claude can steer everything
+Claude writes, including a proposal's **reason**, which is shown to the
+maintainer deciding. So the reason is untrusted too: judge a proposal by its
+target and what it would do, not only by its reason.
+
+- **For triage**, the reach is small. The schema limits the action to
+  labels from the repository's allowed list, so the worst is a wrong label
+  with a persuasive reason, which a maintainer declines.
+- **For the features that propose text to post** (release notes, the weekly
+  summary), a steered reply *is* the action. Each of those slices will state
+  its own reach, and what a maintainer should check, in its section here.
 
 **Refusals.** Claude may decline a request. A refusal makes no proposal and
 is logged with its category. On Opus 5.5 the API's server-side fallback is
@@ -147,11 +159,20 @@ cron does the pruning.
 - **One feature in one repository:** set its `enabled: false`, or remove
   its section, by pull request. The push that merges it is read at once.
 - **Everything in one repository:** delete `.github/bynk-hooks.yml`.
-- **Every Claude call, everywhere:** set the `CLAUDE_DAILY_CAP_REPO` Actions
-  secret to `0`, then run the deploy workflow with *overwrite secrets*
+- **Every Claude call, everywhere, at once:** delete the key from the
+  Worker, with `wrangler secret delete ANTHROPIC_API_KEY` or in the Worker's
+  *Settings → Variables and Secrets* in the Cloudflare dashboard. It needs no
+  deploy: from the next call, `askClaude` claims, sends and records nothing.
+  Revoking the key in the Anthropic Console stops calls as fast, and they're
+  recorded as `failed`. Delete the `ANTHROPIC_API_KEY` Actions secret too, or
+  the next deploy with *overwrite secrets* puts the key back.
+- **Every Claude call, everywhere, kept recorded:** set the
+  `CLAUDE_DAILY_CAP_REPO` Actions secret to `0`, then run the deploy workflow
+  with *overwrite secrets*
   ([deploy.md](deploy.md), "How the deploy uses them"). A routine deploy only
   sets a secret the Worker doesn't have yet, so it won't change a cap
-  that's already set. Calls are then recorded as `capped` and nothing is
-  sent. Deleting `ANTHROPIC_API_KEY` from the environment doesn't remove it
-  from the Worker. Pending proposals stay in Mine until they're decided or
-  expire.
+  that's already set. Each call is then recorded as `capped`, and nothing is
+  sent.
+
+However it's turned off, pending proposals stay in Mine until they're decided or
+expire.
