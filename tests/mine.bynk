@@ -201,6 +201,7 @@ case "a maintainer's own work, across public and private repositories" {
 		],
 		proposals: [],
 		claude: noClaude(),
+		settings: [],
 	})
 }
 
@@ -221,6 +222,7 @@ case "someone with nothing to act on gets empty lists, not an error" {
 		unreleased: [],
 		proposals: [],
 		claude: noClaude(),
+		settings: [],
 	})
 }
 

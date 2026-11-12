@@ -10,21 +10,23 @@ hold, a `pull_request_events` row; for a `pull_request_review`, its
 once a final release is published, which pull requests it shipped (#36); for
 a `workflow_job`, its `workflow_jobs` row (#42); for an `issues` or
 `issue_comment`, its `issues` row and labels, and a maintainer's first
-response (#48). A redelivery records the same facts again, which changes
-nothing.
+response (#48); for a `push` to a default branch that changes
+`.github/bynk-hooks.yml`, the repository's settings, read again (#88). A
+redelivery records the same facts again, which changes nothing.
 ---
 capability Facts {
 	--- `fresh` when this is the delivery's first arrival, not a redelivery.
 	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()]
 }
 
-provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock, GitHubApi {
+provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock, GitHubApi, Tokens, AppAuth, GitHubHttp {
 	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()] {
 		let _ <- recordVisibility(body)
 		let _ <- if d.event == "pull_request_review" {
 			recordReview(d, body)
 		} else if d.event == "push" {
-			recordTag(d, body)
+			let _ <- recordTag(d, body)
+			rereadSettings(d, body)
 		} else if d.event == "workflow_job" { recordJob(d, body) } else { Effect.pure(()) }
 		let nothing: Option[LiveEvent] = None
 		let changed <- if d.event == "workflow_run" {

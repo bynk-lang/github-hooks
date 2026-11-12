@@ -1,0 +1,206 @@
+commons github.settings
+
+---
+A repository's settings for the App's features (#69, #88): the file
+`.github/bynk-hooks.yml` on its default branch. Every feature is off unless
+the file turns it on, so a missing or empty file, or one that's refused, turns
+everything off.
+
+```yaml
+triage:
+  enabled: true
+  labels: [bug, enhancement, documentation]
+nudges:
+  enabled: true
+  after_days: 5
+release_notes:
+  enabled: true
+```
+---
+type RepoSettings = {
+	triage: TriageSettings = TriageSettings {
+		enabled: false,
+		labels: [],
+	},
+	nudges: NudgeSettings = NudgeSettings {
+		enabled: false,
+		after_days: 3,
+	},
+	release_notes: ReleaseNotesSettings = ReleaseNotesSettings { enabled: false },
+}
+
+--- Issue triage (#69, slice 2): `labels` are the only labels it may suggest.
+type TriageSettings = {
+	enabled: Bool = false,
+	labels: List[String] = [],
+}
+
+--- Stale pull request nudges (#69, slice 3): the days a ready pull request waits on review first.
+type NudgeSettings = {
+	enabled: Bool = false,
+	after_days: NudgeDays = 3,
+}
+
+type NudgeDays = Int where InRange(1, 30)
+
+--- Release notes drafts (#69, slice 4).
+type ReleaseNotesSettings = {
+	enabled: Bool = false,
+}
+
+--- Where the settings live in a repository.
+const SETTINGS_PATH: String = ".github/bynk-hooks.yml"
+
+---
+What a repository's settings file said:
+- `Missing`: there's no file, or it's empty or only comments, so every feature is off.
+- `Decoded`: it decoded. `unknown` are the keys it has that the App doesn't
+  know (`release_note`, `triage.label`), which the App ignores.
+- `Invalid`: it didn't decode, so every feature is off. `reason` is the
+  decoder's, with where (`RefinementViolation at $.nudges.after_days: …`).
+- `Unreadable`: GitHub didn't give the App the file, so every feature is off
+  until it does. `reason` is GitHub's answer, or why it couldn't be asked.
+---
+type SettingsFile =
+	| Missing
+	| Decoded(settings: RepoSettings, unknown: List[String])
+	| Invalid(reason: String)
+	| Unreadable(reason: String)
+
+--- The settings a repository's file gives: its own, or every feature off.
+fn settingsOf(file: SettingsFile) -> RepoSettings {
+	match file {
+		Decoded(s, _) => s,
+		_ => offSettings(),
+	}
+}
+
+fn offSettings() -> RepoSettings {
+	RepoSettings {
+		triage: TriageSettings {
+			enabled: false,
+			labels: [],
+		},
+		nudges: NudgeSettings {
+			enabled: false,
+			after_days: 3,
+		},
+		release_notes: ReleaseNotesSettings { enabled: false },
+	}
+}
+
+---
+Reads a settings file's text. A file with nothing but blank lines, comments
+and document markers is `Missing`: YAML reads it as `null`, which no record
+decodes from, but it plainly turns nothing on.
+---
+fn readSettings(text: String) -> SettingsFile {
+	let meaningful = text.split("\n").filter((line) => !ignorable(line))
+	let true = meaningful.count() > 0 else { Missing }
+	match Yaml.decode[RepoSettings](text) {
+		Ok(s) => Decoded(s, unknownKeys(text)),
+		Err(e) => Invalid("\(e.kind) at \(e.path): \(e.message)"),
+	}
+}
+
+fn ignorable(line: String) -> Bool {
+	let t = line.trim()
+	t == "" || t.startsWith("#") || t == "---" || t == "..."
+}
+
+---
+The keys a settings file has that the App doesn't know, as `section` or
+`section.key`, in the order they appear. A key the App ignores is most often a
+misspelling (`after_day`), which would otherwise leave a feature quietly at
+its default, so Mine lists them.
+
+`Yaml.decode` ignores keys a record doesn't declare and doesn't say which they
+were, so this reads the text: a key at the top level, and a key directly
+inside a known section, written in block style (`key: value` on its own
+line). A section written in flow style (`triage: {enabled: true}`) isn't
+looked inside.
+---
+fn unknownKeys(text: String) -> List[String] {
+	let start = KeyScan {
+		section: "",
+		indent: 0,
+		found: [],
+	}
+	let done = text.split("\n").fold(start, (scan, line) => scanLine(scan, line))
+	done.found
+}
+
+--- Where `unknownKeys` is: the known section it's inside (`""` for none), that section's key indent once seen (`0` until then), and the keys found so far.
+type KeyScan = {
+	section: String,
+	indent: Int,
+	found: List[String],
+}
+
+fn scanLine(scan: KeyScan, line: String) -> KeyScan {
+	let true = !ignorable(line) else { scan }
+	let Some(groups) = line.findRegex(
+		r"^( *)([A-Za-z0-9_-]+|\x22[^\x22]*\x22|'[^']*') *:(?:\s|$)"
+	) else {
+		// Not a key: a list item, or a value carried on. At the top level it
+		// ends any section.
+		if line.startsWith(" ") { scan } else { KeyScan { ...scan, section: "", indent: 0 } }
+	}
+	let depth = groups.skip(1).first().andThen((g) => g).getOrElse("").length()
+	let key = unquoted(groups.skip(2).first().andThen((g) => g).getOrElse(""))
+	if depth == 0 {
+		if knownSection(key) {
+			KeyScan {
+				...scan,
+				section: key,
+				indent: 0,
+			}
+		} else {
+			KeyScan {
+				section: "",
+				indent: 0,
+				found: scan.found.append(key),
+			}
+		}
+	} else if scan.section == "" {
+		scan
+	} else if scan.indent == 0 || scan.indent == depth {
+		let found = if knownKey(scan.section, key) {
+			scan.found
+		} else {
+			scan.found.append("\(scan.section).\(key)")
+		}
+		KeyScan {
+			section: scan.section,
+			indent: depth,
+			found: found,
+		}
+	} else {
+		scan
+	}
+}
+
+fn unquoted(key: String) -> String {
+	let n = key.length()
+	if n >= 2 && (key.startsWith("\"") || key.startsWith("'")) { key.slice(1, n - 1) } else { key }
+}
+
+fn knownSection(key: String) -> Bool {
+	key == "triage" || key == "nudges" || key == "release_notes"
+}
+
+fn knownKey(section: String, key: String) -> Bool {
+	key == "enabled"
+		|| (section == "triage" && key == "labels")
+		|| (section == "nudges" && key == "after_days")
+}
+
+--- An `Invalid` settings file, for a context (which can't build a commons sum itself).
+fn invalidSettings(reason: String) -> SettingsFile {
+	Invalid(reason)
+}
+
+--- An `Unreadable` settings file, for a context.
+fn unreadableSettings(reason: String) -> SettingsFile {
+	Unreadable(reason)
+}
