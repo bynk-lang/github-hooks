@@ -275,3 +275,21 @@ case "Claude calls go after 90 days, and the daily claims after a week (#88)" {
 	expect days == Ok("[{\"day\":\"2026-10-29\"}]")
 	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, 1 Claude calls and 1 days of Claude claims"
 }
+
+case "a pending proposal past its wait expires, and decided ones go after 90 days (#88)" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status, decided_at) VALUES
+		  (1, 'bynk-lang/bynk', 'labels', 1, '{"labels":[]}', 'r', '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 'pending', NULL),
+		  (2, 'bynk-lang/bynk', 'labels', 2, '{"labels":[]}', 'r', '2026-11-01T00:00:00.000Z', '2026-11-15T00:00:00.000Z', 'pending', NULL),
+		  (3, 'bynk-lang/bynk', 'labels', 3, '{"labels":[]}', 'r', '2026-07-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z', 'declined', '2026-08-06T23:59:59.999Z'),
+		  (4, 'bynk-lang/bynk', 'labels', 4, '{"labels":[]}', 'r', '2026-07-01T00:00:00.000Z', '2026-07-15T00:00:00.000Z', 'approved', '2026-08-07T00:00:00.000Z')
+		""",
+		[]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	let left <- Deliveries.all("SELECT id, status FROM proposals ORDER BY id", [])
+	expect left == Ok("[{\"id\":1,\"status\":\"expired\"},{\"id\":2,\"status\":\"pending\"},{\"id\":4,\"status\":\"approved\"}]")
+	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, 1 proposals expired and 1 decided ones removed"
+}
