@@ -20,6 +20,12 @@ stable prefix that is cached; `user` is the material to work on, which may be
 anyone's text, so it goes in the user turn and never the system prompt.
 `schema` is the JSON schema the reply must match, as JSON text written in
 code, never built from input.
+
+`maxTokens` bounds the model's thinking as well as its answer: both models
+think by default, so a budget sized for the answer alone comes back
+`Truncated`, billed and with its claim kept. `thinking: false` turns
+thinking off, on Haiku only (where it's allowed at any effort this type
+offers); Opus 5.5 always thinks, so it's ignored there.
 ---
 type ClaudeAsk = {
 	feature: String,
@@ -27,6 +33,7 @@ type ClaudeAsk = {
 	model: ClaudeModel,
 	effort: ClaudeEffort,
 	maxTokens: Int,
+	thinking: Bool = true,
 	system: String,
 	user: String,
 	schema: String,
@@ -136,7 +143,11 @@ fn claudeBody(a: ClaudeAsk) -> String {
 		Opus => ",\"fallbacks\":\"default\"",
 		Haiku => "",
 	}
-	"{\"model\":\(Json.encodePlain(modelId(a.model))),\"max_tokens\":\(a.maxTokens),\"system\":[{\"type\":\"text\",\"text\":\(Json.encodePlain(a.system)),\"cache_control\":{\"type\":\"ephemeral\"}}],\"messages\":[{\"role\":\"user\",\"content\":\(Json.encodePlain(a.user))}],\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":\(a.schema)},\"effort\":\(Json.encodePlain(effortName(a.effort)))}\(fallback)}"
+	let thinking = match a.model {
+		Haiku => if a.thinking { "" } else { ",\"thinking\":{\"type\":\"disabled\"}" },
+		Opus => "",
+	}
+	"{\"model\":\(Json.encodePlain(modelId(a.model))),\"max_tokens\":\(a.maxTokens),\"system\":[{\"type\":\"text\",\"text\":\(Json.encodePlain(a.system)),\"cache_control\":{\"type\":\"ephemeral\"}}],\"messages\":[{\"role\":\"user\",\"content\":\(Json.encodePlain(a.user))}],\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":\(a.schema)},\"effort\":\(Json.encodePlain(effortName(a.effort)))}\(thinking)\(fallback)}"
 }
 
 --- One block of a reply's `content`: the text one carries the answer.
@@ -156,6 +167,57 @@ type ReplyUsage = {
 	output_tokens: Int,
 	cache_creation_input_tokens: Option[Int],
 	cache_read_input_tokens: Option[Int],
+	iterations: Option[List[UsageIteration]],
+}
+
+---
+One attempt within a call, when the API itemises them: on Opus, a declined
+attempt (`message`) and the fallback that answered (`fallback_message`). The
+top-level counts cover only the attempt that answered.
+---
+type UsageIteration = {
+	type: String,
+	input_tokens: Option[Int],
+	output_tokens: Option[Int],
+	cache_creation_input_tokens: Option[Int],
+	cache_read_input_tokens: Option[Int],
+}
+
+---
+What a call cost, summed over its attempts when the API itemises them, and
+whether a fallback model answered it.
+---
+type CallTokens = {
+	input: Int,
+	output: Int,
+	cacheWrite: Option[Int],
+	cacheRead: Option[Int],
+	fellBack: Bool,
+}
+
+fn sumOf(xs: List[Option[Int]]) -> Option[Int] {
+	let known = xs.filter((x) => x is Some(_)).map((x) => x.getOrElse(0))
+	if known.length() == 0 { None } else { Some(known.fold(0, (a, b) => a + b)) }
+}
+
+fn tokensOf(u: ReplyUsage) -> CallTokens {
+	// A count the attempts don't give falls back to the top-level one.
+	let its = u.iterations.getOrElse([])
+	let cacheWrite = match sumOf(its.map((i) => i.cache_creation_input_tokens)) {
+		Some(n) => Some(n),
+		None => u.cache_creation_input_tokens,
+	}
+	let cacheRead = match sumOf(its.map((i) => i.cache_read_input_tokens)) {
+		Some(n) => Some(n),
+		None => u.cache_read_input_tokens,
+	}
+	CallTokens {
+		input: sumOf(its.map((i) => i.input_tokens)).getOrElse(u.input_tokens),
+		output: sumOf(its.map((i) => i.output_tokens)).getOrElse(u.output_tokens),
+		cacheWrite: cacheWrite,
+		cacheRead: cacheRead,
+		fellBack: its.any((i) => i.type == "fallback_message"),
+	}
 }
 
 --- The parts of a Messages API reply the Worker reads.
@@ -193,7 +255,7 @@ type CallRecord = {
 	stopReason: Option[String],
 	category: Option[String],
 	detail: Option[String],
-	usage: Option[ReplyUsage],
+	usage: Option[CallTokens],
 }
 
 ---
@@ -201,6 +263,9 @@ Asks Claude once, for `a.feature` in `a.repo`. Without `ANTHROPIC_API_KEY`
 nothing is claimed or sent. Otherwise a call is claimed against the day's
 caps first (`claimClaudeCall`); past either, nothing is sent. A call that gets
 no answer (Anthropic unreachable, or an error status) gives its claim back.
+So the caps count calls answered, not calls billed: a request that reached
+Anthropic before the connection dropped can still be billed. The key's spend
+limit in the Anthropic Console is the backstop for that.
 Every call claimed, and every one capped, is recorded in `claude_calls`.
 `stop_reason` is read before `content`: a refusal or a truncated reply is
 its own outcome, never a half-read answer.
@@ -326,7 +391,7 @@ fn askClaude(
 			Unavailable(why) => Some(why),
 			_ => None,
 		},
-		usage: Some(reply.usage),
+		usage: Some(tokensOf(reply.usage)),
 	}
 	let _ <- match outcome {
 		Refused(c) => Logger.warn(
@@ -419,8 +484,8 @@ fn recordClaudeCall(
 		"""
 		INSERT INTO claude_calls (at, repo, feature, model, served_model, outcome, status, stop_reason,
 		                          refusal_category, detail, input_tokens, output_tokens,
-		                          cache_creation_input_tokens, cache_read_input_tokens)
-		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+		                          cache_creation_input_tokens, cache_read_input_tokens, fell_back)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
 		RETURNING id
 		""",
 		[
@@ -434,10 +499,11 @@ fn recordClaudeCall(
 			text(r.stopReason),
 			text(r.category),
 			text(r.detail),
-			integer(u.map((x) => x.input_tokens)),
-			integer(u.map((x) => x.output_tokens)),
-			integer(u.andThen((x) => x.cache_creation_input_tokens)),
-			integer(u.andThen((x) => x.cache_read_input_tokens)),
+			integer(u.map((x) => x.input)),
+			integer(u.map((x) => x.output)),
+			integer(u.andThen((x) => x.cacheWrite)),
+			integer(u.andThen((x) => x.cacheRead)),
+			integer(u.map((x) => if x.fellBack { 1 } else { 0 })),
 		]
 	)
 	match row {

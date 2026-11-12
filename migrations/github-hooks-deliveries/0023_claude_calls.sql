@@ -14,8 +14,9 @@ CREATE TABLE claude_calls_daily (
 CREATE INDEX claude_calls_daily_day ON claude_calls_daily (day);
 
 -- One row per call asked for, made or not: what it was for, the model asked
--- and the model that answered, how it stopped, what it cost in tokens, and
--- its outcome. `proposal` links the proposal it made (#88, step 2).
+-- and the model that answered, how it stopped, what it cost in tokens
+-- (summed over every attempt, a declined one too), and its outcome.
+-- `proposal` links the proposal it made (#88, step 2).
 -- Retention keeps 90 days.
 CREATE TABLE claude_calls (
   id                          INTEGER PRIMARY KEY,
@@ -33,6 +34,7 @@ CREATE TABLE claude_calls (
   output_tokens               INTEGER,
   cache_creation_input_tokens INTEGER,
   cache_read_input_tokens     INTEGER,
+  fell_back                   INTEGER,         -- 1 when Opus's fallback model answered
   proposal                    INTEGER
 );
 

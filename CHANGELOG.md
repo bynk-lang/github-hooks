@@ -15,7 +15,8 @@ All notable changes to github-hooks. The format follows
   - the feature's instructions are a cached system block, and the material to
     work on (anyone's text) is the user turn, as a JSON string;
   - the reply's shape is a JSON schema in `output_config.format`, with the
-    feature's effort; `temperature` is never sent;
+    feature's effort; `temperature` is never sent. `max_tokens` bounds
+    thinking as well as the answer, and a Haiku call can turn thinking off;
   - on Opus 5.5, the server-side fallback on a refusal (`fallbacks: "default"`,
     with its beta header);
   - `stop_reason` is read before the content: a refusal (with its category)
@@ -26,8 +27,11 @@ All notable changes to github-hooks. The format follows
   default 200), in one statement (migration `0023`, `claude_calls_daily`); past
   either, nothing is sent. A call that gets no answer gives its claim back.
   Every call is recorded in `claude_calls`: the model asked and the model that
-  answered, the stop reason, the token usage (cache reads and writes too) and
-  the outcome. Without `ANTHROPIC_API_KEY` nothing is claimed or sent.
+  answered, the stop reason, the token usage (cache reads and writes too,
+  summed over every attempt when Opus falls back, with `fell_back` set) and the
+  outcome. The caps count calls answered, not calls billed: a dropped
+  connection gives its claim back, so the key's Console spend limit is the
+  backstop. Without `ANTHROPIC_API_KEY` nothing is claimed or sent.
   Retention keeps calls 90 days and the claims a week. `deploy.yml` passes the
   three new optional settings.
 
