@@ -301,9 +301,11 @@ service api from http {
 	// What is the signed-in maintainer's to act on (#53, step 4): their open
 	// pull requests and their CI, the pull requests waiting on their review,
 	// their open issues, and their merges waiting to ship, across every
-	// repository. It's theirs alone, so it isn't shared (`sharedFigures`), but
-	// it shares their per-login limit, and every list reads by an index.
-	on GET("/maintainers/mine") () -> Effect[HttpResult[Mine]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit {
+	// repository; and (#88) the App's proposals waiting on any maintainer, with
+	// today's Claude calls against the caps. It's theirs alone, so it isn't
+	// shared (`sharedFigures`), but it shares their per-login limit, and every
+	// list reads by an index.
+	on GET("/maintainers/mine") () -> Effect[HttpResult[Mine]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit, Secrets {
 		forMaintainer("\(m.identity)", (login) => mine(login))
 	}
 
@@ -315,6 +317,18 @@ service api from http {
 	// maintainer routes' own limit, and confirmed in the page before it's sent.
 	on POST("/maintainers/actions/rerun") (body: RerunRequest) -> Effect[HttpResult[RerunDone]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit, ActionLimit, AppAuth, GitHubHttp {
 		forMaintainer("\(m.identity)", (login) => rerunFailedJobs(login, body))
+	}
+
+	// Approves one of the App's proposals (#88), for a maintainer: it's claimed
+	// once, then its action is asked of GitHub as the App. Declining asks
+	// nothing of GitHub. Both are audited in `maintainer_actions`, limited per
+	// login (`ActionLimit`), and heard by every open maintainer's page.
+	on POST("/maintainers/proposals/approve") (body: ProposalDecision) -> Effect[HttpResult[ProposalDecided]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit, ActionLimit, AppAuth, GitHubHttp, LiveFeed {
+		forMaintainer("\(m.identity)", (login) => approveProposal(login, body.id))
+	}
+
+	on POST("/maintainers/proposals/decline") (body: ProposalDecision) -> Effect[HttpResult[ProposalDecided]] by m: Maintainer given Deliveries, Logger, GitHubApi, Clock, MaintainerLimit, ActionLimit, LiveFeed {
+		forMaintainer("\(m.identity)", (login) => declineProposal(login, body.id))
 	}
 
 	// Every repository the service has heard from (#53), for a maintainer:

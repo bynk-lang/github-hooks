@@ -286,8 +286,50 @@
       parts.push(list("Your merges waiting to ship", mine.unreleased, "Nothing of yours is waiting for a release.",
         (u) => [link(u.repo, u.number, "pull", u.title), ` · merged ${ago(u.merged_at)} ago`]));
     }
+    // The App's proposals (#88) are every maintainer's, so every page shows
+    // them, first; and, once Claude is in use, today's calls against the caps.
+    const proposals = mine.proposals || [];
+    if (proposals.length > 0) parts.unshift(proposalList(proposals));
+    const claude = mine.claude;
+    if (claude && (claude.calls > 0 || proposals.length > 0)) {
+      parts.push(node("p", { class: "mine-claude" },
+        `Claude today: ${claude.calls} of ${claude.total_cap} calls; the busiest repository ${claude.busiest} of ${claude.repo_cap}.`));
+    }
     slot.replaceChildren(node("div", { class: "repo-head" }, node("h2", { id: "mine-title" }, `Yours, ${m.login}`)), ...parts);
     slot.hidden = false;
+  }
+
+  // "Proposed by the App" (#88): what the App would do, and why, each with
+  // Approve and Decline. Nothing reaches GitHub until a maintainer approves.
+  // Approving asks GitHub at once, so it's confirmed first; the outcome is
+  // shown beside it, and Mine reloads (every open page hears it too).
+  const proposalNotes = new Map();
+  function proposalList(proposals) {
+    return list("Proposed by the App", proposals, "", (p) => {
+      const note = node("span", { class: "proposal-note", "aria-live": "polite" }, proposalNotes.get(p.id) || "");
+      const decide = (verb, path, confirmText) => {
+        const b = node("button", { type: "button", class: "link-button" }, verb);
+        b.addEventListener("click", async () => {
+          if (confirmText && !window.confirm(confirmText)) return;
+          b.disabled = true;
+          note.textContent = verb === "Approve" ? "Asking GitHub…" : "Declining…";
+          const done = await act(path, { id: p.id });
+          proposalNotes.set(p.id, done.message);
+          note.textContent = done.message;
+          b.disabled = false;
+          loadMine();
+        });
+        return b;
+      };
+      const what = p.kind === "labels" ? `add ${p.labels.join(", ")}` : p.kind;
+      // `/issues/N` serves an issue or a pull request alike.
+      return [
+        link(p.repo, p.target, "issues", p.title || ""), ` · ${what} · `, node("span", { class: "proposal-reason" }, p.reason),
+        ` · proposed ${ago(p.proposed_at)} ago · `,
+        decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.repo}#${p.target}? The App does it on GitHub at once.`),
+        " ", decide("Decline", "/maintainers/proposals/decline", null), " ", note,
+      ];
+    });
   }
 
   // A maintainer's action (#53, step 5): POSTs `body` as JSON with the
@@ -358,7 +400,11 @@
     const ws = new WebSocket(`${scheme}://${location.host}/live?board=maintainers&client=${client}`);
     maintainersSocket = ws;
     ws.onopen = () => { maintainersRetryMs = 5_000; announceMaintainersLive(); };
-    ws.onmessage = (frame) => { for (const handle of liveHandlers) handle(frame); };
+    ws.onmessage = (frame) => {
+      // A proposal's change (#88) is Mine's, not a page's figures.
+      try { if (JSON.parse(frame.data).kind === "proposal") { loadMine(); return; } } catch { /* the pages' to judge */ }
+      for (const handle of liveHandlers) handle(frame);
+    };
     ws.onclose = () => {
       if (maintainersSocket !== ws) return;
       maintainersSocket = null;

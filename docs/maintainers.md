@@ -115,6 +115,8 @@ Other scripts read the signed-in maintainer from `window.bynkMaintainer()`
 | `POST /maintainers/signout` | a maintainer | ends every session of their login ([below](#sessions)), and closes their live sockets |
 | `POST /maintainers/live` | a maintainer | lets their page join the maintainers' live board: `{client}` in, `{client, within_ms}` out ([below](#live-updates)) |
 | `POST /maintainers/actions/rerun` | a maintainer | re-runs a failed run's failed jobs: `{repo, run_id}` in ([below](#actions)) |
+| `POST /maintainers/proposals/approve` | a maintainer | approves one of the App's proposals: `{id}` in ([below](#the-apps-proposals)) |
+| `POST /maintainers/proposals/decline` | a maintainer | declines one: `{id}` in |
 
 **`/maintainers/token`:**
 - **Callback only:** the `redirect_uri` must be `/maintainers/callback` on
@@ -298,6 +300,10 @@ most 50.
 - **`unreleased`:** their pull requests merged since their repository's
   latest final release, waiting to ship. A repository that has never
   released is left out.
+- **`proposals`:** the App's proposals waiting on a decision, oldest first
+  (#88, [below](#the-apps-proposals)). They're every maintainer's, not one's.
+- **`claude`:** today's Claude calls (UTC) across every repository, the
+  busiest repository's, and the caps they're held to (#88).
 
 It's the maintainer's alone, so it isn't shared like the figures, but it
 counts against their per-login limit. Every list reads by an index on the
@@ -314,6 +320,53 @@ page is visible, and draws it into the page's `#mine` section (its
 | PR flow | their open pull requests, with stage, how long they've waited and CI; and those waiting on their review |
 | Issues | their open issues, stale ones marked |
 | Releases | their merges waiting to ship |
+
+Every page also shows the App's proposals first, under **Proposed by the
+App**, and, once Claude is in use, a line with today's calls against the caps.
+
+## The App's proposals
+
+Phase 5's features (#69) don't act on GitHub by themselves: each records
+what it would do as a **proposal**, and a maintainer approves or declines it
+(#88, migration `0024`). Nothing is posted until a maintainer approves. The
+first kind is `labels`: add these labels to that issue or pull request.
+
+- **In Mine:** each pending proposal shows its target, what it would do, the
+  reason it was proposed, and **Approve** and **Decline**. Approving asks for
+  confirmation first, as it acts on GitHub at once. Every open maintainer's
+  page hears a proposal arrive or be decided, over the maintainers' live
+  board, and reloads Mine.
+- **Approving** (`POST /maintainers/proposals/approve`, `{id}`):
+  - **Once only:** the proposal is claimed (`pending` → `approving`) in one
+    statement, so two maintainers, or two clicks, act on it once; meanwhile
+    another decision on it is a `409` ("is being decided").
+  - **The action** is asked of GitHub as the installation that last
+    delivered for the repository: for `labels`,
+    `POST /repos/{repo}/issues/{target}/labels`. GitHub **creates** a label
+    the repository doesn't have, rather than refusing it, so the labels
+    shown in Mine are exactly what will appear.
+  - **The end:** `approved` when GitHub accepted it. A proposal left
+    `approving` is one whose Worker stopped before GitHub answered (a call
+    that outlived the request, say): the labels may or may not be on the
+    target, and it isn't tried again.
+  - **A refusal** leaves the proposal `failed`, with GitHub's reason, and a
+    `502`; a `403` means the App lacks **Issues: Read and write**. It isn't
+    tried again: the feature proposes afresh if it still applies.
+- **Declining** (`POST /maintainers/proposals/decline`, `{id}`) asks nothing
+  of GitHub.
+- **Refusals:** `404` for an unknown proposal; `409` for one already decided
+  (and how), expired, or being decided right now. Both routes count against
+  `ActionLimit`, as re-runs do.
+- **One at a time:** a target with a pending proposal of a kind keeps that
+  one: proposing again answers its id.
+- **Expiry:** a proposal waits 14 days. Past that it can't be decided, and
+  hourly retention marks it `expired`. Decided proposals are removed 90 days
+  after the decision.
+- **The audit:** every decision is kept in `maintainer_actions`, as
+  `approve-proposal` or `decline-proposal`, with the proposal's id, GitHub's
+  status and what happened. Migration `0024` rebuilt that table so a row
+  needs no run: `run_id` and `attempt` became optional, keeping every row
+  and id.
 
 ## Sessions
 

@@ -108,6 +108,16 @@ fn seed() -> List[SqlStatement] {
 	]
 }
 
+--- No Claude calls today, against the default caps.
+fn noClaude() -> ClaudeToday {
+	ClaudeToday {
+		calls: 0,
+		busiest: 0,
+		repo_cap: 50,
+		total_cap: 200,
+	}
+}
+
 case "a maintainer's own work, across public and private repositories" {
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
@@ -189,6 +199,8 @@ case "a maintainer's own work, across public and private repositories" {
 				merged_at: "2026-11-03T00:00:00.000Z",
 			},
 		],
+		proposals: [],
+		claude: noClaude(),
 	})
 }
 
@@ -201,7 +213,15 @@ case "someone with nothing to act on gets empty lists, not an error" {
 	)
 	expect kept is Ok(_)
 	let r <- api.GET("/maintainers/mine") by Maintainer("new-person")
-	expect r == Ok(Mine { login: "new-person", pulls: [], reviews: [], issues: [], unreleased: [] })
+	expect r == Ok(Mine {
+		login: "new-person",
+		pulls: [],
+		reviews: [],
+		issues: [],
+		unreleased: [],
+		proposals: [],
+		claude: noClaude(),
+	})
 }
 
 case "it is a maintainer's alone: someone who has left is refused" {

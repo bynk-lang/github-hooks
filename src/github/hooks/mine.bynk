@@ -7,7 +7,7 @@ context github.hooks
 // in the last day, as `/metrics/ci/now` does: one whose `completed` delivery
 // was lost would otherwise pin it at "running". Such an attempt is unknown,
 // so a commit with nothing else is `None`.
-fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clock {
+fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clock, Secrets {
 	let now <- Clock.now()
 	let Ok(pullRows) <- Deliveries.all(
 		"""
@@ -113,12 +113,20 @@ fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clo
 	let Ok(unreleased) = Json.decodeSql[List[MyMerge]](mergeRows) else match {
 		Err(e) => mineFailed("merges waiting to ship", login, jsonError(e)),
 	}
+	let Ok(proposals) <- pendingProposals(now) else match {
+		Err(why) => mineFailed("proposals", login, why),
+	}
+	let Ok(claude) <- claudeToday(now) else match {
+		Err(why) => mineFailed("Claude calls", login, why),
+	}
 	Ok(Mine {
 		login: login,
 		pulls: pulls,
 		reviews: reviews,
 		issues: issues,
 		unreleased: unreleased,
+		proposals: proposals,
+		claude: claude,
 	})
 }
 

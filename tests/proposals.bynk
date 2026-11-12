@@ -1,0 +1,358 @@
+// #88, step 2: the App's proposals, approved or declined by a maintainer,
+// against an in-memory D1 with the migrations applied. GitHub is stubbed at
+// the wire. It's 12:00 UTC on 5 November; accuser is a maintainer (a kept
+// membership answer); installation 42 delivered for `bynk-lang/secret`.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO repositories (repo, public, default_branch) VALUES ('bynk-lang/secret', 0, 'main')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'issues', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+		// A later delivery without an installation (a ping, say) doesn't hide the one that has it.
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-2', 'ping', 'bynk-lang/secret', NULL, 1, '2026-11-05T06:00:00.000Z'), ('d-3', 'issues', 'bynk-lang/bynk', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+	]
+}
+
+--- Triage's proposal for issue 12 of `bynk-lang/secret`.
+fn labelling() -> NewProposal {
+	NewProposal {
+		repo: "bynk-lang/secret",
+		target: 12,
+		title: Some("The build fails on Windows"),
+		labels: ["bug", "windows"],
+		reason: "A build failure on one platform.",
+	}
+}
+
+fn labelled() -> Result[Response, String] {
+	Ok(Response {
+		status: 200,
+		headers: Map.empty(),
+		body: "[{\"name\": \"bug\"}, {\"name\": \"windows\"}]",
+	})
+}
+
+fn forbidden() -> Result[Response, String] {
+	Ok(Response {
+		status: 403,
+		headers: Map.empty(),
+		body: "{\"message\": \"Resource not accessible by integration\"}",
+	})
+}
+
+--- What a proposal's row says now.
+type Settled = {
+	status: String,
+	decided_by: Option[String],
+	outcome: Option[String],
+}
+
+--- A decision as `maintainer_actions` audits it.
+type Audited = {
+	login: String,
+	action: String,
+	repo: String,
+	proposal: Option[Int],
+	status: Option[Int],
+	outcome: String,
+}
+
+type Linked = {
+	proposal: Option[Int],
+}
+
+const SETTLED: String = "FROM proposals WHERE id = 1"
+
+const AUDITED: String = "FROM maintainer_actions ORDER BY id"
+
+case "a proposal is recorded once per target, linked to its Claude call, and heard" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let call <- Deliveries.run(
+		"INSERT INTO claude_calls (id, at, repo, feature, model, outcome) VALUES (7, '2026-11-05T11:59:00.000Z', 'bynk-lang/secret', 'triage', 'claude-haiku-5-5', 'answered')",
+		[]
+	)
+	expect call is Ok(_)
+	let first <- proposeLabels(labelling(), Some(7))
+	let again <- proposeLabels(labelling(), None)
+	expect first == Ok(1)
+	expect again == Ok(1)
+	let linked <- Deliveries.firstAs[Linked]("FROM claude_calls WHERE id = 7", [])
+	expect linked == Ok(Some(Linked { proposal: Some(1) }))
+	expect LiveFeed.publishMaintainers called once with e.kind == "proposal"
+}
+
+case "Mine lists the pending proposals with their labels, and today's Claude calls" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- proposeLabels(labelling(), None)
+	let used <- Deliveries.run(
+		"INSERT INTO claude_calls_daily (repo, day, calls) VALUES ('bynk-lang/secret', '2026-11-05', 3), ('bynk-lang/bynk', '2026-11-05', 1), ('bynk-lang/bynk', '2026-11-04', 9)",
+		[]
+	)
+	expect used is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals == [
+		ProposalWaiting {
+			id: 1,
+			repo: "bynk-lang/secret",
+			kind: "labels",
+			target: 12,
+			title: Some("The build fails on Windows"),
+			labels: ["bug", "windows"],
+			reason: "A build failure on one platform.",
+			proposed_at: "2026-11-05T12:00:00.000Z",
+			expires_at: "2026-11-19T12:00:00.000Z",
+		},
+	]
+	expect m.claude == ClaudeToday { calls: 4, busiest: 3, repo_cap: 50, total_cap: 200 }
+}
+
+case "approving labels the issue as the App, once, and audits it" {
+	stub GitHubHttp.post(_, _, _) returns labelled()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- proposeLabels(labelling(), None)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Ok(ProposalDecided {
+		id: 1,
+		status: "approved",
+		message: "Labelled bynk-lang/secret#12: bug, windows",
+	})
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/secret/issues/12/labels"
+	expect GitHubHttp.post called once with body == "{\"labels\":[\"bug\",\"windows\"]}"
+	let again <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect again == Conflict("proposal 1 was already approved")
+	expect GitHubHttp.post called once
+	let row <- Deliveries.firstAs[Settled](SETTLED, [])
+	expect row == Ok(Some(Settled {
+		status: "approved",
+		decided_by: Some("accuser"),
+		outcome: Some("labelled bug, windows"),
+	}))
+	let audit <- Deliveries.select[Audited](AUDITED, [])
+	expect audit == Ok([
+		Audited {
+			login: "accuser",
+			action: "approve-proposal",
+			repo: "bynk-lang/secret",
+			proposal: Some(1),
+			status: Some(200),
+			outcome: "labelled bug, windows",
+		},
+	])
+	expect LiveFeed.publishMaintainers called once with e.status == "approved"
+}
+
+case "a refused apply fails the proposal with GitHub's reason, and isn't tried again" {
+	stub GitHubHttp.post(_, _, _) returns forbidden()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- proposeLabels(labelling(), None)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"GitHub refused the labels (does the App have Issues: Read and write?): 403 Resource not accessible by integration"
+	)
+	let row <- Deliveries.firstAs[Settled](SETTLED, [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))
+	let again <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect again == Conflict("proposal 1 was already failed")
+	let audit <- Deliveries.select[Audited](AUDITED, [])
+	expect audit.map((xs) => xs.map((a) => a.status)) == Ok([Some(403)])
+}
+
+case "declining asks nothing of GitHub, and settles the proposal" {
+	stub GitHubHttp.post(_, _, _) returns labelled()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- proposeLabels(labelling(), None)
+	let r <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Ok(ProposalDecided {
+		id: 1,
+		status: "declined",
+		message: "Declined: nothing was posted to bynk-lang/secret#12",
+	})
+	expect GitHubHttp.post never called
+	let later <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect later == Conflict("proposal 1 was already declined")
+	expect GitHubHttp.post never called
+	let audit <- Deliveries.select[Audited](AUDITED, [])
+	expect audit.map((xs) => xs.map((a) => a.action)) == Ok(["decline-proposal"])
+}
+
+case "an expired proposal can't be decided, and a missing one isn't found" {
+	stub GitHubHttp.post(_, _, _) returns labelled()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let old <- Deliveries.run(
+		"""
+		INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status)
+		VALUES (1, 'bynk-lang/secret', 'labels', 12, '{"labels":["bug"]}', 'old', '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 'pending')
+		""",
+		[]
+	)
+	expect old is Ok(_)
+	let approved <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	let declined <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	let missing <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 2 }
+	) by Maintainer("accuser")
+	expect approved == Conflict("proposal 1 has expired")
+	expect declined == Conflict("proposal 1 has expired")
+	expect missing is NotFound
+	expect GitHubHttp.post never called
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals == []
+}
+
+case "only a maintainer decides: someone who has left is refused" {
+	stub GitHubHttp.get(_, _) returns Ok(Response { status: 404, headers: Map.empty(), body: "{\"message\": \"Not Found\"}" })
+	stub GitHubHttp.post(_, _, _) returns labelled()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- proposeLabels(labelling(), None)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("a-leaver")
+	expect r is RawError(403, _, _)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Settled](SETTLED, [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("pending"))
+}
+
+--- Proposals that differ from triage's for issue 12 in one way each.
+fn decoys() -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+			  (1, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'declined', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'declined'),
+			  (2, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'expires now', '2026-10-22T12:00:00.000Z', '2026-11-05T12:00:00.000Z', 'pending'),
+			  (3, 'bynk-lang/bynk', 'labels', 12, '{"labels":["x"]}', 'another repository', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'pending'),
+			  (4, 'bynk-lang/secret', 'labels', 13, '{"labels":["x"]}', 'another issue', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'pending')
+		""",
+		params: [],
+	}
+}
+
+case "a proposal is new unless that very target has one pending, unexpired" {
+	let seeded <- Deliveries.batch(seed().concat([decoys()]))
+	expect seeded is Ok(_)
+	let first <- proposeLabels(labelling(), None)
+	let again <- proposeLabels(labelling(), None)
+	expect first == Ok(5)
+	expect again == Ok(5)
+}
+
+case "a decision acts on the proposal named, and only while it's pending and unexpired" {
+	stub GitHubHttp.post(_, _, _) returns labelled()
+	let seeded <- Deliveries.batch(seed().concat([decoys()]))
+	expect seeded is Ok(_)
+	// Proposal 2 expires this very moment: it can't be decided, and Mine leaves it out.
+	let atExpiry <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 2 }
+	) by Maintainer("accuser")
+	let declineAtExpiry <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 2 }
+	) by Maintainer("accuser")
+	expect atExpiry == Conflict("proposal 2 has expired")
+	expect declineAtExpiry == Conflict("proposal 2 has expired")
+	// Approving 3 leaves 4 pending; declining 4 leaves nothing else changed.
+	let approved <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 3 }
+	) by Maintainer("accuser")
+	expect approved is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals.map((p) => p.id) == [4]
+	let declined <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 4 }
+	) by Maintainer("accuser")
+	expect declined is Ok(_)
+	// An approved proposal can't then be declined.
+	let late <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 3 }
+	) by Maintainer("accuser")
+	expect late == Conflict("proposal 3 was already approved")
+	let states <- Deliveries.all("SELECT id, status FROM proposals ORDER BY id", [])
+	expect states == Ok("[{\"id\":1,\"status\":\"declined\"},{\"id\":2,\"status\":\"pending\"},{\"id\":3,\"status\":\"approved\"},{\"id\":4,\"status\":\"declined\"}]")
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/bynk/issues/12/labels"
+}
+
+case "why a decision can't be made: expired, decided (even past its wait), or being decided" {
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: """
+					INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+					  (1, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'r', '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 'approved'),
+					  (2, 'bynk-lang/secret', 'labels', 13, '{"labels":["x"]}', 'r', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'approving'),
+					  (3, 'bynk-lang/secret', 'labels', 14, '{"labels":["x"]}', 'r', '2026-10-22T12:00:00.000Z', '2026-11-05T12:00:00.000Z', 'pending')
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let decided <- undecidable(1)
+	let deciding <- undecidable(2)
+	let expired <- undecidable(3)
+	expect decided == Conflict("proposal 1 was already approved")
+	expect deciding == Conflict("proposal 2 is being decided")
+	expect expired == Conflict("proposal 3 has expired")
+}

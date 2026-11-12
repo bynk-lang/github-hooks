@@ -79,18 +79,42 @@ service retention from cron {
 		) else match {
 			Err(e) => retentionFailed("Claude daily claims", e),
 		}
+		// Proposals (#88): a pending one past its wait expires, and decided
+		// ones go 90 days after the decision; the decisions stay audited in
+		// `maintainer_actions`.
+		let now = Instant.fromEpochMillis(at).toIso()
+		let Ok(lapsed) <- Deliveries.run(
+			"""
+			UPDATE proposals SET status = 'expired', decided_at = ?1, outcome = 'expired unanswered'
+			WHERE status = 'pending' AND expires_at <= ?1
+			""",
+			[Text(now)]
+		) else match {
+			Err(e) => retentionFailed("expired proposals", e),
+		}
+		let Ok(decided) <- Deliveries.run(
+			"""
+			DELETE FROM proposals WHERE rowid IN (
+			  SELECT rowid FROM proposals WHERE status != 'pending' AND decided_at < ?1 ORDER BY decided_at LIMIT ?2
+			)
+			""",
+			[Text(c.deliveries), Integer(RETENTION_BATCH)]
+		) else match {
+			Err(e) => retentionFailed("decided proposals", e),
+		}
 		let Ok(jobs) <- rollUpJobDay(c.jobDays) else match {
 			Err(why) => {
 				let _ <- Logger.error(why)
 				Err(why)
 			},
 		}
-		let removed = progress.changes + expired.changes + acted.changes + settled.changes + calls.changes + claims.changes + jobs.pruned
+		let removed = progress.changes + expired.changes + acted.changes + settled.changes + calls.changes + claims.changes + lapsed.changes + decided.changes + jobs.pruned
 		let true = removed > 0 else { Ok(()) }
 		let more = progress.changes == RETENTION_BATCH
 			|| expired.changes == RETENTION_BATCH
 			|| acted.changes == RETENTION_BATCH
 			|| calls.changes == RETENTION_BATCH
+			|| decided.changes == RETENTION_BATCH
 		let rolled = if jobs.pruned > 0 {
 			", and rolled up and pruned \(jobs.pruned) jobs of \(jobs.day)"
 		} else {
@@ -106,8 +130,13 @@ service retention from cron {
 		} else {
 			""
 		}
+		let proposed = if lapsed.changes + decided.changes > 0 {
+			", \(lapsed.changes) proposals expired and \(decided.changes) decided ones removed"
+		} else {
+			""
+		}
 		let _ <- Logger.info(
-			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(tombstones)\(claude)\(rolled)\(if more { "; more remain for the next run" } else { "" })"
+			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(tombstones)\(claude)\(proposed)\(rolled)\(if more { "; more remain for the next run" } else { "" })"
 		)
 		Ok(())
 	}

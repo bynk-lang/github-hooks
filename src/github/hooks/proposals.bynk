@@ -1,0 +1,430 @@
+context github.hooks
+
+// The App's proposals (#88, step 2): what a feature of #69 would do, recorded
+// and waiting on a maintainer, who approves or declines it in Mine. Nothing
+// is posted to GitHub until a maintainer approves. One kind so far,
+// `labels`; triage (#69, slice 2) is the first feature to propose.
+
+--- How long a proposal waits for a decision before it expires.
+const PROPOSAL_WAIT: Duration = 14.days
+
+--- What a feature proposes. `title` is the target's, as Mine shows it.
+type NewProposal = {
+	repo: String,
+	target: Int,
+	title: Option[String],
+	labels: List[String],
+	reason: String,
+}
+
+--- The `labels` kind's payload: the labels to add.
+type LabelsPayload = {
+	labels: List[String],
+}
+
+--- A proposal as approving it needs it.
+type ClaimedProposal = {
+	repo: String,
+	kind: String,
+	target: Int,
+	payload: String,
+}
+
+--- Where a proposal stands, to say why a decision on it can't be made.
+type ProposalState = {
+	status: String,
+}
+
+--- A proposal row as Mine reads it, before its payload is decoded.
+type ProposalRow = {
+	id: Int,
+	repo: String,
+	kind: String,
+	target: Int,
+	title: Option[String],
+	payload: String,
+	reason: String,
+	proposed_at: String,
+	expires_at: String,
+}
+
+type ProposalId = {
+	id: Int,
+}
+
+type InstallationOf = {
+	installation: Option[Int],
+}
+
+type TodayRow = {
+	calls: Int,
+	busiest: Int,
+}
+
+---
+Proposes adding `p.labels` to `p.target` in `p.repo`, and links the Claude
+call that made it (`call`), if any. A target that already has a pending
+`labels` proposal keeps that one: the answer is its id, and nothing new is
+recorded. Open maintainers' pages hear of a new one and reload Mine.
+---
+fn proposeLabels(
+	p: NewProposal,
+	call: Option[Int]
+) -> Effect[Result[Int, String]] given Deliveries, Clock, LiveFeed {
+	let now <- Clock.now()
+	let added <- Deliveries.first(
+		"""
+		INSERT INTO proposals (repo, kind, target, title, payload, reason, proposed_at, expires_at, status)
+		SELECT ?1, 'labels', ?2, ?3, ?4, ?5, ?6, ?7, 'pending'
+		WHERE NOT EXISTS (SELECT 1 FROM proposals
+		                  WHERE repo = ?1 AND kind = 'labels' AND target = ?2 AND status = 'pending' AND expires_at > ?6)
+		RETURNING id
+		""",
+		[
+			Text(p.repo),
+			Integer(p.target),
+			text(p.title),
+			Text(Json.encodePlain(LabelsPayload { labels: p.labels })),
+			Text(p.reason),
+			Text(now.toIso()),
+			Text((now + PROPOSAL_WAIT).toIso()),
+		]
+	)
+	let Ok(row) = added else match {
+		Err(e) => Effect.pure(Err("could not record the proposal: \(sqlError(e))")),
+	}
+	let Some(r) = row else {
+		let existing <- Deliveries.first(
+			"SELECT id FROM proposals WHERE repo = ?1 AND kind = 'labels' AND target = ?2 AND status = 'pending' AND expires_at > ?3 ORDER BY id LIMIT 1",
+			[Text(p.repo), Integer(p.target), Text(now.toIso())]
+		)
+		match existing {
+			Ok(Some(e)) => match Json.decodeSql[ProposalId](e) {
+				Ok(x) => Effect.pure(Ok(x.id)),
+				Err(err) => Effect.pure(Err(jsonError(err))),
+			},
+			Ok(None) => Effect.pure(Err("the proposal was neither recorded nor already pending")),
+			Err(e) => Effect.pure(Err(sqlError(e))),
+		}
+	}
+	let Ok(made) = Json.decodeSql[ProposalId](r) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	let _ <- match call {
+		Some(c) => Deliveries.run(
+			"UPDATE claude_calls SET proposal = ?1 WHERE id = ?2",
+			[Integer(made.id), Integer(c)]
+		),
+		None => Deliveries.run("SELECT 1", []),
+	}
+	let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "pending"))
+	Effect.pure(Ok(made.id))
+}
+
+--- The maintainers' board's frame for a proposal's change: pages reload Mine.
+fn proposalEvent(repo: String, target: Int, status: String) -> LiveEvent {
+	LiveEvent {
+		refetch_ms: 0,
+		kind: "proposal",
+		repo: repo,
+		number: target,
+		path: "",
+		workflow: "",
+		run_id: 0,
+		attempt: 0,
+		status: status,
+		conclusion: "",
+	}
+}
+
+---
+Why a decision on proposal `id` can't be made: it doesn't exist, it's being
+approved now (`approving`, GitHub not yet answered), it was decided already,
+or it expired. A claim misses a pending proposal only once it has expired.
+---
+fn undecidable(id: Int) -> Effect[HttpResult[ProposalDecided]] given Deliveries {
+	let found <- Deliveries.first("SELECT status FROM proposals WHERE id = ?1", [Integer(id)])
+	match found {
+		Ok(Some(row)) => match Json.decodeSql[ProposalState](row) {
+			Ok(s) => if s.status == "approving" {
+				Effect.pure(Conflict("proposal \(id) is being decided"))
+			} else if s.status == "pending" {
+				Effect.pure(Conflict("proposal \(id) has expired"))
+			} else {
+				Effect.pure(Conflict("proposal \(id) was already \(s.status)"))
+			},
+			Err(_) => Effect.pure(ServerError("could not read the proposal")),
+		},
+		Ok(None) => Effect.pure(NotFound),
+		Err(_) => Effect.pure(ServerError("could not read the proposal")),
+	}
+}
+
+---
+Audits a maintainer's decision in `maintainer_actions`: who, which proposal,
+when, GitHub's status (if it was asked) and what happened. A failure to
+audit is logged, not fatal: the proposal itself records the decision.
+---
+fn auditDecision(
+	login: String,
+	action: String,
+	repo: String,
+	id: Int,
+	at: String,
+	status: Option[Int],
+	outcome: String
+) -> Effect[()] given Deliveries, Logger {
+	let kept <- Deliveries.run(
+		"""
+		INSERT INTO maintainer_actions (login, action, repo, proposal, at, status, outcome, claimed)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
+		""",
+		[
+			Text(login),
+			Text(action),
+			Text(repo),
+			Integer(id),
+			Text(at),
+			integer(status),
+			Text(outcome),
+		]
+	)
+	match kept {
+		Ok(_) => Effect.pure(()),
+		Err(e) => Logger.error(
+			"could not audit \(login)'s \(action) of proposal \(id): \(sqlError(e))"
+		),
+	}
+}
+
+---
+`POST /maintainers/proposals/approve`'s work, for `login`. The proposal is
+claimed first (`pending` and unexpired → `approving`) in one statement, so
+two maintainers, or two clicks, act on it once. Then its action is asked of
+GitHub through the repository's installation, and `settle` records how it
+ended: `approved`, or `failed` with GitHub's reason (not tried again). A
+Worker that dies between the two leaves it `approving`, which shows it.
+---
+fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]] given Deliveries, Logger, Clock, ActionLimit, AppAuth, GitHubHttp, LiveFeed {
+	let allowed <- ActionLimit.allow("action:\(login.toLower())")
+	let true = allowed else { TooManyRequests("too many actions; try again in a minute") }
+	let now <- Clock.now()
+	let at = now.toIso()
+	let claim <- Deliveries.first(
+		"""
+		UPDATE proposals SET status = 'approving', decided_by = ?2, decided_at = ?3
+		WHERE id = ?1 AND status = 'pending' AND expires_at > ?3
+		RETURNING repo, kind, target, payload
+		""",
+		[Integer(id), Text(login), Text(at)]
+	)
+	let Ok(claimed) = claim else match {
+		Err(e) => {
+			let _ <- Logger.error("could not claim proposal \(id) for \(login): \(sqlError(e))")
+			ServerError("could not record the decision; nothing was asked of GitHub")
+		},
+	}
+	let Some(row) = claimed else { undecidable(id) }
+	let Ok(p) = Json.decodeSql[ClaimedProposal](row) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode proposal \(id): \(jsonError(e))")
+			ServerError("could not read the proposal")
+		},
+	}
+	let Ok(payload) = Json.decode[LabelsPayload](p.payload) else match {
+		Err(e) => {
+			let why = "its payload did not decode: \(jsonError(e))"
+			let _ <- settle(id, "failed", why)
+			let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
+			ServerError("proposal \(id) could not be read: \(why)")
+		},
+	}
+	let found <- Deliveries.first(
+		"""
+		SELECT (SELECT d.installation FROM deliveries d
+		        WHERE d.repo = ?1 COLLATE NOCASE AND d.installation IS NOT NULL
+		        ORDER BY d.received_at DESC LIMIT 1) AS installation
+		""",
+		[Text(p.repo)]
+	)
+	let installation: Option[Int] = match found {
+		Ok(Some(r)) => match Json.decodeSql[InstallationOf](r) {
+			Ok(i) => i.installation,
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let Some(inst) = installation else {
+		let why = "no installation of the App has delivered for \(p.repo)"
+		let _ <- settle(id, "failed", why)
+		let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
+		let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "failed"))
+		ServiceUnavailable(why)
+	}
+	let url = "https://api.github.com/repos/\(p.repo)/issues/\(p.target)/labels"
+	let sent <- asApp(inst, (token) => GitHubHttp.post(token, url, Json.encodePlain(payload)))
+	let answer = match sent {
+		Ok(res) => if res.status == 200 {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: "labelled \(joined(payload.labels, ", "))",
+			}
+		} else {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: refusal(res.status, res.body),
+			}
+		},
+		Err(why) => ActionOutcome {
+			status: None,
+			outcome: why,
+		},
+	}
+	let applied = answer.status == Some(200)
+	let status = if applied { "approved" } else { "failed" }
+	let _ <- settle(id, status, answer.outcome)
+	let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, answer.status, answer.outcome)
+	let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, status))
+	let _ <- Logger.info(
+		"\(login) approved proposal \(id) for \(p.repo)#\(p.target): \(answer.outcome)"
+	)
+	if applied {
+		Ok(ProposalDecided {
+			id: id,
+			status: status,
+			message: "Labelled \(p.repo)#\(p.target): \(joined(payload.labels, ", "))",
+		})
+	} else {
+		match answer.status {
+			Some(403) => BadGateway(
+				"GitHub refused the labels (does the App have Issues: Read and write?): \(answer.outcome)"
+			),
+			Some(_) => BadGateway("GitHub refused the labels: \(answer.outcome)"),
+			None => BadGateway(
+				"the App couldn't ask GitHub for the labels; the Worker's log says why"
+			),
+		}
+	}
+}
+
+--- Records how an approved proposal ended: `approved` and what was done, or `failed` and why.
+fn settle(id: Int, status: String, outcome: String) -> Effect[()] given Deliveries, Logger {
+	let kept <- Deliveries.run(
+		"UPDATE proposals SET status = ?2, outcome = ?3 WHERE id = ?1",
+		[Integer(id), Text(status), Text(outcome)]
+	)
+	match kept {
+		Ok(_) => Effect.pure(()),
+		Err(e) => Logger.error("could not record how proposal \(id) ended: \(sqlError(e))"),
+	}
+}
+
+---
+`POST /maintainers/proposals/decline`'s work, for `login`: the proposal, if
+still pending and unexpired, is declined, and nothing is asked of GitHub.
+---
+fn declineProposal(
+	login: String,
+	id: Int
+) -> Effect[HttpResult[ProposalDecided]] given Deliveries, Logger, Clock, ActionLimit, LiveFeed {
+	let allowed <- ActionLimit.allow("action:\(login.toLower())")
+	let true = allowed else { TooManyRequests("too many actions; try again in a minute") }
+	let now <- Clock.now()
+	let at = now.toIso()
+	let decided <- Deliveries.first(
+		"""
+		UPDATE proposals SET status = 'declined', decided_by = ?2, decided_at = ?3, outcome = 'declined'
+		WHERE id = ?1 AND status = 'pending' AND expires_at > ?3
+		RETURNING repo, kind, target, payload
+		""",
+		[Integer(id), Text(login), Text(at)]
+	)
+	let Ok(row) = decided else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decline proposal \(id) for \(login): \(sqlError(e))")
+			ServerError("could not record the decision")
+		},
+	}
+	let Some(r) = row else { undecidable(id) }
+	let Ok(p) = Json.decodeSql[ClaimedProposal](r) else match {
+		Err(e) => {
+			let _ <- Logger.error("could not decode proposal \(id): \(jsonError(e))")
+			ServerError("could not read the proposal")
+		},
+	}
+	let _ <- auditDecision(login, "decline-proposal", p.repo, id, at, None, "declined")
+	let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "declined"))
+	let _ <- Logger.info("\(login) declined proposal \(id) for \(p.repo)#\(p.target)")
+	Ok(ProposalDecided {
+		id: id,
+		status: "declined",
+		message: "Declined: nothing was posted to \(p.repo)#\(p.target)",
+	})
+}
+
+--- The pending, unexpired proposals, oldest first, for Mine.
+fn pendingProposals(
+	now: Instant
+) -> Effect[Result[List[ProposalWaiting], String]] given Deliveries {
+	let rows <- Deliveries.all(
+		"""
+		SELECT id, repo, kind, target, title, payload, reason, proposed_at, expires_at
+		FROM proposals WHERE status = 'pending' AND expires_at > ?1
+		ORDER BY proposed_at, id
+		LIMIT ?2
+		""",
+		[Text(now.toIso()), Integer(MAX_MINE)]
+	)
+	let Ok(text0) = rows else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	let Ok(found) = Json.decodeSql[List[ProposalRow]](text0) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	Effect.pure(Ok(found.map((r) => ProposalWaiting {
+		id: r.id,
+		repo: r.repo,
+		kind: r.kind,
+		target: r.target,
+		title: r.title,
+		labels: match Json.decode[LabelsPayload](r.payload) {
+			Ok(l) => l.labels,
+			Err(_) => [],
+		},
+		reason: r.reason,
+		proposed_at: r.proposed_at,
+		expires_at: r.expires_at,
+	})))
+}
+
+--- Today's Claude calls against the caps, for Mine's footer.
+fn claudeToday(now: Instant) -> Effect[Result[ClaudeToday, String]] given Deliveries, Secrets {
+	let repoCapSet <- Secrets.get("CLAUDE_DAILY_CAP_REPO")
+	let totalCapSet <- Secrets.get("CLAUDE_DAILY_CAP_TOTAL")
+	let row <- Deliveries.first(
+		"SELECT coalesce(sum(calls), 0) AS calls, coalesce(max(calls), 0) AS busiest FROM claude_calls_daily WHERE day = ?1",
+		[Text(now.toIso().slice(0, 10))]
+	)
+	let Ok(found) = row else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	let today = match found {
+		Some(r) => match Json.decodeSql[TodayRow](r) {
+			Ok(t) => t,
+			Err(_) => TodayRow {
+				calls: 0,
+				busiest: 0,
+			},
+		},
+		None => TodayRow {
+			calls: 0,
+			busiest: 0,
+		},
+	}
+	Effect.pure(Ok(ClaudeToday {
+		calls: today.calls,
+		busiest: today.busiest,
+		repo_cap: capOf(repoCapSet, CLAUDE_CAP_REPO),
+		total_cap: capOf(totalCapSet, CLAUDE_CAP_TOTAL),
+	}))
+}
