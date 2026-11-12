@@ -1,7 +1,8 @@
 # Repository settings
 
 Phase 5's features (#69) are switched on, and tuned, per repository by a file
-on its default branch: **`.github/bynk-hooks.yml`**. Settings change by pull
+on its default branch: **`.github/bynk-hooks.yml`**. ([proposals.md](proposals.md) is
+phase 5's overview.) Settings change by pull
 request, with the code they apply to. Every feature is **off** in a
 repository without the file, so the App sends nothing of a repository's to
 Claude, and proposes nothing there, until its maintainers say so.

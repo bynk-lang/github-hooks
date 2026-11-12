@@ -334,7 +334,8 @@ maintainers' board reloads Mine.
 
 Phase 5's features (#69) don't act on GitHub by themselves: each records
 what it would do as a **proposal**, and a maintainer approves or declines it
-(#88, migration `0024`). Nothing is posted until a maintainer approves. The
+(#88, migration `0024`). [proposals.md](proposals.md) is the overview: how
+the pieces fit, and what is sent to Anthropic and kept. Nothing is posted until a maintainer approves. The
 first kind is `labels`: add these labels to that issue or pull request.
 
 - **In Mine:** each pending proposal shows its target, what it would do, the

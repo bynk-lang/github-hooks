@@ -21,6 +21,7 @@ It is two things at once:
 | 2 | Read API over recorded activity, daily digest, retention | released in [v0.2.0](CHANGELOG.md#020---2026-11-07): read API and digest live ([docs](docs/read-api.md)); retention hourly, 90 days ([#6](https://github.com/bynk-lang/github-hooks/issues/6)) |
 | 3 | Act on events through the App's installation token | released in [v0.2.0](CHANGELOG.md#020---2026-11-07): welcoming first-time contributors, live on `bynk-lang/bynk` ([docs](docs/github-app.md#7-let-the-app-act-phase-3)) |
 | 4 | Public dashboard of repository health, CI first ([#20](https://github.com/bynk-lang/github-hooks/issues/20)) | released in [v0.2.0](CHANGELOG.md#020---2026-11-07): run facts recorded; public CI metrics API ([docs](docs/ci-metrics.md)); the CI health page at `/`, updated live over WebSocket, with recent runs and daily trends; PR flow facts recorded and synced daily, a public PR flow API, and the PR flow page at `/prs`, live ([#26](https://github.com/bynk-lang/github-hooks/issues/26), [docs](docs/pr-flow.md)); release facts recorded, synced daily and matched to the pull requests they shipped, a public releases API, and the releases page at `/releases`, live ([#36](https://github.com/bynk-lang/github-hooks/issues/36), [docs](docs/releases.md)); job facts recorded for runner wait, a public runner-wait API computed hourly, and runner wait on the CI health page ([#42](https://github.com/bynk-lang/github-hooks/issues/42), [docs](docs/runners.md)); issue facts recorded and open issues synced daily, a public issue-response API, and the issues page at `/issues`, live ([#48](https://github.com/bynk-lang/github-hooks/issues/48), [docs](docs/issues.md)); maintainer sign-in with GitHub, and the maintainers' figures over private and excluded repositories ([#53](https://github.com/bynk-lang/github-hooks/issues/53), [docs](docs/maintainers.md)); in [v0.3.0](CHANGELOG.md#030---2026-11-08), the maintainers' live board, review requests guarded against out-of-order deliveries, and the maintainers' figures as `GET`s ([#68](https://github.com/bynk-lang/github-hooks/issues/68)) |
+| 5 | The App proposes, maintainers approve ([#69](https://github.com/bynk-lang/github-hooks/issues/69)) | in progress: the foundations are on `main` ([#88](https://github.com/bynk-lang/github-hooks/issues/88), [docs](docs/proposals.md)): repository settings, the proposals queue in Mine, and the Claude capability with daily caps. No feature proposes yet |
 
 ## How it works
 
@@ -216,6 +217,8 @@ docs/releases.md         releases: facts, matching, the daily sync, routes, the 
 docs/runners.md          runner wait: job facts, how long they're kept, routes, the page
 docs/issues.md           issue response: issue facts, how they're kept, the daily sync, routes, the page and live feed
 docs/maintainers.md      the maintainers view: GitHub sign-in, routes, settings
+docs/proposals.md        phase 5: the App's proposals, what's sent to Anthropic and kept, turning it on and off
+docs/settings.md         a repository's .github/bynk-hooks.yml: its keys, how it's read, its problems in Mine
 ```
 
 ## The Bynk canary
