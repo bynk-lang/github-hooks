@@ -174,5 +174,5 @@ cron does the pruning.
   that's already set. Each call is then recorded as `capped`, and nothing is
   sent.
 
-However it's turned off, pending proposals stay in Mine until they're decided or
-expire.
+However it's turned off, pending proposals stay in Mine until they're
+decided or expire.
