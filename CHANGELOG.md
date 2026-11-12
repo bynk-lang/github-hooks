@@ -8,6 +8,18 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Phase 5's overview (#88, step 4), in `docs/proposals.md`. It covers:
+  - how a feature, a repository's settings, the daily caps, Claude, the
+    proposal and a maintainer's decision fit together;
+  - what is sent to Anthropic and when: only for a repository whose
+    `.github/bynk-hooks.yml` turns a Claude feature on, private ones
+    included, with anyone's text in the user turn, never the system prompt;
+  - what is kept and for how long (the text sent to Claude isn't);
+  - how to turn it on, and off, for one feature, one repository or every
+    call.
+
+  The README lists phase 5 as in progress, with the foundations (#88) on
+  `main`.
 - Repository settings (#88, step 3): `.github/bynk-hooks.yml` on a
   repository's default branch turns phase 5's features on and tunes them
   (`triage`, `nudges`, `release_notes`; [settings.md](docs/settings.md)). No
@@ -73,7 +85,7 @@ All notable changes to github-hooks. The format follows
 
 - Built and tested with Bynk v0.562.0. Nothing in the Worker changes but one
   name: `JsonError` is now `DecodeError`, the error of `Json.decode` and the
-  new `Yaml.decode` (bynk-lang/bynk#3214), which #88's settings file will use.
+  new `Yaml.decode` (bynk-lang/bynk#3214), which #88's settings file uses.
   Of the release's breaking changes, `MalformedForm` and the refusal of store
   writes in `parTraverse` closures touch nothing here, and wrangler 4.159.0
   (pinned) is past the new 4.120.1 minimum. The live boards' duplicate-id
@@ -100,10 +112,11 @@ All notable changes to github-hooks. The format follows
     says so, and covers `bynk revert` and when it refuses (#3073);
   - `docs/pr-flow.md` links Bynk's guide to applying out-of-order events
     (#3071).
-- wrangler (4.159.0) and TypeScript (6.0.2) are pinned in `package.json`, and
-  CI installs them with `npm ci`: `bynk dev`, and so the smoke run, serves with
-  that wrangler rather than the latest from `npx`, so a new local runtime (as
-  in #84) arrives as a Dependabot pull request whose smoke run tests it.
+- wrangler (4.159.0) and TypeScript (6.0.2, since moved to 7.0.2 by #86) are
+  pinned in `package.json`, and CI installs them with `npm ci`: `bynk dev`,
+  and so the smoke run, serves with that wrangler rather than the latest from
+  `npx`, so a new local runtime (as in #84) arrives as a Dependabot pull
+  request whose smoke run tests it.
 
 ### Fixed
 
