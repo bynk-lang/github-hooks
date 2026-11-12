@@ -132,8 +132,9 @@ records that, and which model answered. Haiku 5.5 has no fallback.
 | Each decision: who, which proposal, GitHub's status and what happened | `maintainer_actions` | kept |
 | What each repository's settings file said when last read | `repo_settings` | kept, one row per repository; Mine shows the last 7 days |
 
-The text sent to Claude (an issue's body, say) is **not** kept, and neither
-is Claude's reply beyond what the proposal holds. The logs name the feature,
+The App does **not** keep the text it sends to Claude (an issue's body,
+say), nor Claude's reply beyond what the proposal holds. What Anthropic
+keeps of a request is set by its API terms ([above](#what-is-sent-to-anthropic-and-when)). The logs name the feature,
 the repository and the outcome, never the material. The hourly `retention`
 cron does the pruning.
 
