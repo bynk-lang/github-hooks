@@ -245,3 +245,33 @@ case "review-request tombstones older than a day go (#68)" {
 	expect kept == Ok("[{\"number\":2}]")
 	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, 1 review-request tombstones"
 }
+
+case "Claude calls go after 90 days, and the daily claims after a week (#88)" {
+	let _ <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: """
+					INSERT INTO claude_calls (id, at, repo, feature, model, outcome) VALUES
+					  (1, '2026-08-06T23:59:59.999Z', 'bynk-lang/bynk', 'triage', 'claude-haiku-5-5', 'answered'),
+					  (2, '2026-08-07T00:00:00.000Z', 'bynk-lang/bynk', 'triage', 'claude-haiku-5-5', 'answered')
+				""",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO claude_calls_daily (repo, day, calls) VALUES
+					  ('bynk-lang/bynk', '2026-10-28', 4),
+					  ('bynk-lang/bynk', '2026-10-29', 2)
+				""",
+				params: [],
+			},
+		]
+	)
+	let r <- retention.schedule("23 * * * *", nowMs())
+	expect r is Ok(_)
+	let calls <- Deliveries.all("SELECT id FROM claude_calls ORDER BY id", [])
+	expect calls == Ok("[{\"id\":2}]")
+	let days <- Deliveries.all("SELECT day FROM claude_calls_daily ORDER BY day", [])
+	expect days == Ok("[{\"day\":\"2026-10-29\"}]")
+	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 0 actions, 1 Claude calls and 1 days of Claude claims"
+}

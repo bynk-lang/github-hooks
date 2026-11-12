@@ -6,6 +6,31 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The Claude capability (#88, step 1), for phase 5's features (#69); none
+  calls it yet. `askClaude` makes one Messages API request through
+  `AnthropicHttp` (raw HTTP, so the suites stub it at the wire), with
+  `anthropic-version: 2026-10-21`:
+  - the feature's instructions are a cached system block, and the material to
+    work on (anyone's text) is the user turn, as a JSON string;
+  - the reply's shape is a JSON schema in `output_config.format`, with the
+    feature's effort; `temperature` is never sent;
+  - on Opus 5.5, the server-side fallback on a refusal (`fallbacks: "default"`,
+    with its beta header);
+  - `stop_reason` is read before the content: a refusal (with its category)
+    and a reply cut off at `max_tokens` are outcomes of their own.
+
+  Each call is claimed first against two daily caps, per repository and in
+  total (`CLAUDE_DAILY_CAP_REPO`, default 50, and `CLAUDE_DAILY_CAP_TOTAL`,
+  default 200), in one statement (migration `0023`, `claude_calls_daily`); past
+  either, nothing is sent. A call that gets no answer gives its claim back.
+  Every call is recorded in `claude_calls`: the model asked and the model that
+  answered, the stop reason, the token usage (cache reads and writes too) and
+  the outcome. Without `ANTHROPIC_API_KEY` nothing is claimed or sent.
+  Retention keeps calls 90 days and the claims a week. `deploy.yml` passes the
+  three new optional settings.
+
 ### Changed
 
 - Built and tested with Bynk v0.562.0. Nothing in the Worker changes but one

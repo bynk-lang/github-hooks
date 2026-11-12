@@ -48,6 +48,9 @@ Set these under *Settings → Environments → production → Environment secret
 | `ACTION_REPOS` | optional: see [github-app.md](github-app.md) step 7 |
 | `DASHBOARD_EXCLUDE` | optional |
 | `WELCOME_ASSOCIATIONS` | optional |
+| `ANTHROPIC_API_KEY` | optional: the Claude API key for #69's features. Without it no feature calls Claude. Give the key a spend limit in the Anthropic Console too |
+| `CLAUDE_DAILY_CAP_REPO` | optional: Claude calls a repository may make in a UTC day (default 50; 0 stops them) |
+| `CLAUDE_DAILY_CAP_TOTAL` | optional: Claude calls across every repository in a UTC day (default 200) |
 
 Enter each value exactly as it is in `.secrets.env`, on one line, without
 quotes, and delete `.secrets.env` once they're in. Each value becomes one line
