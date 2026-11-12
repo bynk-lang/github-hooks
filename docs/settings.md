@@ -67,14 +67,25 @@ refuses the read with a `403`, every feature is off there, and Mine names the
 permission.
 
 - **Cached for a day.** The file's text (or that there's none) is kept in KV
-  (`settings:<owner>/<repo>`, lower case) for 24 hours. A read GitHub refuses
-  isn't cached, so the next feature to ask tries again.
+  (`settings:<owner>/<repo>`, lower case) for 24 hours.
+- **A refusal is remembered for ten minutes.** A file GitHub won't give, or
+  that isn't a file of text, isn't cached, but it's remembered
+  (`settings-unreadable:<owner>/<repo>`) for ten minutes. In that time every
+  feature takes the settings as off without asking GitHub, so a repository
+  without the permission costs one read every ten minutes, not one on every
+  delivery.
 - **Read again on a push.** A `push` to the default branch with a commit that
-  adds, changes or removes the file drops the cached copy and reads the file
-  at once, so Mine shows a refused file while its author is still looking.
-  GitHub lists at most 20 commits in a `push`, so a push of 20 or more counts
-  too. KV takes up to a minute to forget a value everywhere, so a feature
-  may see the old settings for that long.
+  adds, changes or removes the file drops both, and reads the file at once,
+  so Mine shows a refused file while its author is still looking.
+  - It reads the file **at the pushed commit** (`?ref=<after>`): GitHub can
+    briefly answer for a branch as it was before a push it has just
+    announced.
+  - That read is kept for ten minutes, not a day, in case the delivery of a
+    later push arrived first.
+  - GitHub lists at most 20 commits in a `push`, so a push of 20 or more
+    counts too.
+  - KV takes up to a minute to forget a value everywhere, so a feature may
+    see the old settings for that long.
 - **Recorded for Mine.** Each read from GitHub rewrites the repository's row
   in `repo_settings` (migration `0025`): `missing`, `decoded` (with any keys
   ignored), `invalid` (with the decoder's reason) or `unreadable` (with
@@ -84,7 +95,10 @@ permission.
 
 `GET /maintainers/mine` has **`settings`**: the repositories whose file is
 `invalid` or `unreadable`, or `decoded` with keys the App ignored, by name
-([maintainers.md](maintainers.md#whats-yours)). Every signed-in page shows
+([maintainers.md](maintainers.md#whats-yours)). Only reads in the last
+seven days count. A file in use is read at least daily, so an older row is a
+repository nothing asks about any more: one the App was removed from, or that
+was renamed or deleted. Every signed-in page shows
 them near the top, under **Settings files to fix**, each linked to its file.
 They're every maintainer's, like the proposals. A file that's fixed leaves
 the list when the push that fixes it is read.

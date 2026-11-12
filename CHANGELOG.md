@@ -16,14 +16,17 @@ All notable changes to github-hooks. The format follows
   - **Reading:** `Yaml.decode` into a typed record, through the contents API
     as the repository's installation (**Contents: Read-only**, which the App
     already has for `push` and `release`).
-  - **Caching:** the file's text is kept in KV for a day. A push to the
-    default branch that adds, changes or removes the file drops it and reads
-    the file again at once.
+  - **Caching:** the file's text is kept in KV for a day. A file GitHub
+    won't give is remembered for ten minutes, so it isn't asked for on every
+    delivery. A push to the default branch that adds, changes or removes the
+    file drops both and reads the file again at once, at the pushed commit,
+    keeping that read for ten minutes.
   - **Mine:** each read is recorded (migration `0025`, `repo_settings`), and
     Mine's new `settings` lists a file that was refused (with the decoder's
     reason and where), one GitHub wouldn't give (naming the permission), and
-    keys the App ignored, which are found by reading the file's text. Every
-    signed-in page shows them under **Settings files to fix**.
+    keys the App ignored, which are found by reading the file's text. Only
+    reads from the last seven days count. Every signed-in page shows them
+    under **Settings files to fix**.
 - The App's proposals (#88, step 2): what a phase 5 feature would do,
   waiting on a maintainer (migration `0024`, `proposals`). Mine shows them
   on every page under **Proposed by the App**, with **Approve** and

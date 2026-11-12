@@ -11,6 +11,9 @@ stub AppAuth.token(_) returns Ok("ghs_test")
 
 const CONTENTS: String = "https://api.github.com/repos/bynk-lang/secret/contents/.github/bynk-hooks.yml"
 
+--- The file at the commit the test pushes leave `main` at.
+const PUSHED: String = "https://api.github.com/repos/bynk-lang/secret/contents/.github/bynk-hooks.yml?ref=c0ffee"
+
 fn seed() -> List[SqlStatement] {
 	[
 		SqlStatement {
@@ -247,15 +250,16 @@ case "no file is every feature off, cached and recorded as missing" {
 	expect row == Ok(Some(Recorded { state: "missing", detail: None, unknown: "[]" }))
 }
 
-case "a file GitHub won't give is every feature off, not cached, and names the permission" {
+case "a file GitHub won't give is every feature off, remembered for ten minutes, and names the permission" {
 	stub GitHubHttp.get(_, _) returns answer(403, "{\"message\": \"Resource not accessible by integration\"}")
 	let first <- settingsFor(42, "bynk-lang/secret")
-	let again <- settingsFor(42, "bynk-lang/secret")
+	let again <- settingsFor(42, "bynk-lang/Secret")
 	expect first == offSettings()
 	expect again == offSettings()
-	// Each read tries twice (the second with a fresh token), and the second read asks again.
-	expect GitHubHttp.get called 4 times
-	expect Tokens.putTtl never called
+	// The read tries twice (the second with a fresh token); the second ask doesn't read.
+	expect GitHubHttp.get called 2 times
+	expect Tokens.putTtl called once
+	expect Tokens.putTtl called with key == "settings-unreadable:bynk-lang/secret" && ttlSeconds == 600
 	let row <- Deliveries.firstAs[Recorded](RECORDED, [])
 	expect row == Ok(Some(Recorded {
 		state: "unreadable",
@@ -274,7 +278,7 @@ case "GitHub's other refusals, and no answer, are recorded as they came" {
 		detail: Some("500 Server Error"),
 		unknown: "[]",
 	}))
-	let _ <- settingsFor(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let after <- Deliveries.firstAs[Recorded](RECORDED, [])
 	expect after == Ok(Some(Recorded {
 		state: "unreadable",
@@ -285,36 +289,36 @@ case "GitHub's other refusals, and no answer, are recorded as they came" {
 
 case "a directory, a file over 1 MB, and bytes that aren't base64 or text are refused" {
 	stub GitHubHttp.get(_, _) returns each [answer(200, "[{\"name\": \"x\"}]"), answer(200, "{\"encoding\": \"none\", \"content\": \"\"}"), contents("not base64!"), contents("/w==")]
-	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let dir <- Deliveries.firstAs[Recorded](RECORDED, [])
 	expect dir == Ok(Some(Recorded {
 		state: "invalid",
 		detail: Some(".github/bynk-hooks.yml is not a file"),
 		unknown: "[]",
 	}))
-	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let big <- Deliveries.firstAs[Recorded](RECORDED, [])
 	expect big == Ok(Some(Recorded {
 		state: "invalid",
 		detail: Some(".github/bynk-hooks.yml is over 1 MB"),
 		unknown: "[]",
 	}))
-	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let garbled <- Deliveries.firstAs[Recorded](RECORDED, [])
 	expect garbled == Ok(Some(Recorded {
 		state: "unreadable",
 		detail: Some("GitHub's copy of .github/bynk-hooks.yml is not base64"),
 		unknown: "[]",
 	}))
-	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let binary <- Deliveries.firstAs[Recorded](RECORDED, [])
 	expect binary == Ok(Some(Recorded {
 		state: "invalid",
 		detail: Some(".github/bynk-hooks.yml is not UTF-8 text"),
 		unknown: "[]",
 	}))
-	// None of those is cached.
-	expect Tokens.putTtl never called
+	// None of those is cached as the file, but each is remembered for ten minutes.
+	expect Tokens.putTtl called 4 times with key == "settings-unreadable:bynk-lang/secret" && ttlSeconds == 600
 }
 
 // Mine.
@@ -323,10 +327,10 @@ case "Mine lists a refused file with why, and a file with keys the App ignored" 
 	stub GitHubHttp.get(_, _) returns each [badFile(), misspeltFile(), goodFile(), answer(404, "{\"message\": \"Not Found\"}")]
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
-	let _ <- fetchSettings(42, "bynk-lang/secret")
-	let _ <- fetchSettings(42, "bynk-lang/bynk")
-	let _ <- fetchSettings(42, "bynk-lang/fine")
-	let _ <- fetchSettings(42, "bynk-lang/none")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
+	let _ <- fetchSettings(42, "bynk-lang/bynk", None)
+	let _ <- fetchSettings(42, "bynk-lang/fine", None)
+	let _ <- fetchSettings(42, "bynk-lang/none", None)
 	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
 	let Ok(m) = r else {
 		expect false
@@ -347,17 +351,32 @@ case "Mine lists a refused file with why, and a file with keys the App ignored" 
 	expect bad.detail.getOrElse("").startsWith("RefinementViolation at $.nudges.after_days: ")
 }
 
+case "Mine leaves out a problem not read for a week: a repository nothing asks about any more" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let rows <- Deliveries.run(
+		"INSERT INTO repo_settings (repo, read_at, state, detail, unknown) VALUES ('bynk-lang/gone', '2026-10-29T11:59:59.999Z', 'unreadable', '404 Not Found', '[]'), ('bynk-lang/quiet', '2026-10-29T12:00:00.000Z', 'invalid', 'Malformed at $: …', '[]')",
+		[]
+	)
+	expect rows is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.settings.map((p) => p.repo) == ["bynk-lang/quiet"]
+}
+
 case "Mine lists a file GitHub won't give, and a read that mends it drops it" {
 	stub GitHubHttp.get(_, _) returns each [answer(403, "{\"message\": \"Resource not accessible by integration\"}"), answer(403, "{\"message\": \"Resource not accessible by integration\"}"), goodFile()]
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
-	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let before <- api.GET("/maintainers/mine") by Maintainer("accuser")
 	let Ok(b) = before else {
 		expect false
 	}
 	expect b.settings.map((p) => p.state) == ["unreadable"]
-	let _ <- fetchSettings(42, "bynk-lang/secret")
+	let _ <- fetchSettings(42, "bynk-lang/secret", None)
 	let after <- api.GET("/maintainers/mine") by Maintainer("accuser")
 	let Ok(a) = after else {
 		expect false
@@ -375,7 +394,7 @@ fn pushHeaders(id: String) -> RequestHeaders {
 --- A push of `commits` (JSON) to `ref` of `bynk-lang/secret`, whose default branch is `main`, by installation 42.
 fn push(ref: String, commits: String) -> Bytes {
 	Bytes.fromUtf8(
-		"{\"ref\": \"\(ref)\", \"repository\": {\"full_name\": \"bynk-lang/secret\", \"private\": true, \"default_branch\": \"main\"}, \"installation\": {\"id\": 42}, \"commits\": \(commits)}"
+		"{\"ref\": \"\(ref)\", \"repository\": {\"full_name\": \"bynk-lang/secret\", \"private\": true, \"default_branch\": \"main\"}, \"after\": \"c0ffee\", \"installation\": {\"id\": 42}, \"commits\": \(commits)}"
 	)
 }
 
@@ -401,13 +420,32 @@ case "a push to the default branch that changes the file drops the cache and rea
 		pushHeaders("push-1"),
 		push("refs/heads/main", "[\(commit(ELSEWHERE, "", "")), \(commit("", TOUCHED, ""))]")
 	) by GitHub
-	expect Tokens.delete called once with key == "settings:bynk-lang/secret"
-	expect GitHubHttp.get called 2 times with url == CONTENTS
+	expect Tokens.delete called with key == "settings:bynk-lang/secret"
+	expect Tokens.delete called with key == "settings-unreadable:bynk-lang/secret"
+	expect GitHubHttp.get called with url == CONTENTS
+	// Read at the pushed commit, which GitHub can't answer with the file as it was.
+	expect GitHubHttp.get called with url == PUSHED
 	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.repo == "bynk-lang/secret" && e.status == "invalid"
+	// Kept only ten minutes, in case a later push's delivery came first.
+	expect Tokens.putTtl called with key == "settings:bynk-lang/secret" && ttlSeconds == 600 && value.startsWith("nudges:")
 	// The new file is what the next feature reads, from the cache.
 	let s <- settingsFor(42, "bynk-lang/secret")
 	expect s == offSettings()
 	expect GitHubHttp.get called 2 times
+}
+
+case "a push that changes the file forgets a refusal, so the file is read at once" {
+	stub GitHubHttp.get(_, _) returns each [answer(403, "{\"message\": \"Resource not accessible by integration\"}"), answer(403, "{\"message\": \"Resource not accessible by integration\"}"), goodFile()]
+	let _ <- settingsFor(42, "bynk-lang/secret")
+	let _ <- api.POST(
+		"/github",
+		pushHeaders("push-mend"),
+		push("refs/heads/main", "[\(commit("", TOUCHED, ""))]")
+	) by GitHub
+	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.status == "decoded"
+	let s <- settingsFor(42, "bynk-lang/secret")
+	expect s.nudges.after_days == 5
+	expect GitHubHttp.get called 3 times
 }
 
 case "adding or removing the file counts too" {
@@ -422,7 +460,7 @@ case "adding or removing the file counts too" {
 		pushHeaders("push-rm"),
 		push("refs/heads/main", "[\(commit("", "", TOUCHED))]")
 	) by GitHub
-	expect Tokens.delete called 2 times with key == "settings:bynk-lang/secret"
+	expect Tokens.delete called 4 times
 	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.status == "decoded"
 	expect LiveFeed.publishMaintainers called once with e.kind == "settings" && e.status == "missing"
 }
@@ -435,7 +473,7 @@ case "a push with as many commits as GitHub lists may hide the file, so it count
 		pushHeaders("push-big"),
 		push("refs/heads/main", "[\(joined(twenty, ", "))]")
 	) by GitHub
-	expect GitHubHttp.get called once with url == CONTENTS
+	expect GitHubHttp.get called once with url == PUSHED
 	let nineteen = elsewhere(19)
 	let _ <- api.POST(
 		"/github",
@@ -473,10 +511,10 @@ case "a push without an installation drops the cache, and the next feature reads
 		"/github",
 		pushHeaders("push-noinst"),
 		Bytes.fromUtf8(
-			"{\"ref\": \"refs/heads/main\", \"repository\": {\"full_name\": \"bynk-lang/secret\", \"default_branch\": \"main\"}, \"commits\": [\(commit("", TOUCHED, ""))]}"
+			"{\"ref\": \"refs/heads/main\", \"repository\": {\"full_name\": \"bynk-lang/secret\", \"default_branch\": \"main\"}, \"after\": \"c0ffee\", \"commits\": [\(commit("", TOUCHED, ""))]}"
 		)
 	) by GitHub
-	expect Tokens.delete called once with key == "settings:bynk-lang/secret"
+	expect Tokens.delete called with key == "settings:bynk-lang/secret"
 	expect GitHubHttp.get never called
 	expect LiveFeed.publishMaintainers never called
 }

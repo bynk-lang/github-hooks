@@ -116,7 +116,7 @@ fn mine(login: String) -> Effect[HttpResult[Mine]] given Deliveries, Logger, Clo
 	let Ok(proposals) <- pendingProposals(now) else match {
 		Err(why) => mineFailed("proposals", login, why),
 	}
-	let Ok(settings) <- settingsProblems() else match {
+	let Ok(settings) <- settingsProblems(now) else match {
 		Err(why) => mineFailed("settings", login, why),
 	}
 	let Ok(claude) <- claudeToday(now) else match {

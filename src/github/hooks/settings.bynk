@@ -7,15 +7,31 @@ is the backstop for a push the App never heard of.
 ---
 const SETTINGS_CACHE_SECONDS: Int = 86400
 
+---
+How long a read that may be out of date is kept: one of the commit a push
+named, in case a later push's delivery came first, and a file the App
+couldn't read as text (GitHub wouldn't give it, or it isn't a file of text),
+so a repository without the permission costs a read every ten minutes rather
+than on every feature's ask. KV keeps nothing for less
+than a minute.
+---
+const SETTINGS_BRIEF_SECONDS: Int = 600
+
 --- Where a repository's settings file is cached in `Tokens`: its text, or `""` when it has none.
 fn settingsKey(repo: String) -> String {
 	"settings:\(repo.toLower())"
 }
 
+--- Where `Tokens` remembers, briefly, that the App couldn't read a repository's file as text.
+fn unreadableKey(repo: String) -> String {
+	"settings-unreadable:\(repo.toLower())"
+}
+
 ---
 The settings `repo`'s `.github/bynk-hooks.yml` gives (#88), as installation
 `installation` reads them: from `Tokens` when they're cached, otherwise from
-GitHub. Every feature is off for a repository with no file, an empty one, one
+GitHub's default branch. A file the App couldn't read as text in the
+last `SETTINGS_BRIEF_SECONDS` isn't asked for again. Every feature is off for a repository with no file, an empty one, one
 that's refused, or one GitHub won't give the App. Each feature asks for these
 when it needs them.
 ---
@@ -24,13 +40,13 @@ fn settingsFor(
 	repo: String
 ) -> Effect[RepoSettings] given Tokens, Deliveries, Logger, Clock, AppAuth, GitHubHttp {
 	let cached <- Tokens.get(settingsKey(repo))
-	match cached {
-		Some(text) => Effect.pure(settingsOf(readSettings(text))),
-		None => {
-			let file <- fetchSettings(installation, repo)
-			Effect.pure(settingsOf(file))
-		},
+	let Some(text) = cached else {
+		let refused <- Tokens.get(unreadableKey(repo))
+		let None = refused else { Effect.pure(offSettings()) }
+		let file <- fetchSettings(installation, repo, None)
+		Effect.pure(settingsOf(file))
 	}
+	Effect.pure(settingsOf(readSettings(text)))
 }
 
 --- The contents API's answer for a file. `encoding` is `base64` for one of up to 1 MB, and `none` past that.
@@ -40,17 +56,27 @@ type ContentsFile = {
 }
 
 ---
-Reads `repo`'s settings file from its default branch through the contents
-API, which needs the App's **Contents: Read** permission, and records what it
-said in `repo_settings`, for Mine. The file's text (or `""` for no file) is
-cached for `SETTINGS_CACHE_SECONDS`. A file GitHub won't give is not cached,
-so the next feature to ask tries again.
+Reads `repo`'s settings file through the contents API, which needs the App's
+**Contents: Read** permission, and records what it said in `repo_settings`,
+for Mine. It reads the default branch, or commit `at` when given: a push's,
+since GitHub may briefly answer for a branch as it was before a push it has
+just announced.
+
+The file's text (or `""` for no file) is cached for `SETTINGS_CACHE_SECONDS`,
+or `SETTINGS_BRIEF_SECONDS` when read at a commit. A file GitHub won't give,
+or that isn't a file of text, is remembered for `SETTINGS_BRIEF_SECONDS`
+instead.
 ---
 fn fetchSettings(
 	installation: Int,
-	repo: String
+	repo: String,
+	at: Option[String]
 ) -> Effect[SettingsFile] given Tokens, Deliveries, Logger, Clock, AppAuth, GitHubHttp {
-	let url = "https://api.github.com/repos/\(repo)/contents/\(SETTINGS_PATH)"
+	let pinned = match at {
+		Some(sha) => "?ref=\(sha)",
+		None => "",
+	}
+	let url = "https://api.github.com/repos/\(repo)/contents/\(SETTINGS_PATH)\(pinned)"
 	let sent <- asApp(installation, (token) => GitHubHttp.get(token, url))
 	let fetched: Result[String, SettingsFile] = match sent {
 		Err(why) => Err(unreadableSettings(why)),
@@ -71,8 +97,12 @@ fn fetchSettings(
 		Err(f) => f,
 	}
 	let _ <- match fetched {
-		Ok(text) => Tokens.putTtl(settingsKey(repo), text, SETTINGS_CACHE_SECONDS),
-		Err(_) => Effect.pure(()),
+		Ok(text) => Tokens.putTtl(settingsKey(repo), text, if at.isSome() {
+			SETTINGS_BRIEF_SECONDS
+		} else {
+			SETTINGS_CACHE_SECONDS
+		}),
+		Err(_) => Tokens.putTtl(unreadableKey(repo), "", SETTINGS_BRIEF_SECONDS),
 	}
 	let _ <- recordSettings(repo, file)
 	Effect.pure(file)
@@ -123,8 +153,14 @@ fn recordSettings(repo: String, file: SettingsFile) -> Effect[()] given Deliveri
 --- The parts of a `push` delivery that say whether it changed the settings file.
 type SettingsPush = {
 	ref: String,
+	after: String,
 	repository: PushedRepo,
 	commits: List[PushedCommit] = [],
+}
+
+type PushedSettings = {
+	repo: String,
+	after: String,
 }
 
 type PushedRepo = {
@@ -147,9 +183,9 @@ const PUSH_COMMITS_LISTED: Int = 20
 ---
 Whether a `push` delivery changed `repo`'s settings file: a push to its
 default branch with a commit that adds, changes or removes the file. Answers
-the repository when it did.
+the repository, and the commit the branch was left at, when it did.
 ---
-fn settingsPushed(body: Bytes) -> Option[String] {
+fn settingsPushed(body: Bytes) -> Option[PushedSettings] {
 	let Some(text) = body.decodeUtf8() else { None }
 	let Ok(p) = Json.decode[SettingsPush](text) else { None }
 	let Some(branch) = p.repository.default_branch else { None }
@@ -158,24 +194,29 @@ fn settingsPushed(body: Bytes) -> Option[String] {
 		|| p.commits.any((c) => c.added.any((f) => f == SETTINGS_PATH)
 			|| c.modified.any((f) => f == SETTINGS_PATH)
 			|| c.removed.any((f) => f == SETTINGS_PATH))
-	if touched { Some(p.repository.full_name) } else { None }
+	if touched {
+		Some(PushedSettings { repo: p.repository.full_name, after: p.after })
+	} else {
+		None
+	}
 }
 
 ---
-A push that changed a repository's settings file (#88): the cached copy is
-dropped, and the file read again at once, so Mine shows a refused file while
-its author is still looking. Open maintainers' pages hear of it and reload
-Mine.
+A push that changed a repository's settings file (#88): the cached copy (and
+any memory of a refusal) is dropped, and the file read again at once, at the
+pushed commit, so Mine shows a refused file while its author is still
+looking. Open maintainers' pages hear of it and reload Mine.
 ---
 fn rereadSettings(
 	d: Delivery,
 	body: Bytes
 ) -> Effect[()] given Tokens, Deliveries, Logger, Clock, AppAuth, GitHubHttp, LiveFeed {
-	let Some(repo) = settingsPushed(body) else { Effect.pure(()) }
-	let _ <- Tokens.delete(settingsKey(repo))
+	let Some(pushed) = settingsPushed(body) else { Effect.pure(()) }
+	let _ <- Tokens.delete(settingsKey(pushed.repo))
+	let _ <- Tokens.delete(unreadableKey(pushed.repo))
 	let Some(installation) = d.installation else { Effect.pure(()) }
-	let file <- fetchSettings(installation, repo)
-	LiveFeed.publishMaintainers(settingsEvent(repo, file))
+	let file <- fetchSettings(installation, pushed.repo, Some(pushed.after))
+	LiveFeed.publishMaintainers(settingsEvent(pushed.repo, file))
 }
 
 fn settingsEvent(repo: String, file: SettingsFile) -> LiveEvent {
@@ -209,6 +250,9 @@ fn settingsState(file: SettingsFile) -> String {
 	}
 }
 
+--- How long a settings file's problem stays in Mine without the file being read again.
+const SETTINGS_SHOWN: Duration = 7.days
+
 type SettingsRow = {
 	repo: String,
 	state: String,
@@ -217,16 +261,25 @@ type SettingsRow = {
 	read_at: String,
 }
 
---- The repositories whose settings file needs a maintainer, for Mine: refused, unreadable, or with keys the App ignored.
-fn settingsProblems() -> Effect[Result[List[SettingsProblem], String]] given Deliveries {
+---
+The repositories whose settings file needs a maintainer, for Mine: refused,
+unreadable, or with keys the App ignored, as read in the last
+`SETTINGS_SHOWN`. A file in use is read at least daily, so an older row is a
+repository nothing asks about any more: one the App was removed from, or
+that was renamed or deleted.
+---
+fn settingsProblems(
+	now: Instant
+) -> Effect[Result[List[SettingsProblem], String]] given Deliveries {
 	let rows <- Deliveries.all(
 		"""
 		SELECT repo, state, detail, unknown, read_at FROM repo_settings
-		WHERE state IN ('invalid', 'unreadable') OR (state = 'decoded' AND unknown != '[]')
+		WHERE (state IN ('invalid', 'unreadable') OR (state = 'decoded' AND unknown != '[]'))
+		  AND read_at >= ?2
 		ORDER BY repo
 		LIMIT ?1
 		""",
-		[Integer(MAX_MINE)]
+		[Integer(MAX_MINE), Text((now - SETTINGS_SHOWN).toIso())]
 	)
 	let Ok(text) = rows else match {
 		Err(e) => Effect.pure(Err(sqlError(e))),

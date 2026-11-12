@@ -305,8 +305,9 @@ most 50.
 - **`claude`:** today's Claude calls (UTC) across every repository, the
   busiest repository's, and the caps they're held to (#88).
 - **`settings`:** the repositories whose `.github/bynk-hooks.yml` needs a
-  maintainer: refused, unreadable, or with keys the App ignored, by name
-  (#88, [settings.md](settings.md#in-mine)). They're every maintainer's too.
+  maintainer: refused, unreadable, or with keys the App ignored, as read in
+  the last seven days, by name (#88, [settings.md](settings.md#in-mine)).
+  They're every maintainer's too.
 
 It's the maintainer's alone, so it isn't shared like the figures, but it
 counts against their per-login limit. Every list reads by an index on the
