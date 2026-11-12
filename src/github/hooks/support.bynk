@@ -33,7 +33,7 @@ fn retentionFailed(what: String, e: SqlError) -> Effect[Result[(), String]] give
 Why rows did not decode, for the log: `StructuralMismatch at $[0].size:
 expected number, got string`.
 ---
-fn jsonError(e: JsonError) -> String {
+fn jsonError(e: DecodeError) -> String {
 	"\(e.kind) at \(e.path): \(e.message)"
 }
 
