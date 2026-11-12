@@ -61,17 +61,36 @@ service retention from cron {
 		) else match {
 			Err(e) => retentionFailed("review-request tombstones", e),
 		}
+		// Claude calls (#88): their records are kept as long as deliveries, in
+		// batches; the daily claims only a week, as the caps read today alone.
+		let Ok(calls) <- Deliveries.run(
+			"""
+			DELETE FROM claude_calls WHERE rowid IN (
+			  SELECT rowid FROM claude_calls WHERE at < ?1 ORDER BY at LIMIT ?2
+			)
+			""",
+			[Text(c.deliveries), Integer(RETENTION_BATCH)]
+		) else match {
+			Err(e) => retentionFailed("Claude calls", e),
+		}
+		let Ok(claims) <- Deliveries.run(
+			"DELETE FROM claude_calls_daily WHERE day < ?1",
+			[Text((Instant.fromEpochMillis(at) - 7.days).toIso().slice(0, 10))]
+		) else match {
+			Err(e) => retentionFailed("Claude daily claims", e),
+		}
 		let Ok(jobs) <- rollUpJobDay(c.jobDays) else match {
 			Err(why) => {
 				let _ <- Logger.error(why)
 				Err(why)
 			},
 		}
-		let removed = progress.changes + expired.changes + acted.changes + settled.changes + jobs.pruned
+		let removed = progress.changes + expired.changes + acted.changes + settled.changes + calls.changes + claims.changes + jobs.pruned
 		let true = removed > 0 else { Ok(()) }
 		let more = progress.changes == RETENTION_BATCH
 			|| expired.changes == RETENTION_BATCH
 			|| acted.changes == RETENTION_BATCH
+			|| calls.changes == RETENTION_BATCH
 		let rolled = if jobs.pruned > 0 {
 			", and rolled up and pruned \(jobs.pruned) jobs of \(jobs.day)"
 		} else {
@@ -82,8 +101,13 @@ service retention from cron {
 		} else {
 			""
 		}
+		let claude = if calls.changes + claims.changes > 0 {
+			", \(calls.changes) Claude calls and \(claims.changes) days of Claude claims"
+		} else {
+			""
+		}
 		let _ <- Logger.info(
-			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(tombstones)\(rolled)\(if more { "; more remain for the next run" } else { "" })"
+			"retention removed \(progress.changes) workflow-run progress and job deliveries, \(expired.changes) deliveries and \(acted.changes) actions\(tombstones)\(claude)\(rolled)\(if more { "; more remain for the next run" } else { "" })"
 		)
 		Ok(())
 	}

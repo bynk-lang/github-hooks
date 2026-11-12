@@ -1,0 +1,29 @@
+// #88, step 1: without `ANTHROPIC_API_KEY`, no call is claimed, sent or recorded.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+type Count = {
+	n: Int,
+}
+
+case "without an API key nothing is claimed, sent or recorded" {
+	stub AnthropicHttp.post(_, _, _) returns Err("never called")
+	let a <- askClaude(ClaudeAsk {
+		feature: "triage",
+		repo: "bynk-lang/bynk",
+		model: Haiku,
+		effort: Low,
+		maxTokens: 256,
+		system: "Label the issue.",
+		user: "Issue #7",
+		schema: "{\"type\":\"object\"}",
+	})
+	expect a == ClaudeAnswer { call: None, outcome: Unconfigured }
+	expect AnthropicHttp.post never called
+	let rows <- Deliveries.firstAs[Count](
+		"FROM (SELECT (SELECT count(*) FROM claude_calls) + (SELECT count(*) FROM claude_calls_daily) AS n)",
+		[]
+	)
+	expect rows == Ok(Some(Count { n: 0 }))
+}

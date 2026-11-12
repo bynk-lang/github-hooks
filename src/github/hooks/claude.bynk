@@ -1,0 +1,522 @@
+context github.hooks
+
+// The Claude capability (#88, step 1): one Messages API call at a time, for a
+// feature of #69, claimed against a daily cap first and recorded after. Raw
+// HTTP through `AnthropicHttp`, so the suites stub it at the wire, as they do
+// GitHub. No feature calls it yet: triage (#69, slice 2) is the first.
+
+---
+Which Claude model a feature asks: Haiku 5.5 to label from a fixed list,
+Opus 5.5 where the writing shows (#69).
+---
+type ClaudeModel = enum { Haiku, Opus }
+
+--- How much the model may think: lower is cheaper and quicker.
+type ClaudeEffort = enum { Low, Medium, High }
+
+---
+One call a feature asks for. `system` is the feature's own instructions, the
+stable prefix that is cached; `user` is the material to work on, which may be
+anyone's text, so it goes in the user turn and never the system prompt.
+`schema` is the JSON schema the reply must match, as JSON text written in
+code, never built from input.
+
+`maxTokens` bounds the model's thinking as well as its answer: both models
+think by default, so a budget sized for the answer alone comes back
+`Truncated`, billed and with its claim kept. `thinking: false` turns
+thinking off, on Haiku only (where it's allowed at any effort this type
+offers); Opus 5.5 always thinks, so it's ignored there.
+---
+type ClaudeAsk = {
+	feature: String,
+	repo: String,
+	model: ClaudeModel,
+	effort: ClaudeEffort,
+	maxTokens: Int,
+	thinking: Bool = true,
+	system: String,
+	user: String,
+	schema: String,
+}
+
+---
+What came of a call. `Answered` carries the reply's JSON text, which matches
+the asked schema; the feature decodes it into its own type.
+---
+type ClaudeOutcome =
+	| Answered(text: String)
+	| Refused(category: Option[String])
+	| Truncated
+	| Capped(scope: String)
+	| Unavailable(reason: String)
+	| Unconfigured
+
+--- A call's outcome, and its row in `claude_calls` when it was recorded.
+type ClaudeAnswer = {
+	call: Option[Int],
+	outcome: ClaudeOutcome,
+}
+
+---
+One POST to Anthropic's Messages API, answering Anthropic's response, or why
+it couldn't be reached. `beta` is an `anthropic-beta` header value, if any.
+---
+capability AnthropicHttp {
+	fn post(apiKey: String, body: String, beta: Option[String]) -> Effect[Result[Response, String]]
+}
+
+provides AnthropicHttp = FetchAnthropic given Fetch {
+	fn post(
+		apiKey: String,
+		body: String,
+		beta: Option[String]
+	) -> Effect[Result[Response, String]] {
+		let base: Map[String, String] = Map
+			.empty()
+			.insert("x-api-key", apiKey)
+			.insert("anthropic-version", ANTHROPIC_VERSION)
+		let headers = match beta {
+			Some(b) => base.insert("anthropic-beta", b),
+			None => base,
+		}
+		let sent <- Fetch.send(Request {
+			method: Post,
+			url: "https://api.anthropic.com/v1/messages",
+			contentType: Some("application/json"),
+			authorization: None,
+			headers: headers,
+			body: Some(body),
+		})
+		match sent {
+			Ok(res) => Effect.pure(Ok(res)),
+			Err(_) => Effect.pure(Err("Anthropic could not be reached")),
+		}
+	}
+}
+
+--- The Messages API version every call names.
+const ANTHROPIC_VERSION: String = "2026-10-21"
+
+--- Opus 5.5's server-side fallback on a refusal needs this beta.
+const FALLBACK_BETA: String = "server-side-fallback-2026-07-01"
+
+--- The daily caps when `CLAUDE_DAILY_CAP_REPO` and `CLAUDE_DAILY_CAP_TOTAL` aren't set.
+const CLAUDE_CAP_REPO: Int = 50
+
+const CLAUDE_CAP_TOTAL: Int = 200
+
+fn modelId(m: ClaudeModel) -> String {
+	match m {
+		Haiku => "claude-haiku-5-5",
+		Opus => "claude-opus-5-5",
+	}
+}
+
+fn effortName(e: ClaudeEffort) -> String {
+	match e {
+		Low => "low",
+		Medium => "medium",
+		High => "high",
+	}
+}
+
+---
+A daily cap from its setting: a whole number of at least 0, or `fallback`
+when it's unset or isn't one. 0 stops every call.
+---
+fn capOf(setting: Option[String], fallback: Int) -> Int {
+	match present(setting).andThen((s) => Int.parse(s.trim())) {
+		Some(n) => if n < 0 { fallback } else { n },
+		None => fallback,
+	}
+}
+
+---
+The request body. The system prompt is one text block marked for caching
+(the stable prefix; below 512 tokens it simply isn't cached); the material
+goes in the user turn as a JSON string, so it can't break out of it.
+`temperature` is never sent: API version 2026-10-21 refuses it. Opus asks
+for the server-side fallback on a refusal; Haiku 5.5 has none.
+---
+fn claudeBody(a: ClaudeAsk) -> String {
+	let fallback = match a.model {
+		Opus => ",\"fallbacks\":\"default\"",
+		Haiku => "",
+	}
+	let thinking = match a.model {
+		Haiku => if a.thinking { "" } else { ",\"thinking\":{\"type\":\"disabled\"}" },
+		Opus => "",
+	}
+	"{\"model\":\(Json.encodePlain(modelId(a.model))),\"max_tokens\":\(a.maxTokens),\"system\":[{\"type\":\"text\",\"text\":\(Json.encodePlain(a.system)),\"cache_control\":{\"type\":\"ephemeral\"}}],\"messages\":[{\"role\":\"user\",\"content\":\(Json.encodePlain(a.user))}],\"output_config\":{\"format\":{\"type\":\"json_schema\",\"schema\":\(a.schema)},\"effort\":\(Json.encodePlain(effortName(a.effort)))}\(thinking)\(fallback)}"
+}
+
+--- One block of a reply's `content`: the text one carries the answer.
+type ReplyBlock = {
+	type: String,
+	text: Option[String],
+}
+
+--- Why a refusal was made, when the API says.
+type StopDetails = {
+	category: Option[String],
+}
+
+--- What a call cost in tokens; the cache fields say whether the prefix was read or written.
+type ReplyUsage = {
+	input_tokens: Int,
+	output_tokens: Int,
+	cache_creation_input_tokens: Option[Int],
+	cache_read_input_tokens: Option[Int],
+	iterations: Option[List[UsageIteration]],
+}
+
+---
+One attempt within a call, when the API itemises them: on Opus, a declined
+attempt (`message`) and the fallback that answered (`fallback_message`). The
+top-level counts cover only the attempt that answered.
+---
+type UsageIteration = {
+	type: String,
+	input_tokens: Option[Int],
+	output_tokens: Option[Int],
+	cache_creation_input_tokens: Option[Int],
+	cache_read_input_tokens: Option[Int],
+}
+
+---
+What a call cost, summed over its attempts when the API itemises them, and
+whether a fallback model answered it.
+---
+type CallTokens = {
+	input: Int,
+	output: Int,
+	cacheWrite: Option[Int],
+	cacheRead: Option[Int],
+	fellBack: Bool,
+}
+
+fn sumOf(xs: List[Option[Int]]) -> Option[Int] {
+	let known = xs.filter((x) => x is Some(_)).map((x) => x.getOrElse(0))
+	if known.length() == 0 { None } else { Some(known.fold(0, (a, b) => a + b)) }
+}
+
+fn tokensOf(u: ReplyUsage) -> CallTokens {
+	// A count the attempts don't give falls back to the top-level one.
+	let its = u.iterations.getOrElse([])
+	let cacheWrite = match sumOf(its.map((i) => i.cache_creation_input_tokens)) {
+		Some(n) => Some(n),
+		None => u.cache_creation_input_tokens,
+	}
+	let cacheRead = match sumOf(its.map((i) => i.cache_read_input_tokens)) {
+		Some(n) => Some(n),
+		None => u.cache_read_input_tokens,
+	}
+	CallTokens {
+		input: sumOf(its.map((i) => i.input_tokens)).getOrElse(u.input_tokens),
+		output: sumOf(its.map((i) => i.output_tokens)).getOrElse(u.output_tokens),
+		cacheWrite: cacheWrite,
+		cacheRead: cacheRead,
+		fellBack: its.any((i) => i.type == "fallback_message"),
+	}
+}
+
+--- The parts of a Messages API reply the Worker reads.
+type MessagesReply = {
+	model: String,
+	stop_reason: Option[String],
+	stop_details: Option[StopDetails],
+	content: List[ReplyBlock],
+	usage: ReplyUsage,
+}
+
+--- An error reply's body: `{"type": "error", "error": {"type": …, "message": …}}`.
+type AnthropicError = {
+	error: AnthropicErrorDetail,
+}
+
+type AnthropicErrorDetail = {
+	type: String,
+	message: String,
+}
+
+type ClaimedCalls = {
+	calls: Int,
+}
+
+type RecordedCall = {
+	id: Int,
+}
+
+--- What `claude_calls` keeps of one call.
+type CallRecord = {
+	outcome: String,
+	served: Option[String],
+	status: Option[Int],
+	stopReason: Option[String],
+	category: Option[String],
+	detail: Option[String],
+	usage: Option[CallTokens],
+}
+
+---
+Asks Claude once, for `a.feature` in `a.repo`. Without `ANTHROPIC_API_KEY`
+nothing is claimed or sent. Otherwise a call is claimed against the day's
+caps first (`claimClaudeCall`); past either, nothing is sent. A call that gets
+no answer (Anthropic unreachable, or an error status) gives its claim back.
+So the caps count calls answered, not calls billed: a request that reached
+Anthropic before the connection dropped can still be billed. The key's spend
+limit in the Anthropic Console is the backstop for that.
+Every call claimed, and every one capped, is recorded in `claude_calls`.
+`stop_reason` is read before `content`: a refusal or a truncated reply is
+its own outcome, never a half-read answer.
+---
+fn askClaude(
+	a: ClaudeAsk
+) -> Effect[ClaudeAnswer] given Deliveries, Logger, Clock, Secrets, AnthropicHttp {
+	let model = modelId(a.model)
+	let keySet <- Secrets.get("ANTHROPIC_API_KEY")
+	let Some(apiKey) = present(keySet) else {
+		let _ <- Logger.warn(
+			"\(a.feature) for \(a.repo) asked Claude, but ANTHROPIC_API_KEY is not set"
+		)
+		Effect.pure(ClaudeAnswer { call: None, outcome: Unconfigured })
+	}
+	let now <- Clock.now()
+	let day = now.toIso().slice(0, 10)
+	let repoCapSet <- Secrets.get("CLAUDE_DAILY_CAP_REPO")
+	let totalCapSet <- Secrets.get("CLAUDE_DAILY_CAP_TOTAL")
+	let repoCap = capOf(repoCapSet, CLAUDE_CAP_REPO)
+	let totalCap = capOf(totalCapSet, CLAUDE_CAP_TOTAL)
+	let claimed <- claimClaudeCall(a.repo, day, repoCap, totalCap)
+	let Ok(fresh) = claimed else match {
+		Err(why) => {
+			let _ <- Logger.error(
+				"could not claim a Claude call for \(a.feature) in \(a.repo): \(why)"
+			)
+			Effect.pure(ClaudeAnswer { call: None, outcome: Unavailable("could not claim a call") })
+		},
+	}
+	let true = fresh else {
+		let scope <- cappedScope(a.repo, day, repoCap)
+		let _ <- Logger.info(
+			"\(a.feature) for \(a.repo) waits for tomorrow: the \(scope) daily cap on Claude calls is reached"
+		)
+		let call <- recordClaudeCall(a, now.toIso(), CallRecord {
+			outcome: "capped",
+			served: None,
+			status: None,
+			stopReason: None,
+			category: None,
+			detail: Some("the \(scope) daily cap is reached"),
+			usage: None,
+		})
+		Effect.pure(ClaudeAnswer { call: call, outcome: Capped(scope) })
+	}
+	let beta: Option[String] = match a.model {
+		Opus => Some(FALLBACK_BETA),
+		Haiku => None,
+	}
+	let sent <- AnthropicHttp.post(apiKey, claudeBody(a), beta)
+	let Ok(res) = sent else match {
+		Err(why) => {
+			let _ <- releaseClaudeCall(a.repo, day)
+			let _ <- Logger.warn("\(a.feature) for \(a.repo): \(why)")
+			let call <- recordClaudeCall(a, now.toIso(), CallRecord {
+				outcome: "failed",
+				served: None,
+				status: None,
+				stopReason: None,
+				category: None,
+				detail: Some(why),
+				usage: None,
+			})
+			Effect.pure(ClaudeAnswer { call: call, outcome: Unavailable(why) })
+		},
+	}
+	let true = res.status == 200 else {
+		let reason = match Json.decode[AnthropicError](res.body) {
+			Ok(e) => "\(e.error.type): \(e.error.message)",
+			Err(_) => "no error body",
+		}
+		let why = "Anthropic answered \(res.status) (\(reason))"
+		let _ <- releaseClaudeCall(a.repo, day)
+		let _ <- Logger.warn("\(a.feature) for \(a.repo): \(why)")
+		let call <- recordClaudeCall(a, now.toIso(), CallRecord {
+			outcome: "failed",
+			served: None,
+			status: Some(res.status),
+			stopReason: None,
+			category: None,
+			detail: Some(why),
+			usage: None,
+		})
+		Effect.pure(ClaudeAnswer { call: call, outcome: Unavailable(why) })
+	}
+	let Ok(reply) = Json.decode[MessagesReply](res.body) else match {
+		Err(e) => {
+			let why = "the reply did not decode: \(jsonError(e))"
+			let _ <- Logger.error("\(a.feature) for \(a.repo): \(why)")
+			let call <- recordClaudeCall(a, now.toIso(), CallRecord {
+				outcome: "failed",
+				served: None,
+				status: Some(res.status),
+				stopReason: None,
+				category: None,
+				detail: Some(why),
+				usage: None,
+			})
+			Effect.pure(ClaudeAnswer { call: call, outcome: Unavailable(why) })
+		},
+	}
+	let text0 = reply.content
+		.filter((b) => b.type == "text")
+		.map((b) => b.text.getOrElse(""))
+		.filter((t) => t != "")
+		.first()
+	let outcome: ClaudeOutcome = match reply.stop_reason {
+		Some("refusal") => Refused(reply.stop_details.andThen((d) => d.category)),
+		Some("max_tokens") => Truncated,
+		_ => match text0 {
+			Some(t) => Answered(t),
+			None => Unavailable("the reply had no text"),
+		},
+	}
+	let kept = CallRecord {
+		outcome: outcomeName(outcome),
+		served: Some(reply.model),
+		status: Some(res.status),
+		stopReason: reply.stop_reason,
+		category: reply.stop_details.andThen((d) => d.category),
+		detail: match outcome {
+			Unavailable(why) => Some(why),
+			_ => None,
+		},
+		usage: Some(tokensOf(reply.usage)),
+	}
+	let _ <- match outcome {
+		Refused(c) => Logger.warn(
+			"Claude declined \(a.feature) for \(a.repo) (\(c.getOrElse("no category"))): no proposal"
+		),
+		Truncated => Logger.warn(
+			"Claude's reply for \(a.feature) in \(a.repo) hit max_tokens: no proposal"
+		),
+		_ => Effect.pure(()),
+	}
+	let call <- recordClaudeCall(a, now.toIso(), kept)
+	Effect.pure(ClaudeAnswer { call: call, outcome: outcome })
+}
+
+--- `claude_calls.outcome`'s name for an outcome that reached Anthropic.
+fn outcomeName(o: ClaudeOutcome) -> String {
+	match o {
+		Answered(_) => "answered",
+		Refused(_) => "refused",
+		Truncated => "truncated",
+		Capped(_) => "capped",
+		Unavailable(_) => "failed",
+		Unconfigured => "failed",
+	}
+}
+
+---
+Claims one call for `repo` on `day`, if neither the repository's cap nor the
+day's total across repositories is reached: one statement, so two calls at
+once can't both take the last one. `true` when it was claimed.
+---
+fn claimClaudeCall(
+	repo: String,
+	day: String,
+	repoCap: Int,
+	totalCap: Int
+) -> Effect[Result[Bool, String]] given Deliveries {
+	let claimed <- Deliveries.first(
+		"""
+		INSERT INTO claude_calls_daily (repo, day, calls)
+		SELECT ?1, ?2, 1
+		WHERE ?3 > 0
+		  AND (SELECT coalesce(sum(calls), 0) FROM claude_calls_daily WHERE day = ?2) < ?4
+		ON CONFLICT (repo, day) DO UPDATE SET calls = claude_calls_daily.calls + 1
+		WHERE claude_calls_daily.calls < ?3
+		RETURNING calls
+		""",
+		[Text(repo), Text(day), Integer(repoCap), Integer(totalCap)]
+	)
+	match claimed {
+		Ok(Some(_)) => Effect.pure(Ok(true)),
+		Ok(None) => Effect.pure(Ok(false)),
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+}
+
+--- Which cap stopped a call: the repository's, if it's reached, or else the day's total.
+fn cappedScope(repo: String, day: String, repoCap: Int) -> Effect[String] given Deliveries {
+	let row <- Deliveries.first(
+		"SELECT calls FROM claude_calls_daily WHERE repo = ?1 AND day = ?2",
+		[Text(repo), Text(day)]
+	)
+	let calls = match row {
+		Ok(Some(r)) => match Json.decodeSql[ClaimedCalls](r) {
+			Ok(c) => c.calls,
+			Err(_) => 0,
+		},
+		_ => 0,
+	}
+	Effect.pure(if calls >= repoCap { "repository" } else { "overall" })
+}
+
+--- Gives back a claim whose call got no answer, so it doesn't count against the cap.
+fn releaseClaudeCall(repo: String, day: String) -> Effect[()] given Deliveries {
+	let _ <- Deliveries.run(
+		"UPDATE claude_calls_daily SET calls = calls - 1 WHERE repo = ?1 AND day = ?2 AND calls > 0",
+		[Text(repo), Text(day)]
+	)
+	Effect.pure(())
+}
+
+--- Records a call in `claude_calls`, answering its id; a failure to record is logged, not fatal.
+fn recordClaudeCall(
+	a: ClaudeAsk,
+	at: String,
+	r: CallRecord
+) -> Effect[Option[Int]] given Deliveries, Logger {
+	let u = r.usage
+	let row <- Deliveries.first(
+		"""
+		INSERT INTO claude_calls (at, repo, feature, model, served_model, outcome, status, stop_reason,
+		                          refusal_category, detail, input_tokens, output_tokens,
+		                          cache_creation_input_tokens, cache_read_input_tokens, fell_back)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+		RETURNING id
+		""",
+		[
+			Text(at),
+			Text(a.repo),
+			Text(a.feature),
+			Text(modelId(a.model)),
+			text(r.served),
+			Text(r.outcome),
+			integer(r.status),
+			text(r.stopReason),
+			text(r.category),
+			text(r.detail),
+			integer(u.map((x) => x.input)),
+			integer(u.map((x) => x.output)),
+			integer(u.andThen((x) => x.cacheWrite)),
+			integer(u.andThen((x) => x.cacheRead)),
+			integer(u.map((x) => if x.fellBack { 1 } else { 0 })),
+		]
+	)
+	match row {
+		Ok(Some(r)) => match Json.decodeSql[RecordedCall](r) {
+			Ok(c) => Effect.pure(Some(c.id)),
+			Err(_) => Effect.pure(None),
+		},
+		Ok(None) => Effect.pure(None),
+		Err(e) => {
+			let _ <- Logger.error(
+				"could not record a Claude call for \(a.feature) in \(a.repo): \(sqlError(e))"
+			)
+			Effect.pure(None)
+		},
+	}
+}
