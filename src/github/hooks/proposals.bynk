@@ -33,7 +33,6 @@ type ClaimedProposal = {
 --- Where a proposal stands, to say why a decision on it can't be made.
 type ProposalState = {
 	status: String,
-	expired: Int,
 }
 
 --- A proposal row as Mine reads it, before its payload is decoded.
@@ -139,20 +138,18 @@ fn proposalEvent(repo: String, target: Int, status: String) -> LiveEvent {
 }
 
 ---
-Why a decision on proposal `id` can't be made: it doesn't exist, it was
-decided already, or it expired.
+Why a decision on proposal `id` can't be made: it doesn't exist, it's being
+approved now (`approving`, GitHub not yet answered), it was decided already,
+or it expired. A claim misses a pending proposal only once it has expired.
 ---
-fn undecidable(id: Int, now: String) -> Effect[HttpResult[ProposalDecided]] given Deliveries {
-	let found <- Deliveries.first(
-		"SELECT status, expires_at <= ?2 AS expired FROM proposals WHERE id = ?1",
-		[Integer(id), Text(now)]
-	)
+fn undecidable(id: Int) -> Effect[HttpResult[ProposalDecided]] given Deliveries {
+	let found <- Deliveries.first("SELECT status FROM proposals WHERE id = ?1", [Integer(id)])
 	match found {
 		Ok(Some(row)) => match Json.decodeSql[ProposalState](row) {
-			Ok(s) => if s.status == "pending" && s.expired == 1 {
-				Effect.pure(Conflict("proposal \(id) has expired"))
-			} else if s.status == "pending" {
+			Ok(s) => if s.status == "approving" {
 				Effect.pure(Conflict("proposal \(id) is being decided"))
+			} else if s.status == "pending" {
+				Effect.pure(Conflict("proposal \(id) has expired"))
 			} else {
 				Effect.pure(Conflict("proposal \(id) was already \(s.status)"))
 			},
@@ -202,10 +199,11 @@ fn auditDecision(
 
 ---
 `POST /maintainers/proposals/approve`'s work, for `login`. The proposal is
-claimed first (`pending` and unexpired → `approved`) in one statement, so
+claimed first (`pending` and unexpired → `approving`) in one statement, so
 two maintainers, or two clicks, act on it once. Then its action is asked of
-GitHub through the repository's installation; a refusal leaves it `failed`,
-with GitHub's reason, and isn't tried again.
+GitHub through the repository's installation, and `settle` records how it
+ended: `approved`, or `failed` with GitHub's reason (not tried again). A
+Worker that dies between the two leaves it `approving`, which shows it.
 ---
 fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]] given Deliveries, Logger, Clock, ActionLimit, AppAuth, GitHubHttp, LiveFeed {
 	let allowed <- ActionLimit.allow("action:\(login.toLower())")
@@ -214,7 +212,7 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 	let at = now.toIso()
 	let claim <- Deliveries.first(
 		"""
-		UPDATE proposals SET status = 'approved', decided_by = ?2, decided_at = ?3
+		UPDATE proposals SET status = 'approving', decided_by = ?2, decided_at = ?3
 		WHERE id = ?1 AND status = 'pending' AND expires_at > ?3
 		RETURNING repo, kind, target, payload
 		""",
@@ -226,7 +224,7 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			ServerError("could not record the decision; nothing was asked of GitHub")
 		},
 	}
-	let Some(row) = claimed else { undecidable(id, at) }
+	let Some(row) = claimed else { undecidable(id) }
 	let Ok(p) = Json.decodeSql[ClaimedProposal](row) else match {
 		Err(e) => {
 			let _ <- Logger.error("could not decode proposal \(id): \(jsonError(e))")
@@ -347,7 +345,7 @@ fn declineProposal(
 			ServerError("could not record the decision")
 		},
 	}
-	let Some(r) = row else { undecidable(id, at) }
+	let Some(r) = row else { undecidable(id) }
 	let Ok(p) = Json.decodeSql[ClaimedProposal](r) else match {
 		Err(e) => {
 			let _ <- Logger.error("could not decode proposal \(id): \(jsonError(e))")

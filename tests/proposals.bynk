@@ -341,7 +341,7 @@ case "why a decision can't be made: expired, decided (even past its wait), or be
 				sql: """
 					INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
 					  (1, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'r', '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 'approved'),
-					  (2, 'bynk-lang/secret', 'labels', 13, '{"labels":["x"]}', 'r', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'pending'),
+					  (2, 'bynk-lang/secret', 'labels', 13, '{"labels":["x"]}', 'r', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'approving'),
 					  (3, 'bynk-lang/secret', 'labels', 14, '{"labels":["x"]}', 'r', '2026-10-22T12:00:00.000Z', '2026-11-05T12:00:00.000Z', 'pending')
 				""",
 				params: [],
@@ -349,9 +349,9 @@ case "why a decision can't be made: expired, decided (even past its wait), or be
 		]
 	)
 	expect seeded is Ok(_)
-	let decided <- undecidable(1, "2026-11-05T12:00:00.000Z")
-	let deciding <- undecidable(2, "2026-11-05T12:00:00.000Z")
-	let expired <- undecidable(3, "2026-11-05T12:00:00.000Z")
+	let decided <- undecidable(1)
+	let deciding <- undecidable(2)
+	let expired <- undecidable(3)
 	expect decided == Conflict("proposal 1 was already approved")
 	expect deciding == Conflict("proposal 2 is being decided")
 	expect expired == Conflict("proposal 3 has expired")

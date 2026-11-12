@@ -13,9 +13,10 @@ All notable changes to github-hooks. The format follows
   on every page under **Proposed by the App**, with **Approve** and
   **Decline**, and a line with today's Claude calls against the caps.
   Approving (`POST /maintainers/proposals/approve`) claims a pending,
-  unexpired proposal in one statement, then asks GitHub as the App: the first
-  kind, `labels`, adds labels to an issue or pull request. A refusal leaves
-  it `failed`, with GitHub's reason. Declining
+  unexpired proposal (`approving`) in one statement, then asks GitHub as the
+  App: the first kind, `labels`, adds labels to an issue or pull request
+  (GitHub creates any it doesn't have). It ends `approved`, or `failed` with
+  GitHub's reason. Declining
   (`POST /maintainers/proposals/decline`) asks nothing of GitHub. Every
   decision is audited in `maintainer_actions` (rebuilt with `run_id` and
   `attempt` optional and a `proposal` column, keeping every row) and heard by

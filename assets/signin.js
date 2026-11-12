@@ -322,9 +322,9 @@
         return b;
       };
       const what = p.kind === "labels" ? `add ${p.labels.join(", ")}` : p.kind;
-      const kind = p.kind === "labels" ? "issues" : "pull";
+      // `/issues/N` serves an issue or a pull request alike.
       return [
-        link(p.repo, p.target, kind, p.title || ""), ` · ${what} · `, node("span", { class: "proposal-reason" }, p.reason),
+        link(p.repo, p.target, "issues", p.title || ""), ` · ${what} · `, node("span", { class: "proposal-reason" }, p.reason),
         ` · proposed ${ago(p.proposed_at)} ago · `,
         decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.repo}#${p.target}? The App does it on GitHub at once.`),
         " ", decide("Decline", "/maintainers/proposals/decline", null), " ", note,

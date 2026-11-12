@@ -337,11 +337,18 @@ first kind is `labels`: add these labels to that issue or pull request.
   page hears a proposal arrive or be decided, over the maintainers' live
   board, and reloads Mine.
 - **Approving** (`POST /maintainers/proposals/approve`, `{id}`):
-  - **Once only:** the proposal is claimed (`pending` → `approved`) in one
-    statement, so two maintainers, or two clicks, act on it once.
+  - **Once only:** the proposal is claimed (`pending` → `approving`) in one
+    statement, so two maintainers, or two clicks, act on it once; meanwhile
+    another decision on it is a `409` ("is being decided").
   - **The action** is asked of GitHub as the installation that last
     delivered for the repository: for `labels`,
-    `POST /repos/{repo}/issues/{target}/labels`.
+    `POST /repos/{repo}/issues/{target}/labels`. GitHub **creates** a label
+    the repository doesn't have, rather than refusing it, so the labels
+    shown in Mine are exactly what will appear.
+  - **The end:** `approved` when GitHub accepted it. A proposal left
+    `approving` is one whose Worker stopped before GitHub answered (a call
+    that outlived the request, say): the labels may or may not be on the
+    target, and it isn't tried again.
   - **A refusal** leaves the proposal `failed`, with GitHub's reason, and a
     `502`; a `403` means the App lacks **Issues: Read and write**. It isn't
     tried again: the feature proposes afresh if it still applies.

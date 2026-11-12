@@ -2,8 +2,9 @@
 
 -- What the App would do, waiting on a maintainer (#69). A feature records a
 -- proposal; a maintainer approves or declines it in Mine. Approving claims it
--- (`pending` -> `approved`) in one statement, so it's acted on once; if
--- GitHub refuses the action it ends `failed`, with GitHub's reason. A pending
+-- (`pending` -> `approving`) in one statement, so it's acted on once, then
+-- ends `approved`, or `failed` with GitHub's reason. A row left `approving`
+-- is one whose Worker died before GitHub answered. A pending
 -- proposal past `expires_at` is `expired`. Retention prunes decided ones 90
 -- days after the decision; the decisions themselves stay in
 -- `maintainer_actions`.
@@ -17,7 +18,7 @@ CREATE TABLE proposals (
   reason       TEXT    NOT NULL,            -- why, in the proposer's words
   proposed_at  TEXT    NOT NULL,
   expires_at   TEXT    NOT NULL,
-  status       TEXT    NOT NULL CHECK (status IN ('pending', 'approved', 'declined', 'failed', 'expired')),
+  status       TEXT    NOT NULL CHECK (status IN ('pending', 'approving', 'approved', 'declined', 'failed', 'expired')),
   decided_by   TEXT,
   decided_at   TEXT,
   outcome      TEXT                         -- what happened, in words
