@@ -22,6 +22,11 @@ fn seed() -> List[SqlStatement] {
 			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'issues', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z')",
 			params: [],
 		},
+		// A later delivery without an installation (a ping, say) doesn't hide the one that has it.
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-2', 'ping', 'bynk-lang/secret', NULL, 1, '2026-11-05T06:00:00.000Z'), ('d-3', 'issues', 'bynk-lang/bynk', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
 	]
 }
 
@@ -262,4 +267,92 @@ case "only a maintainer decides: someone who has left is refused" {
 	expect GitHubHttp.post never called
 	let row <- Deliveries.firstAs[Settled](SETTLED, [])
 	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("pending"))
+}
+
+--- Proposals that differ from triage's for issue 12 in one way each.
+fn decoys() -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+			  (1, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'declined', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'declined'),
+			  (2, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'expires now', '2026-10-22T12:00:00.000Z', '2026-11-05T12:00:00.000Z', 'pending'),
+			  (3, 'bynk-lang/bynk', 'labels', 12, '{"labels":["x"]}', 'another repository', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'pending'),
+			  (4, 'bynk-lang/secret', 'labels', 13, '{"labels":["x"]}', 'another issue', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'pending')
+		""",
+		params: [],
+	}
+}
+
+case "a proposal is new unless that very target has one pending, unexpired" {
+	let seeded <- Deliveries.batch(seed().concat([decoys()]))
+	expect seeded is Ok(_)
+	let first <- proposeLabels(labelling(), None)
+	let again <- proposeLabels(labelling(), None)
+	expect first == Ok(5)
+	expect again == Ok(5)
+}
+
+case "a decision acts on the proposal named, and only while it's pending and unexpired" {
+	stub GitHubHttp.post(_, _, _) returns labelled()
+	let seeded <- Deliveries.batch(seed().concat([decoys()]))
+	expect seeded is Ok(_)
+	// Proposal 2 expires this very moment: it can't be decided, and Mine leaves it out.
+	let atExpiry <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 2 }
+	) by Maintainer("accuser")
+	let declineAtExpiry <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 2 }
+	) by Maintainer("accuser")
+	expect atExpiry == Conflict("proposal 2 has expired")
+	expect declineAtExpiry == Conflict("proposal 2 has expired")
+	// Approving 3 leaves 4 pending; declining 4 leaves nothing else changed.
+	let approved <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 3 }
+	) by Maintainer("accuser")
+	expect approved is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals.map((p) => p.id) == [4]
+	let declined <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 4 }
+	) by Maintainer("accuser")
+	expect declined is Ok(_)
+	// An approved proposal can't then be declined.
+	let late <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 3 }
+	) by Maintainer("accuser")
+	expect late == Conflict("proposal 3 was already approved")
+	let states <- Deliveries.all("SELECT id, status FROM proposals ORDER BY id", [])
+	expect states == Ok("[{\"id\":1,\"status\":\"declined\"},{\"id\":2,\"status\":\"pending\"},{\"id\":3,\"status\":\"approved\"},{\"id\":4,\"status\":\"declined\"}]")
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/bynk/issues/12/labels"
+}
+
+case "why a decision can't be made: expired, decided (even past its wait), or being decided" {
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: """
+					INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+					  (1, 'bynk-lang/secret', 'labels', 12, '{"labels":["x"]}', 'r', '2026-10-01T00:00:00.000Z', '2026-10-15T00:00:00.000Z', 'approved'),
+					  (2, 'bynk-lang/secret', 'labels', 13, '{"labels":["x"]}', 'r', '2026-11-05T11:00:00.000Z', '2026-11-19T11:00:00.000Z', 'pending'),
+					  (3, 'bynk-lang/secret', 'labels', 14, '{"labels":["x"]}', 'r', '2026-10-22T12:00:00.000Z', '2026-11-05T12:00:00.000Z', 'pending')
+				""",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let decided <- undecidable(1, "2026-11-05T12:00:00.000Z")
+	let deciding <- undecidable(2, "2026-11-05T12:00:00.000Z")
+	let expired <- undecidable(3, "2026-11-05T12:00:00.000Z")
+	expect decided == Conflict("proposal 1 was already approved")
+	expect deciding == Conflict("proposal 2 is being decided")
+	expect expired == Conflict("proposal 3 has expired")
 }

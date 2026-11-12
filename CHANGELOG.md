@@ -8,6 +8,20 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- The App's proposals (#88, step 2): what a phase 5 feature would do,
+  waiting on a maintainer (migration `0024`, `proposals`). Mine shows them
+  on every page under **Proposed by the App**, with **Approve** and
+  **Decline**, and a line with today's Claude calls against the caps.
+  Approving (`POST /maintainers/proposals/approve`) claims a pending,
+  unexpired proposal in one statement, then asks GitHub as the App: the first
+  kind, `labels`, adds labels to an issue or pull request. A refusal leaves
+  it `failed`, with GitHub's reason. Declining
+  (`POST /maintainers/proposals/decline`) asks nothing of GitHub. Every
+  decision is audited in `maintainer_actions` (rebuilt with `run_id` and
+  `attempt` optional and a `proposal` column, keeping every row) and heard by
+  every open maintainer's page. A target keeps one pending proposal of a
+  kind. Proposals expire after 14 days; decided ones go after 90. No feature
+  proposes yet: triage (#69, slice 2) is the first.
 - The Claude capability (#88, step 1), for phase 5's features (#69); none
   calls it yet. `askClaude` makes one Messages API request through
   `AnthropicHttp` (raw HTTP, so the suites stub it at the wire), with
