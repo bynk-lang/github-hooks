@@ -8,6 +8,27 @@ All notable changes to github-hooks. The format follows
 
 ### Added
 
+- Issue triage (#95, #69 slice 2), the first phase 5 feature: when an issue
+  is opened in a repository whose `.github/bynk-hooks.yml` turns `triage`
+  on, Claude Haiku 5.5 suggests labels from `triage.labels` (kept only where
+  the repository has them), and the suggestion becomes a `labels` proposal
+  in Mine. Nothing reaches GitHub until a maintainer approves.
+  - **Skipped before any call:** pull requests; issues opened by a bot or
+    with labels; an author with 3 issues triaged by Claude in the
+    repository in the last day (only runs that spent a call count); and an
+    issue with any earlier `labels` proposal, so a decline is final.
+  - **The call:** thinking off, low effort, `max_tokens` 300. The issue is
+    the user turn as JSON, its body cut at 6,000 characters, and the schema
+    limits the labels to the allowed ones.
+  - **The proposal:** Claude's labels within the allowed list, in the
+    repository's spelling, three at most, with its reason.
+  - **Each delivery is triaged once** (`actions`). A run stopped by a cap,
+    by Anthropic or GitHub being unreachable, or by a missing key is left
+    `failed` for a manual redelivery.
+
+  [proposals.md](docs/proposals.md#issue-triage) covers what is sent, its
+  reach under prompt injection, and its cost. It also says the daily caps
+  are shared with anyone who can open issues.
 - Phase 5's overview (#88, step 4), in `docs/proposals.md`. It covers:
   - how a feature, a repository's settings, the daily caps, Claude, the
     proposal and a maintainer's decision fit together;
@@ -22,9 +43,9 @@ All notable changes to github-hooks. The format follows
   `main`.
 - Repository settings (#88, step 3): `.github/bynk-hooks.yml` on a
   repository's default branch turns phase 5's features on and tunes them
-  (`triage`, `nudges`, `release_notes`; [settings.md](docs/settings.md)). No
-  feature reads them yet. Every feature is off without the file, with an
-  empty one, or with one that's refused.
+  (`triage`, `nudges`, `release_notes`; [settings.md](docs/settings.md)).
+  Triage (#95) is the first feature that reads them. Every feature is off
+  without the file, with an empty one, or with one that's refused.
   - **Reading:** `Yaml.decode` into a typed record, through the contents API
     as the repository's installation (**Contents: Read-only**, which the App
     already has for `push` and `release`).
@@ -52,8 +73,8 @@ All notable changes to github-hooks. The format follows
   decision is audited in `maintainer_actions` (rebuilt with `run_id` and
   `attempt` optional and a `proposal` column, keeping every row) and heard by
   every open maintainer's page. A target keeps one pending proposal of a
-  kind. Proposals expire after 14 days; decided ones go after 90. No feature
-  proposes yet: triage (#69, slice 2) is the first.
+  kind. Proposals expire after 14 days; decided ones go after 90. Triage
+  (#95) is the first feature that proposes.
 - The Claude capability (#88, step 1), for phase 5's features (#69); none
   calls it yet. `askClaude` makes one Messages API request through
   `AnthropicHttp` (raw HTTP, so the suites stub it at the wire), with
