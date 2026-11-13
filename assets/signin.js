@@ -323,10 +323,15 @@
         });
         return b;
       };
-      const what = p.kind === "labels" ? `add ${p.labels.join(", ")}` : p.kind;
+      const what = p.kind === "labels" ? `add ${p.labels.join(", ")}`
+        : p.kind === "comment" ? "comment"
+        : p.kind;
+      // A comment is shown in full, as text, so the maintainer approves exactly what's posted.
+      const said = p.kind === "comment" && p.comment ? node("blockquote", { class: "proposal-comment" }, p.comment) : null;
       // `/issues/N` serves an issue or a pull request alike.
       return [
         link(p.repo, p.target, "issues", p.title || ""), ` · ${what} · `, node("span", { class: "proposal-reason" }, p.reason),
+        said,
         ` · proposed ${ago(p.proposed_at)} ago · `,
         decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.repo}#${p.target}? The App does it on GitHub at once.`),
         " ", decide("Decline", "/maintainers/proposals/decline", null), " ", note,
