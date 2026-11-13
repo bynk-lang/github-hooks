@@ -277,15 +277,12 @@ stands rather than a second one.
 - Each run first **expires** a pending nudge whose pull request is no longer
   waiting (merged, closed, reviewed, back to draft, locked, or no one
   requested), or is waiting since a different time.
-- Approving a nudge whose pull request is no longer open, as the App last
-  recorded it, is refused with a `409`, and the nudge expires. That covers
-  the hours between runs, and the weekend.
-- Approval checks **only** that the pull request is still open. Anything
-  else that changes after the morning's run waits for the next run to
-  expire the nudge: a review, removed requests (it would mention people no
-  longer asked), a move back to draft, or a lock (GitHub then refuses the
-  comment with a `403`, and the proposal ends `failed`). Check the pull
-  request before approving a nudge that's been waiting a while.
+- Approving a nudge checks it again, against the same test the job uses,
+  as the App last recorded the pull request. If it's no longer waiting
+  (merged, closed, back to draft, locked, or no one requested), or its wait
+  has started again since (a review, or a new round of ready for review),
+  the approval is refused with a `409` and the nudge expires. Nothing is
+  posted. That covers the hours between runs, and the weekend.
 
 **Its log.** Each run logs one line, such as "nudges: 9 waiting on review;
 proposed 2, already nudged this wait 3, not yet due 2, nudges off 2, expired

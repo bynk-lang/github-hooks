@@ -48,38 +48,7 @@ type NudgeTally = {
 
 --- One run, at `now`: the waiting pull requests, their repositories' settings, and a proposal for each one past its threshold.
 fn runNudges(now: Instant) -> Effect[Result[(), String]] given Deliveries, Logger, Tokens, Clock, AppAuth, GitHubHttp, LiveFeed {
-	let Ok(text) <- Deliveries.all(
-		"""
-		SELECT p.repo, p.number, p.title,
-		  max(
-		    coalesce((SELECT max(e.at) FROM pull_request_events e
-		              WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'), ''),
-		    coalesce(p.ready_at, p.opened_at),
-		    coalesce((SELECT min(q.requested_at) FROM pull_request_review_requests q
-		              WHERE q.repo = p.repo AND q.number = p.number), ''),
-		    coalesce((SELECT max(r.submitted_at) FROM pull_request_reviews r
-		              WHERE r.repo = p.repo AND r.number = p.number AND r.submitted_at IS NOT NULL
-		                AND r.reviewer_is_bot = 0
-		                AND (r.reviewer IS NULL OR r.reviewer != p.author COLLATE NOCASE)), '')
-		  ) AS since,
-		  (SELECT json_group_array(reviewer) FROM (
-		     SELECT q.reviewer FROM pull_request_review_requests q
-		     WHERE q.repo = p.repo AND q.number = p.number AND q.team = 0
-		     ORDER BY q.reviewer COLLATE NOCASE)) AS people,
-		  (SELECT json_group_array(reviewer) FROM (
-		     SELECT q.reviewer FROM pull_request_review_requests q
-		     WHERE q.repo = p.repo AND q.number = p.number AND q.team = 1
-		     ORDER BY q.reviewer COLLATE NOCASE)) AS teams,
-		  (SELECT d.installation FROM deliveries d
-		   WHERE d.repo = p.repo COLLATE NOCASE AND d.installation IS NOT NULL
-		   ORDER BY d.received_at DESC LIMIT 1) AS installation
-		FROM pull_requests p
-		WHERE p.state = 'open' AND p.draft = 0 AND p.author_is_bot = 0 AND p.locked = 0
-		  AND EXISTS (SELECT 1 FROM pull_request_review_requests q WHERE q.repo = p.repo AND q.number = p.number)
-		ORDER BY p.repo, p.number
-		""",
-		[]
-	) else match {
+	let Ok(text) <- Deliveries.all(NUDGE_WAITING_SQL, [Null, Null]) else match {
 		Err(e) => nudgesFailed("the waiting pull requests", sqlError(e)),
 	}
 	let Ok(rows) = Json.decodeSql[List[NudgeRow]](text) else match {
@@ -112,6 +81,44 @@ fn runNudges(now: Instant) -> Effect[Result[(), String]] given Deliveries, Logge
 	let true = tally.failed.length() > 0 else { Effect.pure(Ok(())) }
 	Effect.pure(Err(joined(tally.failed, "; ")))
 }
+
+---
+The pull requests waiting on review, with each one's wait start (`since`),
+the people and teams requested (JSON lists), and the installation that last
+delivered for its repository. `?1` and `?2` narrow it to one pull request
+(repository and number), or are both null for every one. The nudge job and
+approving a nudge both read it, so they agree on what waiting means.
+---
+const NUDGE_WAITING_SQL: String = """
+SELECT p.repo, p.number, p.title,
+  max(
+    coalesce((SELECT max(e.at) FROM pull_request_events e
+              WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'), ''),
+    coalesce(p.ready_at, p.opened_at),
+    coalesce((SELECT min(q.requested_at) FROM pull_request_review_requests q
+              WHERE q.repo = p.repo AND q.number = p.number), ''),
+    coalesce((SELECT max(r.submitted_at) FROM pull_request_reviews r
+              WHERE r.repo = p.repo AND r.number = p.number AND r.submitted_at IS NOT NULL
+                AND r.reviewer_is_bot = 0
+                AND (r.reviewer IS NULL OR r.reviewer != p.author COLLATE NOCASE)), '')
+  ) AS since,
+  (SELECT json_group_array(reviewer) FROM (
+     SELECT q.reviewer FROM pull_request_review_requests q
+     WHERE q.repo = p.repo AND q.number = p.number AND q.team = 0
+     ORDER BY q.reviewer COLLATE NOCASE)) AS people,
+  (SELECT json_group_array(reviewer) FROM (
+     SELECT q.reviewer FROM pull_request_review_requests q
+     WHERE q.repo = p.repo AND q.number = p.number AND q.team = 1
+     ORDER BY q.reviewer COLLATE NOCASE)) AS teams,
+  (SELECT d.installation FROM deliveries d
+   WHERE d.repo = p.repo COLLATE NOCASE AND d.installation IS NOT NULL
+   ORDER BY d.received_at DESC LIMIT 1) AS installation
+FROM pull_requests p
+WHERE p.state = 'open' AND p.draft = 0 AND p.author_is_bot = 0 AND p.locked = 0
+  AND (?1 IS NULL OR (p.repo = ?1 COLLATE NOCASE AND p.number = ?2))
+  AND EXISTS (SELECT 1 FROM pull_request_review_requests q WHERE q.repo = p.repo AND q.number = p.number)
+ORDER BY p.repo, p.number
+"""
 
 --- A waiting pull request's key, for matching its pending nudge.
 type WaitKey = {
@@ -241,4 +248,21 @@ fn dayCount(n: Int) -> String {
 fn nudgesFailed(what: String, why: String) -> Effect[Result[(), String]] given Logger {
 	let _ <- Logger.error("nudges: could not read \(what): \(why)")
 	Effect.pure(Err("could not read \(what): \(why)"))
+}
+
+---
+Whether `repo`'s pull request `number` is waiting on review now, and since
+when: its wait start, or `None` when it isn't waiting.
+---
+fn waitingSince(
+	repo: String,
+	number: Int
+) -> Effect[Result[Option[String], String]] given Deliveries {
+	let Ok(text) <- Deliveries.all(NUDGE_WAITING_SQL, [Text(repo), Integer(number)]) else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	let Ok(rows) = Json.decodeSql[List[NudgeRow]](text) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	Effect.pure(Ok(rows.first().map((r) => r.since)))
 }

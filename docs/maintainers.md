@@ -359,9 +359,10 @@ until a maintainer approves. There are two kinds:
       will appear;
     - for `comment`, `POST /repos/{repo}/issues/{target}/comments` with
       only the text, which answers `201`.
-  - **A nudge that no longer applies** (a `comment` for a pull request that
-    is no longer open, as recorded) is refused with a `409` before anything
-    is posted, and expires. The nudge job also expires pending nudges whose
+  - **A nudge that no longer applies** is refused with a `409` before
+    anything is posted, and expires: its pull request is no longer waiting
+    on review as the nudge job reads it, or is waiting since a different
+    time. The nudge job also expires pending nudges whose
     reason has gone, each weekday morning
     ([proposals.md](proposals.md#stale-pull-request-nudges)).
   - **The end:** `approved` when GitHub accepted it. A proposal left
