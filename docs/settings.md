@@ -21,14 +21,14 @@ release_notes:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `triage.enabled` | `false` | suggest labels for each new issue (#69, slice 2) |
-| `triage.labels` | `[]` | the only labels triage may suggest |
+| `triage.enabled` | `false` | suggest labels for each new issue ([triage](proposals.md#issue-triage), #95) |
+| `triage.labels` | `[]` | the only labels triage may suggest, among those the repository has; empty means none |
 | `nudges.enabled` | `false` | propose a nudge for a ready pull request waiting on review (#69, slice 3) |
 | `nudges.after_days` | `3` | how many days it waits first: 1 to 30 |
 | `release_notes.enabled` | `false` | draft notes for each release (#69, slice 4) |
 
-Any section or key left out takes its default. No feature reads these yet;
-each slice of #69 reads its own section as it lands.
+Any section or key left out takes its default. Triage reads its section;
+the others are read by their slices of #69 as they land.
 
 ## How it's read
 

@@ -14,13 +14,13 @@ when, what is kept, and how to turn it on and off. The details are in:
 | [maintainers.md](maintainers.md#the-apps-proposals) | approving and declining: the routes, refusals, expiry and the audit |
 | [deploy.md](deploy.md) | `ANTHROPIC_API_KEY` and the daily caps, as Worker settings |
 
-The foundations (#88) are in place. **No feature proposes anything yet.**
-Each feature arrives as its own slice of #69, and this page gains a section
-for each:
+The foundations (#88) are in place, and **issue triage** is the first feature
+that proposes ([below](#issue-triage)). Each feature arrives as its own slice
+of #69, and this page gains a section for each:
 
 | Feature | Slice | Claude | Proposes |
 |---|---|---|---|
-| Issue triage | 2 | Haiku 5.5 | labels for a new issue, from the repository's allowed list |
+| [Issue triage](#issue-triage) (#95) | 2, built | Haiku 5.5 | labels for a new issue, from the repository's allowed list |
 | Stale pull request nudges | 3 | none | a comment to a ready pull request's reviewers |
 | Release notes drafts | 4 | Opus 5.5 | notes for a release, from the pull requests it shipped |
 | Weekly summary | 5 | Opus 5.5 | the organisation's week, posted to a Discussion |
@@ -70,17 +70,14 @@ that a repository with the feature off sends nothing.
 When a feature is on, one Messages API request carries:
 
 - **The feature's instructions**, written in code, as the system prompt.
-  Each feature's section here will say what else they include. As #69
-  plans triage, that's the repository's allowed labels with their
-  descriptions.
-- **The material to work on**, as the user turn: for triage, as planned,
-  the issue's title and body. This is anyone's text, and may try to give
-  instructions. It goes in the user turn as a quoted string, never the
-  system prompt. The instructions say it is data to classify, not
-  instructions to follow.
-- **The schema the reply must match.** For triage, as planned, the label
-  field is a list chosen from the allowed labels, so Claude can't invent
-  one.
+  Each feature's section says what else they include: for triage, the
+  repository's allowed labels with their descriptions.
+- **The material to work on**, as the user turn: for triage, the issue's
+  title and body. This is anyone's text, and may try to give instructions.
+  It goes in the user turn as a quoted string, never the system prompt. The
+  instructions say it is data to classify, not instructions to follow.
+- **The schema the reply must match.** For triage, the label field is a list
+  chosen from the allowed labels, so Claude can't invent one.
 
 Nothing else is sent: no GitHub tokens or other secrets, and no other
 repository's data. The request goes straight from the Worker to
@@ -121,6 +118,100 @@ records that, and which model answered. Haiku 5.5 has no fallback.
   Anthropic Console** as the backstop.
 - **In Mine.** Once Claude is in use, every signed-in page shows a line
   with today's calls against both caps.
+- **Shared with anyone who can open issues.** A feature that runs on what
+  people open, as triage does, spends the cap on their behalf. Triage limits
+  one author to 3 triaged issues a day in a repository
+  ([below](#issue-triage)), but many accounts can still spend a
+  repository's 50, and with it part of the day's 200. Set the caps with that
+  in mind for a public repository. Past a cap nothing reaches GitHub: the
+  feature only goes without, and an issue opened then stays untriaged.
+
+## Issue triage
+
+Slice 2 of #69, built in #95. When an issue is opened in a repository that
+turns triage on, Claude Haiku 5.5 suggests labels for it from the
+repository's allowed list, and the suggestion becomes a `labels` proposal
+in Mine. Approving it adds the labels.
+
+**Turning it on**, in the repository's `.github/bynk-hooks.yml`
+([settings.md](settings.md)):
+
+```yaml
+triage:
+  enabled: true
+  labels: [bug, enhancement, documentation]   # the only labels it may suggest
+```
+
+`labels` are matched against the repository's own labels without regard to
+case, and only those the repository has are offered, in its spelling. A
+label listed here that the repository doesn't have is left out, rather than
+proposed and created by GitHub on approval. An empty list, or one the
+repository has none of, means triage does nothing.
+
+**When it runs.** On `issues.opened` only, after the delivery is answered.
+An issue is left alone, with no call to GitHub or Claude:
+
+- when it's a pull request, was opened by a bot, or was opened with labels
+  already (a template or a maintainer triaged it);
+- when the repository's settings don't turn triage on;
+- when its author has had 3 issues triaged in that repository in the last
+  day, so one person, or one script, can't spend the cap
+  (`AUTHOR_DAILY_TRIAGES`);
+- when it has had a `labels` proposal before, whatever became of it. **A
+  decline is final for its issue.**
+
+Each delivery is claimed once (`actions`, as `triage`), so a redelivery
+doesn't ask again.
+
+**What is sent.** One request: Haiku 5.5, thinking off, low effort,
+`max_tokens` 300.
+
+- **System:** the instructions, then each allowed label with its
+  description. It's marked for caching like every system prompt, but it is
+  well short of Haiku's 512-token minimum, so it isn't cached: no cache
+  reads for triage in `claude_calls` is expected.
+- **User:** the issue as a JSON object, `{"title", "body",
+  "body_truncated"}`, with the body cut at 6,000 characters.
+- **Schema:** `labels`, each one of the allowed labels, and a one-sentence
+  `reason`.
+
+**What is proposed.** Claude's labels are kept only where they're allowed
+(whatever the schema promised), in the repository's spelling, once each,
+three at most. None left means no proposal. Otherwise the proposal carries
+the issue's title, the labels and Claude's reason, and links its call.
+
+**Its reach under prompt injection.** An issue written to steer Claude can
+pick which of the allowed labels are proposed, and write a persuasive
+reason. It can't propose a label outside the list, more than three, or
+anything but labels. So check a proposal against the issue itself, not
+only against its reason.
+
+**When it ends without a proposal.** Every run's end is recorded in
+`actions` (`detail`) and logged:
+
+| Ended | Status | Meaning |
+|---|---|---|
+| proposed `…` | `done` | a proposal is waiting in Mine |
+| Claude suggested no label | `done` | nothing fitted clearly |
+| Claude declined to triage it | `done` | a refusal, logged with its category |
+| Claude's reply was cut off | `done` | it ran out of its 300 tokens |
+| it already has a labels proposal | `done` | a decline is final |
+| … has had 3 issues triaged here in the last day | `done` | the author's share is used |
+| the … daily cap on Claude calls is reached | `failed` | see below |
+| Claude could not be asked: … | `failed` | Anthropic unreachable, or an error status |
+| ANTHROPIC_API_KEY is not set | `failed` | no key on the Worker |
+| GitHub refused …'s labels: … | `failed` | the labels couldn't be read |
+
+A `failed` run isn't retried by itself: an issue opened while a cap is
+reached stays untriaged. Redelivering its delivery (the App's settings,
+*Advanced*, *Redeliver*) once the cap has reset, or the key is set, runs it
+again.
+
+**Its cost.** A call is the instructions and labels (a few hundred tokens)
+plus the issue: a short one adds little, and the longest, cut at 6,000
+characters, adds about 1,500. At most 300 tokens come back. It runs on
+Haiku 5.5, and `claude_calls` records each call's tokens, so the real cost
+is in D1.
 
 ## What is kept
 
@@ -134,7 +225,8 @@ records that, and which model answered. Haiku 5.5 has no fallback.
 
 The App does **not** keep the text it sends to Claude (an issue's body,
 say), nor Claude's reply beyond what the proposal holds. What Anthropic
-keeps of a request is set by its API terms ([above](#what-is-sent-to-anthropic-and-when)). The logs name the feature,
+keeps of a request is set by its API terms
+([above](#what-is-sent-to-anthropic-and-when)). The logs name the feature,
 the repository and the outcome, never the material. The hourly `retention`
 cron does the pruning.
 
