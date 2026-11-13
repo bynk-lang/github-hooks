@@ -1,0 +1,431 @@
+// #103, step 2: stale pull request nudges, against an in-memory D1 with the
+// migrations applied. GitHub is stubbed at the wire. The run is scheduled for
+// 07:43 UTC on Thursday 5 November. Installation 42 delivers for
+// `bynk-lang/secret`, whose settings turn nudges on after 3 days, and for
+// `bynk-lang/quiet`, whose settings turn them off; `bynk-lang/away` has
+// delivered without one.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793864580000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+fixture mergedPull = "fixtures/github/pull_request.closed.json"
+
+--- 2026-11-05T07:43:00Z, the scheduled time.
+fn due() -> Int {
+	1793864580000
+}
+
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+--- A settings file, base64 as the contents API sends it.
+fn settings(base64: String) -> Result[Response, String] {
+	answer(200, "{\"type\": \"file\", \"encoding\": \"base64\", \"content\": \"\(base64)\"}")
+}
+
+// nudges: enabled: true, after_days: 3
+fn nudgesOn() -> Result[Response, String] {
+	settings("bnVkZ2VzOgogIGVuYWJsZWQ6IHRydWUKICBhZnRlcl9kYXlzOiAzCg==")
+}
+
+// nudges: enabled: false
+fn nudgesOff() -> Result[Response, String] {
+	settings("bnVkZ2VzOgogIGVuYWJsZWQ6IGZhbHNlCg==")
+}
+
+fn pull(
+	repo: String,
+	number: Int,
+	title: String,
+	author: String,
+	bot: Int,
+	draft: Int,
+	state: String,
+	ready: String,
+	locked: Int
+) -> SqlStatement {
+	SqlStatement {
+		sql: "INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, ready_at, updated_at, locked) VALUES (?1, ?2, ?3, ?4, ?5, 'main', 'b', ?6, ?7, '2026-10-01T00:00:00.000Z', ?8, '2026-11-01T00:00:00.000Z', ?9)",
+		params: [
+			Text(repo),
+			Integer(number),
+			Text(title),
+			Text(author),
+			Integer(bot),
+			Integer(draft),
+			Text(state),
+			Text(ready),
+			Integer(locked),
+		],
+	}
+}
+
+fn request(repo: String, number: Int, reviewer: String, team: Int) -> SqlStatement {
+	SqlStatement {
+		sql: "INSERT INTO pull_request_review_requests (repo, number, reviewer, team, requested_at) VALUES (?1, ?2, ?3, ?4, '2026-10-01T00:00:00.000Z')",
+		params: [Text(repo), Integer(number), Text(reviewer), Integer(team)],
+	}
+}
+
+fn review(
+	id: Int,
+	repo: String,
+	number: Int,
+	reviewer: String,
+	bot: Int,
+	at: String
+) -> SqlStatement {
+	SqlStatement {
+		sql: "INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at) VALUES (?1, ?2, ?3, ?4, ?5, 'commented', ?6)",
+		params: [Integer(id), Text(repo), Integer(number), Text(reviewer), Integer(bot), Text(at)],
+	}
+}
+
+const SECRET: String = "bynk-lang/secret"
+
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'pull_request', 'bynk-lang/secret', 42, 1, '2026-11-04T00:00:00.000Z'), ('d-2', 'pull_request', 'bynk-lang/quiet', 42, 1, '2026-11-04T00:00:00.000Z'), ('d-3', 'pull_request', 'bynk-lang/away', NULL, 1, '2026-11-04T00:00:00.000Z')",
+			params: [],
+		},
+		// 1: ready since 1 November, people and a team requested: nudged, 4 days.
+		pull(SECRET, 1, "Faster builds", "accuser", 0, 0, "open", "2026-11-01T07:00:00.000Z", 0),
+		request(SECRET, 1, "bob", 0),
+		request(SECRET, 1, "alice", 0),
+		request(SECRET, 1, "core", 1),
+		// 2: ready since October, but carol reviewed on 3 November: 2 days, not yet due.
+		pull(SECRET, 2, "Reviewed lately", "accuser", 0, 0, "open", "2026-10-20T00:00:00.000Z", 0),
+		request(SECRET, 2, "alice", 0),
+		review(201, SECRET, 2, "carol", 0, "2026-11-03T07:43:00.000Z"),
+		// 3 draft, 4 by a bot, 5 locked, 6 nobody requested, 11 closed: never waiting.
+		pull(SECRET, 3, "Draft", "accuser", 0, 1, "open", "2026-10-01T00:00:00.000Z", 0),
+		request(SECRET, 3, "alice", 0),
+		pull(
+			SECRET,
+			4,
+			"Bump a dependency",
+			"dependabot[bot]",
+			1,
+			0,
+			"open",
+			"2026-10-01T00:00:00.000Z",
+			0
+		),
+		request(SECRET, 4, "alice", 0),
+		pull(SECRET, 5, "Locked", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 1),
+		request(SECRET, 5, "alice", 0),
+		pull(SECRET, 6, "Nobody asked", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 0),
+		pull(SECRET, 11, "Closed", "accuser", 0, 0, "closed", "2026-10-01T00:00:00.000Z", 0),
+		request(SECRET, 11, "alice", 0),
+		// 7: only teams requested: nudged, with no one mentioned.
+		pull(SECRET, 7, "Docs", "accuser", 0, 0, "open", "2026-10-25T07:43:00.000Z", 0),
+		request(SECRET, 7, "docs", 1),
+		request(SECRET, 7, "core", 1),
+		// 8: its author's own review, and 9: a bot's review, don't restart the wait.
+		pull(SECRET, 8, "Self-reviewed", "accuser", 0, 0, "open", "2026-10-31T07:43:00.000Z", 0),
+		request(SECRET, 8, "alice", 0),
+		review(801, SECRET, 8, "Accuser", 0, "2026-11-04T00:00:00.000Z"),
+		pull(SECRET, 9, "Bot-reviewed", "accuser", 0, 0, "open", "2026-10-31T07:43:00.000Z", 0),
+		request(SECRET, 9, "alice", 0),
+		review(901, SECRET, 9, "copilot[bot]", 1, "2026-11-04T00:00:00.000Z"),
+		// 10: ready in October, back to draft, ready again on 4 November: 1 day, not yet due.
+		pull(SECRET, 10, "Ready again", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 0),
+		request(SECRET, 10, "alice", 0),
+		SqlStatement {
+			sql: "INSERT INTO pull_request_events (delivery, repo, number, action, at) VALUES ('e-10', 'bynk-lang/secret', 10, 'ready_for_review', '2026-11-04T07:43:00.000Z')",
+			params: [],
+		},
+		// 12: exactly 3 days, the threshold: nudged.
+		pull(SECRET, 12, "Just due", "accuser", 0, 0, "open", "2026-11-02T07:43:00.000Z", 0),
+		request(SECRET, 12, "alice", 0),
+		// Another repository with nudges off, and one with no installation.
+		pull("bynk-lang/quiet", 1, "Quiet", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 0),
+		request("bynk-lang/quiet", 1, "alice", 0),
+		pull("bynk-lang/away", 1, "Away", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 0),
+		request("bynk-lang/away", 1, "alice", 0),
+	]
+}
+
+--- A proposal as the job records it.
+type Proposed = {
+	repo: String,
+	kind: String,
+	target: Int,
+	title: Option[String],
+	payload: String,
+	reason: String,
+	status: String,
+}
+
+const PROPOSED: String = "FROM proposals ORDER BY repo, target"
+
+fn payload(body: String, since: String) -> String {
+	Json.encodePlain(CommentPayload { body: body, wait_since: Some(since) })
+}
+
+case "pull requests past their repository's threshold get a nudge, worded for who's waited on" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- nudges.schedule("43 7 * * 1-5", due())
+	expect r == Ok(())
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	expect rows == Ok([
+		Proposed {
+			repo: SECRET,
+			kind: "comment",
+			target: 1,
+			title: Some("Faster builds"),
+			payload: payload(
+				"@alice @bob, this pull request has been waiting on your review for 4 days (team: core).",
+				"2026-11-01T07:00:00.000Z"
+			),
+			reason: "Waiting on review for 4 days, past this repository's 3-day threshold.",
+			status: "pending",
+		},
+		Proposed {
+			repo: SECRET,
+			kind: "comment",
+			target: 7,
+			title: Some("Docs"),
+			payload: payload(
+				"This pull request has been waiting on review for 11 days (teams: core, docs).",
+				"2026-10-25T07:43:00.000Z"
+			),
+			reason: "Waiting on review for 11 days, past this repository's 3-day threshold.",
+			status: "pending",
+		},
+		Proposed {
+			repo: SECRET,
+			kind: "comment",
+			target: 8,
+			title: Some("Self-reviewed"),
+			payload: payload(
+				"@alice, this pull request has been waiting on your review for 5 days.",
+				"2026-10-31T07:43:00.000Z"
+			),
+			reason: "Waiting on review for 5 days, past this repository's 3-day threshold.",
+			status: "pending",
+		},
+		Proposed {
+			repo: SECRET,
+			kind: "comment",
+			target: 9,
+			title: Some("Bot-reviewed"),
+			payload: payload(
+				"@alice, this pull request has been waiting on your review for 5 days.",
+				"2026-10-31T07:43:00.000Z"
+			),
+			reason: "Waiting on review for 5 days, past this repository's 3-day threshold.",
+			status: "pending",
+		},
+		Proposed {
+			repo: SECRET,
+			kind: "comment",
+			target: 12,
+			title: Some("Just due"),
+			payload: payload(
+				"@alice, this pull request has been waiting on your review for 3 days.",
+				"2026-11-02T07:43:00.000Z"
+			),
+			reason: "Waiting on review for 3 days, past this repository's 3-day threshold.",
+			status: "pending",
+		},
+	])
+	// Each repository's settings are read once, in name order: quiet's, then secret's.
+	expect GitHubHttp.get called 2 times
+	expect LiveFeed.publishMaintainers called 5 times with e.kind == "proposal"
+	expect Logger.info called with msg == "nudges: 9 waiting on review; proposed 5, already nudged this wait 0, not yet due 2, nudges off 2, expired 0 no longer waiting"
+}
+
+case "a second run in the same wait proposes nothing more" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	expect rows.map((xs) => xs.length()) == Ok(5)
+	expect Logger.info called with msg == "nudges: 9 waiting on review; proposed 0, already nudged this wait 5, not yet due 2, nudges off 2, expired 0 no longer waiting"
+}
+
+case "a declined nudge holds for its wait; a review starts a new wait, which may be nudged" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let declined <- Deliveries.run("UPDATE proposals SET status = 'declined' WHERE target = 1", [])
+	expect declined is Ok(_)
+	// Declined: the same wait isn't nudged again a day later.
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 86400000)
+	let again <- Deliveries.select[Proposed]("FROM proposals WHERE target = 1", [])
+	expect again.map((xs) => xs.length()) == Ok(1)
+	// dave reviews on the 6th; four days on, the new wait is past 3 days.
+	let reviewed <- Deliveries.run(
+		"INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at) VALUES (101, 'bynk-lang/secret', 1, 'dave', 0, 'changes_requested', '2026-11-06T07:43:00.000Z')",
+		[]
+	)
+	expect reviewed is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 5 * 86400000)
+	let later <- Deliveries.select[Proposed]("FROM proposals WHERE target = 1 ORDER BY id", [])
+	let Ok(both) = later else {
+		expect false
+	}
+	expect both.map((p) => p.status) == ["declined", "pending"]
+	expect both
+		.skip(1)
+		.first()
+		.map(
+			(p) => p.payload
+		) == Some(payload(
+		"@alice @bob, this pull request has been waiting on your review for 4 days (team: core).",
+		"2026-11-06T07:43:00.000Z"
+	))
+}
+
+case "a review while a nudge is pending expires it, and the new wait gets its own" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let reviewed <- Deliveries.run(
+		"INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at) VALUES (101, 'bynk-lang/secret', 1, 'dave', 0, 'commented', '2026-11-06T07:43:00.000Z')",
+		[]
+	)
+	expect reviewed is Ok(_)
+	// The next morning the old nudge's reason has gone; four days on, the new wait is due.
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 86400000)
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 5 * 86400000)
+	let both <- Deliveries.select[Proposed]("FROM proposals WHERE target = 1 ORDER BY id", [])
+	let Ok(rows) = both else {
+		expect false
+	}
+	expect rows.map((p) => p.status) == ["expired", "pending"]
+}
+
+case "a pending nudge whose pull request is merged, or no longer requested, is expired" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let merged <- Deliveries.run(
+		"UPDATE pull_requests SET state = 'merged' WHERE repo = 'bynk-lang/secret' AND number = 1",
+		[]
+	)
+	let unasked <- Deliveries.run(
+		"DELETE FROM pull_request_review_requests WHERE repo = 'bynk-lang/secret' AND number = 12",
+		[]
+	)
+	expect merged is Ok(_)
+	expect unasked is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 86400000)
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	let Ok(all) = rows else {
+		expect false
+	}
+	expect all.filter((p) => p.status == "expired").map((p) => p.target) == [1, 12]
+	// 2 is newly due a day later (3 days since carol's review).
+	expect all.filter((p) => p.status == "pending").map((p) => p.target) == [2, 7, 8, 9]
+	expect Logger.info called with msg.endsWith("expired 2 no longer waiting")
+	expect LiveFeed.publishMaintainers called with e.kind == "proposal" && e.status == "expired"
+}
+
+case "a labels proposal, or a comment that isn't a nudge, is never expired by the job" {
+	let seeded <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'labels', 1, '{\"labels\":[\"bug\"]}', 'r', '2026-11-01T00:00:00.000Z', '2026-11-15T00:00:00.000Z', 'pending'), ('bynk-lang/secret', 'comment', 2, '{\"body\":\"Hi\"}', 'r', '2026-11-01T00:00:00.000Z', '2026-11-15T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	expect rows.map((xs) => xs.map((p) => p.status)) == Ok(["pending", "pending"])
+}
+
+case "the wait starts no earlier than the first review request" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// Ready since October, but nobody was asked until yesterday.
+	let asked <- Deliveries.batch(
+		[
+			pull(SECRET, 20, "Asked late", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 0),
+			SqlStatement {
+				sql: "INSERT INTO pull_request_review_requests (repo, number, reviewer, team, requested_at) VALUES ('bynk-lang/secret', 20, 'alice', 0, '2026-11-04T07:43:00.000Z'), ('bynk-lang/secret', 20, 'erin', 0, '2026-11-05T00:00:00.000Z')",
+				params: [],
+			},
+		]
+	)
+	expect asked is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let late <- Deliveries.select[Proposed]("FROM proposals WHERE target = 20", [])
+	expect late == Ok([])
+	// Three days after the first ask, it's due, though erin was asked later.
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 2 * 86400000)
+	let due3 <- Deliveries.select[Proposed]("FROM proposals WHERE target = 20", [])
+	expect due3.map(
+		(xs) => xs.map((p) => p.payload)
+	) == Ok([
+		payload(
+			"@alice @erin, this pull request has been waiting on your review for 3 days.",
+			"2026-11-04T07:43:00.000Z"
+		),
+	])
+}
+
+case "a repository with nudges off, or none read, proposes nothing" {
+	stub GitHubHttp.get(_, _) returns answer(404, "{\"message\": \"Not Found\"}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- nudges.schedule("43 7 * * 1-5", due())
+	expect r == Ok(())
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	expect rows == Ok([])
+	expect LiveFeed.publishMaintainers never called
+}
+
+case "nothing waiting, nothing read" {
+	let r <- nudges.schedule("43 7 * * 1-5", due())
+	expect r == Ok(())
+	expect GitHubHttp.get never called
+	expect Logger.info called with msg == "nudges: 0 waiting on review; proposed 0, already nudged this wait 0, not yet due 0, nudges off 0, expired 0 no longer waiting"
+}
+
+case "the wording: people mentioned, teams named, one day or many" {
+	expect nudgeText(
+		["alice"],
+		[],
+		1
+	) == "@alice, this pull request has been waiting on your review for 1 day."
+	expect nudgeText(
+		["alice", "bob"],
+		["core"],
+		2
+	) == "@alice @bob, this pull request has been waiting on your review for 2 days (team: core)."
+	expect nudgeText(
+		[],
+		["core", "docs"],
+		6
+	) == "This pull request has been waiting on review for 6 days (teams: core, docs)."
+	expect nudgeText([], [], 3) == "This pull request has been waiting on review for 3 days."
+}
+
+case "a wait is whole days, and a time that doesn't parse is no wait" {
+	let at = Instant.fromEpochMillis(due())
+	expect daysSince("2026-11-02T07:43:00.000Z", at) == 3
+	expect daysSince("2026-11-02T07:43:00.001Z", at) == 2
+	expect daysSince("not a time", at) == 0
+}
+
+case "a pull request's lock is recorded from its delivery, and kept when one doesn't say" {
+	let _ <- api.POST(
+		"/github",
+		RequestHeaders.of(["X-GitHub-Event: pull_request", "X-GitHub-Delivery: lock-1"]),
+		Bytes.fromUtf8(mergedPull.replace("\"locked\": false", "\"locked\": true"))
+	) by GitHub
+	let locked <- Deliveries.first("SELECT locked FROM pull_requests", [])
+	expect locked == Ok(Some("{\"locked\":1}"))
+}
