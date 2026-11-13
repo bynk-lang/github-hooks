@@ -504,3 +504,53 @@ case "older triages, another author's, another repository's, and other actions d
 	let _ <- Triage.run(delivery("t-1", "opened"), plainIssue())
 	expect AnthropicHttp.post called once
 }
+
+// Edges.
+
+case "a body of exactly the limit isn't cut" {
+	let at = triageUser(TriageIssue {
+		repo: "bynk-lang/secret",
+		number: 12,
+		author: "newcomer",
+		title: "Edge",
+		body: joined(elsewhereLines(6000), ""),
+	})
+	let Ok(m) = Json.decode[TriageMaterial](at) else {
+		expect false
+	}
+	expect m.body.length() == 6000
+	expect !m.body_truncated
+}
+
+case "a blank description is left off its label" {
+	let system = triageSystem(
+		"bynk-lang/secret",
+		[
+			RepoLabel {
+				name: "question",
+				description: Some("  "),
+			},
+			RepoLabel {
+				name: "bug",
+				description: Some(" Broken "),
+			},
+		]
+	)
+	expect system.contains("\n- question\n- bug: Broken")
+}
+
+case "finishing a run records only triage's row for the delivery" {
+	stub GitHubHttp.get(_, _) returns each [triageOn(), repoLabelList()]
+	stub AnthropicHttp.post(_, _, _) returns suggesting()
+	let welcomed <- Deliveries.run(
+		"INSERT INTO actions (delivery, action, status, detail) VALUES ('t-1', 'welcome', 'done', 'welcomed')",
+		[]
+	)
+	expect welcomed is Ok(_)
+	let _ <- Triage.run(delivery("t-1", "opened"), plainIssue())
+	let welcome <- Deliveries.firstAs[Ran](
+		"FROM actions WHERE delivery = 't-1' AND action = 'welcome'",
+		[]
+	)
+	expect welcome == Ok(Some(Ran { status: "done", detail: Some("welcomed") }))
+}
