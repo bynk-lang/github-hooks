@@ -86,21 +86,38 @@ the nudge job reads it (`waitingSince`), and since the same time: not
 merged, closed, back to draft, locked, without requests, or reviewed since.
 The nudge job expires such a nudge each weekday morning; this catches one
 approved in between. Every other proposal applies as it is.
+
+Answers `None` when it still applies, `Some(why)` when it no longer does,
+and `Err` when it couldn't be checked (a D1 error): the caller expires only
+the second, and gives the claim back for the third.
 ---
-fn stillApplies(p: ClaimedProposal) -> Effect[Result[(), String]] given Deliveries {
-	let true = p.kind == "comment" else { Effect.pure(Ok(())) }
-	let Ok(c) = Json.decode[CommentPayload](p.payload) else { Effect.pure(Ok(())) }
-	let Some(since) = c.wait_since else { Effect.pure(Ok(())) }
+fn stillApplies(p: ClaimedProposal) -> Effect[Result[Option[String], String]] given Deliveries {
+	let applies: Option[String] = None
+	let true = p.kind == "comment" else { Effect.pure(Ok(applies)) }
+	let Ok(c) = Json.decode[CommentPayload](p.payload) else { Effect.pure(Ok(applies)) }
+	let Some(since) = c.wait_since else { Effect.pure(Ok(applies)) }
 	let Ok(now) <- waitingSince(p.repo, p.target) else match {
-		Err(why) => Effect.pure(Err("couldn't be checked: \(why)")),
+		Err(why) => Effect.pure(Err(why)),
 	}
 	match now {
-		None => Effect.pure(Err("is no longer waiting on review")),
+		None => Effect.pure(Ok(Some("is no longer waiting on review"))),
 		Some(s) => if s == since {
-			Effect.pure(Ok(()))
+			Effect.pure(Ok(applies))
 		} else {
-			Effect.pure(Err("is no longer waiting since then: its wait has started again"))
+			Effect.pure(Ok(Some("is no longer waiting since then: its wait has started again")))
 		},
+	}
+}
+
+--- Gives a claimed proposal back (`approving` → `pending`), when it couldn't be checked, so it can be approved again.
+fn unclaim(id: Int) -> Effect[()] given Deliveries, Logger {
+	let back <- Deliveries.run(
+		"UPDATE proposals SET status = 'pending', decided_by = NULL, decided_at = NULL WHERE id = ?1 AND status = 'approving'",
+		[Integer(id)]
+	)
+	match back {
+		Ok(_) => Effect.pure(()),
+		Err(e) => Logger.error("could not give proposal \(id) back: \(sqlError(e))"),
 	}
 }
 
@@ -318,8 +335,18 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			ServerError("could not read the proposal")
 		},
 	}
-	let Ok(open) <- stillApplies(p) else match {
+	let Ok(lapsed) <- stillApplies(p) else match {
 		Err(why) => {
+			// Not knowing isn't evidence it stopped applying: give the claim back.
+			let _ <- unclaim(id)
+			let _ <- Logger.error("could not check proposal \(id) still applies: \(why)")
+			ServiceUnavailable(
+				"proposal \(id) couldn't be checked, so nothing was posted; try again"
+			)
+		},
+	}
+	let None = lapsed else match {
+		Some(why) => {
 			let _ <- settle(id, "expired", why)
 			let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
 			let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "expired"))

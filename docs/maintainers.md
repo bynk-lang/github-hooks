@@ -362,7 +362,8 @@ until a maintainer approves. There are two kinds:
   - **A nudge that no longer applies** is refused with a `409` before
     anything is posted, and expires: its pull request is no longer waiting
     on review as the nudge job reads it, or is waiting since a different
-    time. The nudge job also expires pending nudges whose
+    time. If the check itself can't be made (a D1 error), the proposal
+    is given back, still pending, with a `503`: try again. The nudge job also expires pending nudges whose
     reason has gone, each weekday morning
     ([proposals.md](proposals.md#stale-pull-request-nudges)).
   - **The end:** `approved` when GitHub accepted it. A proposal left

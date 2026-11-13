@@ -88,6 +88,11 @@ the people and teams requested (JSON lists), and the installation that last
 delivered for its repository. `?1` and `?2` narrow it to one pull request
 (repository and number), or are both null for every one. The nudge job and
 approving a nudge both read it, so they agree on what waiting means.
+
+The wait start moves when the earliest-requested reviewer is removed or
+re-requested, as their request no longer counts from when it did. That's
+deliberate: a changed set of reviewers is a new ask, so it's a new wait,
+and a pending nudge for the old one expires.
 ---
 const NUDGE_WAITING_SQL: String = """
 SELECT p.repo, p.number, p.title,

@@ -375,3 +375,27 @@ case "a comment that isn't a nudge is posted without a check" {
 	) by Maintainer("accuser")
 	expect r is Ok(_)
 }
+
+--- Where a proposal stands, and who's deciding it.
+type Claim = {
+	status: String,
+	decided_by: Option[String],
+}
+
+case "a check that can't be made gives the claim back, and expires nothing" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	stub Deliveries.all(_, _) returns Err(Failed("D1_ERROR: database is locked"))
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == ServiceUnavailable(
+		"proposal 1 couldn't be checked, so nothing was posted; try again"
+	)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Claim]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(Claim { status: "pending", decided_by: None }))
+	expect Logger.error called with msg.startsWith("could not check proposal 1 still applies: ")
+}
