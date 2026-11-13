@@ -149,14 +149,17 @@ proposed and created by GitHub on approval. An empty list, or one the
 repository has none of, means triage does nothing.
 
 **When it runs.** On `issues.opened` only, after the delivery is answered.
-An issue is left alone, with no call to GitHub or Claude:
+An issue is left alone, with no call to Claude, and none to GitHub beyond
+reading the settings file:
 
 - when it's a pull request, was opened by a bot, or was opened with labels
   already (a template or a maintainer triaged it);
 - when the repository's settings don't turn triage on;
-- when its author has had 3 issues triaged in that repository in the last
-  day, so one person, or one script, can't spend the cap
-  (`AUTHOR_DAILY_TRIAGES`);
+- when its author has had 3 issues triaged by Claude in that repository in
+  the last day, so one person, or one script, can't spend the cap
+  (`AUTHOR_DAILY_TRIAGES`). Only runs that spent a call count: those that
+  ended `done` with Claude's answer. A capped or failed run doesn't use the
+  author's share;
 - when it has had a `labels` proposal before, whatever became of it. **A
   decline is final for its issue.**
 
@@ -195,12 +198,16 @@ only against its reason.
 | Claude suggested no label | `done` | nothing fitted clearly |
 | Claude declined to triage it | `done` | a refusal, logged with its category |
 | Claude's reply was cut off | `done` | it ran out of its 300 tokens |
+| Claude's answer did not decode: … | `done` | the reply didn't match the schema |
+| none of triage.labels is a label the repository has | `done` | check the settings file against the repository's labels |
 | it already has a labels proposal | `done` | a decline is final |
 | … has had 3 issues triaged here in the last day | `done` | the author's share is used |
 | the … daily cap on Claude calls is reached | `failed` | see below |
 | Claude could not be asked: … | `failed` | Anthropic unreachable, or an error status |
 | ANTHROPIC_API_KEY is not set | `failed` | no key on the Worker |
 | GitHub refused …'s labels: … | `failed` | the labels couldn't be read |
+| could not read …'s labels: …, or …'s labels did not decode: … | `failed` | GitHub unreachable, or an answer that isn't a list of labels |
+| could not … | `failed` | a D1 error: counting, looking up or proposing |
 
 A `failed` run isn't retried by itself: an issue opened while a cap is
 reached stays untriaged. Redelivering its delivery (the App's settings,
@@ -209,7 +216,8 @@ again.
 
 **Its cost.** A call is the instructions and labels (a few hundred tokens)
 plus the issue: a short one adds little, and the longest, cut at 6,000
-characters, adds about 1,500. At most 300 tokens come back. It runs on
+characters, adds about 1,500 for English prose, and more for code, logs or
+Chinese and Japanese text. At most 300 tokens come back. It runs on
 Haiku 5.5, and `claude_calls` records each call's tokens, so the real cost
 is in D1.
 

@@ -97,6 +97,7 @@ fn triageIssue(delivery: String, installation: Int, issue: TriageIssue, allowed:
 		"""
 		SELECT count(*) AS n FROM deliveries d
 		JOIN actions a ON a.delivery = d.id AND a.action = 'triage'
+		  AND a.status = 'done' AND (a.detail LIKE 'proposed%' OR a.detail LIKE 'Claude%')
 		WHERE d.repo = ?1 COLLATE NOCASE AND d.sender = ?2 COLLATE NOCASE
 		  AND d.received_at >= ?3 AND d.id != ?4
 		""",
@@ -175,6 +176,13 @@ How many of one author's issues are triaged in a repository in a day. Anyone
 who can open an issue can spend the repository's daily cap on Claude calls,
 and with it part of the day's total; this keeps one author, or one script,
 from spending more than this much of it.
+
+Only runs that spent a call count: those that ended `done` with Claude's
+answer, whose details are `proposed …` or start `Claude` (no label, declined,
+cut off, not decoded). A run that stopped before the call (an earlier
+proposal, the author's share) or got no answer (a cap, no key, Anthropic
+unreachable, all `failed`) spent nothing, and a capped one may still be
+redelivered.
 ---
 const AUTHOR_DAILY_TRIAGES: Int = 3
 

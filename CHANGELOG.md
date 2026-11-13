@@ -14,9 +14,9 @@ All notable changes to github-hooks. The format follows
   the repository has them), and the suggestion becomes a `labels` proposal
   in Mine. Nothing reaches GitHub until a maintainer approves.
   - **Skipped before any call:** pull requests; issues opened by a bot or
-    with labels; an author with 3 issues triaged in the repository in the
-    last day; and an issue with any earlier `labels` proposal, so a decline
-    is final.
+    with labels; an author with 3 issues triaged by Claude in the
+    repository in the last day (only runs that spent a call count); and an
+    issue with any earlier `labels` proposal, so a decline is final.
   - **The call:** thinking off, low effort, `max_tokens` 300. The issue is
     the user turn as JSON, its body cut at 6,000 characters, and the schema
     limits the labels to the allowed ones.

@@ -554,3 +554,43 @@ case "finishing a run records only triage's row for the delivery" {
 	)
 	expect welcome == Ok(Some(Ran { status: "done", detail: Some("welcomed") }))
 }
+
+case "runs that spent no call don't use the author's share" {
+	stub GitHubHttp.get(_, _) returns each [triageOn(), repoLabelList()]
+	stub AnthropicHttp.post(_, _, _) returns suggesting()
+	let rows <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO deliveries (id, event, action, repo, sender, installation, size, received_at) VALUES ('c-1', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z'), ('c-2', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z'), ('c-3', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z'), ('c-4', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z'), ('c-5', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z')",
+				params: [],
+			},
+			SqlStatement {
+				sql: "INSERT INTO actions (delivery, action, status, detail) VALUES ('c-1', 'triage', 'failed', 'the repository daily cap on Claude calls is reached'), ('c-2', 'triage', 'failed', 'ANTHROPIC_API_KEY is not set'), ('c-3', 'triage', 'done', 'it already has a labels proposal'), ('c-4', 'triage', 'done', 'newcomer has had 3 issues triaged here in the last day'), ('c-5', 'triage', 'started', NULL)",
+				params: [],
+			},
+		]
+	)
+	expect rows is Ok(_)
+	let _ <- Triage.run(delivery("t-1", "opened"), plainIssue())
+	expect AnthropicHttp.post called once
+}
+
+case "runs Claude answered use the author's share, whatever it said" {
+	stub GitHubHttp.get(_, _) returns each [triageOn(), repoLabelList()]
+	stub AnthropicHttp.post(_, _, _) returns suggesting()
+	let rows <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO deliveries (id, event, action, repo, sender, installation, size, received_at) VALUES ('a-1', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z'), ('a-2', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z'), ('a-3', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T09:00:00.000Z')",
+				params: [],
+			},
+			SqlStatement {
+				sql: "INSERT INTO actions (delivery, action, status, detail) VALUES ('a-1', 'triage', 'done', 'Claude suggested no label'), ('a-2', 'triage', 'done', 'Claude declined to triage it'), ('a-3', 'triage', 'done', 'proposed bug (proposal 9)')",
+				params: [],
+			},
+		]
+	)
+	expect rows is Ok(_)
+	let _ <- Triage.run(delivery("t-1", "opened"), plainIssue())
+	expect AnthropicHttp.post never called
+}
