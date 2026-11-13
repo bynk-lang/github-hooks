@@ -45,7 +45,7 @@ provides Triage = ClaudeTriage given Deliveries, Logger, Clock, Secrets, Tokens,
 		let true = claim.changes == 1 else {
 			Logger.info("triage for \(d.id) already done or in progress")
 		}
-		let ended <- triageIssue(installation, issue, settings.triage.labels)
+		let ended <- triageIssue(d.id, installation, issue, settings.triage.labels)
 		finishTriage(d.id, issue, ended)
 	}
 }
@@ -85,11 +85,32 @@ fn finishTriage(
 }
 
 ---
-One claimed run: skip an issue that already has a `labels` proposal (a
-decline is final for its issue), read the labels the repository has, keep the
-allowed ones, ask Claude, and propose what comes back within them.
+One claimed run (`delivery`'s): skip an issue whose author has had
+`AUTHOR_DAILY_TRIAGES` triaged here in the last day, or that already has a
+`labels` proposal (a decline is final for its issue); then read the labels
+the repository has, keep the allowed ones, ask Claude, and propose what comes
+back within them.
 ---
-fn triageIssue(installation: Int, issue: TriageIssue, allowed: List[String]) -> Effect[TriageEnd] given Deliveries, Logger, Clock, Secrets, AppAuth, GitHubHttp, AnthropicHttp, LiveFeed {
+fn triageIssue(delivery: String, installation: Int, issue: TriageIssue, allowed: List[String]) -> Effect[TriageEnd] given Deliveries, Logger, Clock, Secrets, AppAuth, GitHubHttp, AnthropicHttp, LiveFeed {
+	let now <- Clock.now()
+	let Ok(lately) <- Deliveries.first(
+		"""
+		SELECT count(*) AS n FROM deliveries d
+		JOIN actions a ON a.delivery = d.id AND a.action = 'triage'
+		WHERE d.repo = ?1 COLLATE NOCASE AND d.sender = ?2 COLLATE NOCASE
+		  AND d.received_at >= ?3 AND d.id != ?4
+		""",
+		[Text(issue.repo), Text(issue.author), Text((now - 1.days).toIso()), Text(delivery)]
+	) else match {
+		Err(e) => mayRetry("could not count the author's triages: \(sqlError(e))"),
+	}
+	let triaged = match lately {
+		Some(row) => Json.decodeSql[Counted](row).map((c) => c.n).getOrElse(0),
+		None => 0,
+	}
+	let true = triaged < AUTHOR_DAILY_TRIAGES else {
+		ended("\(issue.author) has had \(triaged) issues triaged here in the last day")
+	}
 	let Ok(earlier) <- Deliveries.first(
 		"SELECT id FROM proposals WHERE repo = ?1 AND kind = 'labels' AND target = ?2 LIMIT 1",
 		[Text(issue.repo), Integer(issue.number)]
@@ -149,10 +170,23 @@ type TriagePayload = {
 	pull_request: Option[PullLink],
 }
 
---- An issue triage may ask Claude about.
+---
+How many of one author's issues are triaged in a repository in a day. Anyone
+who can open an issue can spend the repository's daily cap on Claude calls,
+and with it part of the day's total; this keeps one author, or one script,
+from spending more than this much of it.
+---
+const AUTHOR_DAILY_TRIAGES: Int = 3
+
+type Counted = {
+	n: Int,
+}
+
+--- An issue triage may ask Claude about, and who opened it.
 type TriageIssue = {
 	repo: String,
 	number: Int,
+	author: String,
 	title: String,
 	body: String,
 }
@@ -176,6 +210,7 @@ fn triageable(body: Bytes) -> Option[Result[TriageIssue, String]] {
 		Some(Ok(TriageIssue {
 			repo: p.repository.full_name,
 			number: i.number,
+			author: i.user.login,
 			title: i.title,
 			body: i.body.getOrElse(""),
 		}))
@@ -271,8 +306,10 @@ fn triageAsk(issue: TriageIssue, labels: List[RepoLabel]) -> ClaudeAsk {
 }
 
 ---
-The instructions, then the labels: stable per repository, so they're the
-cached prefix. The issue is anyone's text, so they say it is material to
+The instructions, then the labels. They're marked for caching as every system
+prompt is, but they're well short of Haiku 5.5's 512-token minimum, so they're
+not cached in practice: `claude_calls` shows no cache reads for triage, and
+that's expected. The issue is anyone's text, so they say it is material to
 classify, never instructions.
 ---
 fn triageSystem(repo: String, labels: List[RepoLabel]) -> String {

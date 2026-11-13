@@ -154,6 +154,7 @@ case "the body is cut to its limit, and says so" {
 	let long = TriageIssue {
 		repo: "bynk-lang/secret",
 		number: 12,
+		author: "newcomer",
 		title: "Long",
 		body: joined(elsewhereLines(7000), ""),
 	}
@@ -166,6 +167,7 @@ case "the body is cut to its limit, and says so" {
 	let short = triageUser(TriageIssue {
 		repo: "bynk-lang/secret",
 		number: 12,
+		author: "newcomer",
 		title: "Short",
 		body: "a body",
 	})
@@ -402,4 +404,103 @@ case "a delivery to /github triages after it is answered" {
 		status: "done",
 		detail: Some("proposed bug, documentation (proposal 1)"),
 	}))
+}
+
+// One author's share of the cap.
+
+--- `n` earlier deliveries in `repo` from `sender` at `at`, each triaged (`id` prefixed by `tag`).
+fn triagedBefore(
+	tag: String,
+	repo: String,
+	sender: String,
+	at: String,
+	n: Int
+) -> List[SqlStatement] {
+	let none: List[SqlStatement] = []
+	if n <= 0 {
+		none
+	} else {
+		triagedBefore(tag, repo, sender, at, n - 1).concat(
+			[
+				SqlStatement {
+					sql: "INSERT INTO deliveries (id, event, action, repo, sender, installation, size, received_at) VALUES (?1, 'issues', 'opened', ?2, ?3, 42, 1, ?4)",
+					params: [Text("\(tag)-\(n)"), Text(repo), Text(sender), Text(at)],
+				},
+				SqlStatement {
+					sql: "INSERT INTO actions (delivery, action, status, detail) VALUES (?1, 'triage', 'done', 'proposed')",
+					params: [Text("\(tag)-\(n)")],
+				},
+			]
+		)
+	}
+}
+
+case "an author with three issues triaged here in the last day isn't asked about again" {
+	stub GitHubHttp.get(_, _) returns each [triageOn(), repoLabelList()]
+	stub AnthropicHttp.post(_, _, _) returns suggesting()
+	let seeded <- Deliveries.batch(triagedBefore(
+		"recent",
+		"bynk-lang/Secret",
+		"NewComer",
+		"2026-11-04T12:00:00.000Z",
+		3
+	))
+	expect seeded is Ok(_)
+	let _ <- Triage.run(delivery("t-1", "opened"), plainIssue())
+	expect AnthropicHttp.post never called
+	let ran <- Deliveries.firstAs[Ran]("FROM actions WHERE delivery = 't-1'", [])
+	expect ran == Ok(Some(Ran {
+		status: "done",
+		detail: Some("newcomer has had 3 issues triaged here in the last day"),
+	}))
+}
+
+case "older triages, another author's, another repository's, and other actions don't count" {
+	stub GitHubHttp.get(_, _) returns each [triageOn(), repoLabelList()]
+	stub AnthropicHttp.post(_, _, _) returns suggesting()
+	let older <- Deliveries.batch(triagedBefore(
+		"older",
+		"bynk-lang/secret",
+		"newcomer",
+		"2026-11-04T11:59:59.999Z",
+		3
+	))
+	let recent <- Deliveries.batch(triagedBefore(
+		"recent",
+		"bynk-lang/secret",
+		"newcomer",
+		"2026-11-04T12:00:00.000Z",
+		2
+	))
+	let others <- Deliveries.batch(triagedBefore(
+		"other",
+		"bynk-lang/secret",
+		"someone",
+		"2026-11-05T11:00:00.000Z",
+		3
+	))
+	let elsewhere <- Deliveries.batch(triagedBefore(
+		"away",
+		"bynk-lang/bynk",
+		"newcomer",
+		"2026-11-05T11:00:00.000Z",
+		3
+	))
+	let welcomed <- Deliveries.run(
+		"INSERT INTO deliveries (id, event, action, repo, sender, installation, size, received_at) VALUES ('w-1', 'issues', 'opened', 'bynk-lang/secret', 'newcomer', 42, 1, '2026-11-05T11:00:00.000Z')",
+		[]
+	)
+	let welcome <- Deliveries.run(
+		"INSERT INTO actions (delivery, action, status) VALUES ('w-1', 'welcome', 'done')",
+		[]
+	)
+	expect older is Ok(_)
+	expect recent is Ok(_)
+	expect others is Ok(_)
+	expect elsewhere is Ok(_)
+	expect welcomed is Ok(_)
+	expect welcome is Ok(_)
+	// Two in the last day, so this is the third.
+	let _ <- Triage.run(delivery("t-1", "opened"), plainIssue())
+	expect AnthropicHttp.post called once
 }
