@@ -4,6 +4,6 @@
   "description": "Pinned tools for bynk dev and bynk check --emit; not a Node project.",
   "devDependencies": {
     "typescript": "7.0.2",
-    "wrangler": "4.159.0"
+    "wrangler": "4.160.0"
   }
 }
