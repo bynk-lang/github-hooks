@@ -1,0 +1,39 @@
+// #95: triage without `ANTHROPIC_API_KEY` proposes nothing, and leaves its run
+// to be retried by a redelivery once the key is set.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+type Ran = {
+	status: String,
+	detail: Option[String],
+}
+
+case "without an API key, triage proposes nothing and may be retried" {
+	// triage: enabled: true, labels: [bug, enhancement, Documentation, wontfix]
+	stub GitHubHttp.get(_, _) returns each [Ok(Response { status: 200, headers: Map.empty(), body: "{\"encoding\": \"base64\", \"content\": \"dHJpYWdlOgogIGVuYWJsZWQ6IHRydWUKICBsYWJlbHM6IFtidWcsIGVuaGFuY2VtZW50LCBEb2N1bWVudGF0aW9uLCB3b250Zml4XQo=\"}" }), Ok(Response { status: 200, headers: Map.empty(), body: "[{\"name\": \"bug\", \"description\": null}]" })]
+	stub AnthropicHttp.post(_, _, _) returns Err("never called")
+	let _ <- Triage.run(
+		Delivery {
+			id: "t-1",
+			event: "issues",
+			action: Some("opened"),
+			repo: Some("bynk-lang/secret"),
+			sender: Some("newcomer"),
+			org: Some("bynk-lang"),
+			installation: Some(42),
+			deleted: None,
+			size: 1,
+		},
+		Bytes.fromUtf8(
+			"{\"action\": \"opened\", \"issue\": {\"number\": 12, \"title\": \"Crash\", \"body\": null, \"user\": {\"login\": \"newcomer\", \"type\": \"User\"}, \"labels\": []}, \"repository\": {\"full_name\": \"bynk-lang/secret\"}}"
+		)
+	)
+	expect AnthropicHttp.post never called
+	let ran <- Deliveries.firstAs[Ran]("FROM actions WHERE action = 'triage'", [])
+	expect ran == Ok(Some(Ran { status: "failed", detail: Some("ANTHROPIC_API_KEY is not set") }))
+	let proposed <- Deliveries.first("SELECT id FROM proposals", [])
+	expect proposed == Ok(None)
+}
