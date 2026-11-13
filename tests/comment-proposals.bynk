@@ -200,3 +200,32 @@ case "the rebuilt table still refuses a kind it doesn't know" {
 	)
 	expect bad is Err(_)
 }
+
+case "a pending comment doesn't stand in for a labels proposal on the same target" {
+	stub LiveFeed.publishMaintainers(_) returns ()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// Pull request 30 already has a pending comment proposal (id 1).
+	let first <- proposeLabels(
+		NewProposal {
+			repo: "bynk-lang/secret",
+			target: 30,
+			title: Some("Faster builds"),
+			labels: ["enhancement"],
+			reason: "A speed-up.",
+		},
+		None
+	)
+	let again <- proposeLabels(
+		NewProposal {
+			repo: "bynk-lang/secret",
+			target: 30,
+			title: Some("Faster builds"),
+			labels: ["enhancement"],
+			reason: "A speed-up.",
+		},
+		None
+	)
+	expect first == Ok(3)
+	expect again == Ok(3)
+}
