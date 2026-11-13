@@ -366,8 +366,10 @@ until a maintainer approves. There are two kinds:
     ([proposals.md](proposals.md#stale-pull-request-nudges)).
   - **The end:** `approved` when GitHub accepted it. A proposal left
     `approving` is one whose Worker stopped before GitHub answered (a call
-    that outlived the request, say): the labels may or may not be on the
-    target, and it isn't tried again.
+    that outlived the request, say): the labels or the comment may or may
+    not be on the target, and it isn't tried again. Check a stuck nudge by
+    hand before doing anything else, as posting it again would ping people
+    twice.
   - **A refusal** leaves the proposal `failed`, with GitHub's reason, and a
     `502`. A `403` means the App lacks **Issues** or **Pull requests: Read
     and write**, or the conversation is locked; GitHub's reason says which.

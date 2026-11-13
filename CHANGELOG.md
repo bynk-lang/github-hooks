@@ -10,8 +10,9 @@ All notable changes to github-hooks. The format follows
 
 - Stale pull request nudges (#103, #69 slice 3): each weekday at 07:43 UTC,
   a ready pull request whose wait for review has reached its repository's
-  `nudges.after_days` gets a proposed comment to the people still requested
-  to review it ([proposals.md](docs/proposals.md#stale-pull-request-nudges)).
+  `nudges.after_days` (in whole 24-hour periods, weekends included) gets a
+  proposed comment to the people still requested to review it
+  ([proposals.md](docs/proposals.md#stale-pull-request-nudges)).
   There's no Claude call. Nothing is posted until a maintainer approves.
   - **Waiting:** open, not a draft, not a bot's, not locked, with someone
     requested. The wait starts at the latest of becoming ready, the earliest

@@ -24,7 +24,7 @@ release_notes:
 | `triage.enabled` | `false` | suggest labels for each new issue ([triage](proposals.md#issue-triage), #95) |
 | `triage.labels` | `[]` | the only labels triage may suggest, among those the repository has; empty means none |
 | `nudges.enabled` | `false` | propose a nudge for a ready pull request waiting on review ([nudges](proposals.md#stale-pull-request-nudges), #103) |
-| `nudges.after_days` | `3` | how many whole days a pull request waits on review before a nudge: 1 to 30 |
+| `nudges.after_days` | `3` | how many whole 24-hour periods, weekends included, a pull request waits on review before a nudge: 1 to 30 |
 | `release_notes.enabled` | `false` | draft notes for each release (#69, slice 4) |
 
 Any section or key left out takes its default. Triage and nudges read

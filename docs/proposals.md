@@ -252,8 +252,10 @@ still asked to review it. Its wait starts at the latest of:
 - its last review by someone other than its author, and not a bot. The
   author's own replies, or an automated reviewer's, don't restart it.
 
-It's nudged once the wait reaches `after_days` whole days, counted as
-calendar days to the scheduled time.
+It's nudged once the wait reaches `after_days` whole 24-hour periods,
+counted to the scheduled time, weekends included. So a wait that started
+on Monday at 17:00 is one whole day old at Wednesday's 07:43 run, and two
+at Thursday's.
 
 **What is proposed.** A `comment`, for example:
 
@@ -278,8 +280,12 @@ stands rather than a second one.
 - Approving a nudge whose pull request is no longer open, as the App last
   recorded it, is refused with a `409`, and the nudge expires. That covers
   the hours between runs, and the weekend.
-- One gap remains: a review submitted after the morning's run and before the
-  approval doesn't stop it, so it posts once, to people who were requested.
+- Approval checks **only** that the pull request is still open. Anything
+  else that changes after the morning's run waits for the next run to
+  expire the nudge: a review, removed requests (it would mention people no
+  longer asked), a move back to draft, or a lock (GitHub then refuses the
+  comment with a `403`, and the proposal ends `failed`). Check the pull
+  request before approving a nudge that's been waiting a while.
 
 **Its log.** Each run logs one line, such as "nudges: 9 waiting on review;
 proposed 2, already nudged this wait 3, not yet due 2, nudges off 2, expired
