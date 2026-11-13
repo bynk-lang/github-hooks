@@ -120,6 +120,7 @@ case "Mine lists the pending proposals with their labels, and today's Claude cal
 			target: 12,
 			title: Some("The build fails on Windows"),
 			labels: ["bug", "windows"],
+			comment: None,
 			reason: "A build failure on one platform.",
 			proposed_at: "2026-11-05T12:00:00.000Z",
 			expires_at: "2026-11-19T12:00:00.000Z",
@@ -180,7 +181,7 @@ case "a refused apply fails the proposal with GitHub's reason, and isn't tried a
 		ProposalDecision { id: 1 }
 	) by Maintainer("accuser")
 	expect r == BadGateway(
-		"GitHub refused the labels (does the App have Issues: Read and write?): 403 Resource not accessible by integration"
+		"GitHub refused the labels (does the App have Issues and Pull requests: Read and write?): 403 Resource not accessible by integration"
 	)
 	let row <- Deliveries.firstAs[Settled](SETTLED, [])
 	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))

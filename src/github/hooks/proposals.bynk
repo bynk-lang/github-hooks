@@ -2,8 +2,8 @@ context github.hooks
 
 // The App's proposals (#88, step 2): what a feature of #69 would do, recorded
 // and waiting on a maintainer, who approves or declines it in Mine. Nothing
-// is posted to GitHub until a maintainer approves. One kind so far,
-// `labels`; triage (#69, slice 2) is the first feature to propose.
+// is posted to GitHub until a maintainer approves. Two kinds: `labels`
+// (triage, #69 slice 2) and `comment` (stale pull request nudges, slice 3).
 
 --- How long a proposal waits for a decision before it expires.
 const PROPOSAL_WAIT: Duration = 14.days
@@ -20,6 +20,68 @@ type NewProposal = {
 --- The `labels` kind's payload: the labels to add.
 type LabelsPayload = {
 	labels: List[String],
+}
+
+--- The `comment` kind's payload: the comment to post, and, for a nudge, the start of the wait it's for.
+type CommentPayload = {
+	body: String,
+	wait_since: Option[String] = None,
+}
+
+---
+What approving a proposal asks of GitHub: `body` posted to `url`, which
+answers `ok` when it's done. `done` says what was done, for the audit and the
+log; `message` says it to the maintainer; `noun` names it in a refusal.
+---
+type ProposalAction = {
+	url: String,
+	body: String,
+	ok: Int,
+	done: String,
+	message: String,
+	noun: String,
+}
+
+--- What approving a proposal of `kind` with `payload` on `repo`'s `target` asks of GitHub, or why it can't be read.
+fn actionOf(
+	kind: String,
+	payload: String,
+	repo: String,
+	target: Int
+) -> Result[ProposalAction, String] {
+	let issue = "https://api.github.com/repos/\(repo)/issues/\(target)"
+	if kind == "labels" {
+		match Json.decode[LabelsPayload](payload) {
+			Ok(l) => Ok(ProposalAction {
+				url: "\(issue)/labels",
+				body: Json.encodePlain(l),
+				ok: 200,
+				done: "labelled \(joined(l.labels, ", "))",
+				message: "Labelled \(repo)#\(target): \(joined(l.labels, ", "))",
+				noun: "the labels",
+			}),
+			Err(e) => Err("its payload did not decode: \(jsonError(e))"),
+		}
+	} else if kind == "comment" {
+		match Json.decode[CommentPayload](payload) {
+			Ok(c) => Ok(ProposalAction {
+				url: "\(issue)/comments",
+				body: Json.encodePlain(CommentBody { body: c.body }),
+				ok: 201,
+				done: "commented",
+				message: "Commented on \(repo)#\(target)",
+				noun: "the comment",
+			}),
+			Err(e) => Err("its payload did not decode: \(jsonError(e))"),
+		}
+	} else {
+		Err("the App doesn't know how to act on a \(kind) proposal")
+	}
+}
+
+--- A comment as GitHub's API takes it.
+type CommentBody = {
+	body: String,
 }
 
 --- A proposal as approving it needs it.
@@ -231,9 +293,8 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			ServerError("could not read the proposal")
 		},
 	}
-	let Ok(payload) = Json.decode[LabelsPayload](p.payload) else match {
-		Err(e) => {
-			let why = "its payload did not decode: \(jsonError(e))"
+	let Ok(action) = actionOf(p.kind, p.payload, p.repo, p.target) else match {
+		Err(why) => {
 			let _ <- settle(id, "failed", why)
 			let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
 			ServerError("proposal \(id) could not be read: \(why)")
@@ -261,13 +322,12 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 		let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "failed"))
 		ServiceUnavailable(why)
 	}
-	let url = "https://api.github.com/repos/\(p.repo)/issues/\(p.target)/labels"
-	let sent <- asApp(inst, (token) => GitHubHttp.post(token, url, Json.encodePlain(payload)))
+	let sent <- asApp(inst, (token) => GitHubHttp.post(token, action.url, action.body))
 	let answer = match sent {
-		Ok(res) => if res.status == 200 {
+		Ok(res) => if res.status == action.ok {
 			ActionOutcome {
 				status: Some(res.status),
-				outcome: "labelled \(joined(payload.labels, ", "))",
+				outcome: action.done,
 			}
 		} else {
 			ActionOutcome {
@@ -280,7 +340,7 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			outcome: why,
 		},
 	}
-	let applied = answer.status == Some(200)
+	let applied = answer.status == Some(action.ok)
 	let status = if applied { "approved" } else { "failed" }
 	let _ <- settle(id, status, answer.outcome)
 	let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, answer.status, answer.outcome)
@@ -289,19 +349,15 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 		"\(login) approved proposal \(id) for \(p.repo)#\(p.target): \(answer.outcome)"
 	)
 	if applied {
-		Ok(ProposalDecided {
-			id: id,
-			status: status,
-			message: "Labelled \(p.repo)#\(p.target): \(joined(payload.labels, ", "))",
-		})
+		Ok(ProposalDecided { id: id, status: status, message: action.message })
 	} else {
 		match answer.status {
 			Some(403) => BadGateway(
-				"GitHub refused the labels (does the App have Issues: Read and write?): \(answer.outcome)"
+				"GitHub refused \(action.noun) (does the App have Issues and Pull requests: Read and write?): \(answer.outcome)"
 			),
-			Some(_) => BadGateway("GitHub refused the labels: \(answer.outcome)"),
+			Some(_) => BadGateway("GitHub refused \(action.noun): \(answer.outcome)"),
 			None => BadGateway(
-				"the App couldn't ask GitHub for the labels; the Worker's log says why"
+				"the App couldn't ask GitHub for \(action.noun); the Worker's log says why"
 			),
 		}
 	}
@@ -387,9 +443,21 @@ fn pendingProposals(
 		kind: r.kind,
 		target: r.target,
 		title: r.title,
-		labels: match Json.decode[LabelsPayload](r.payload) {
-			Ok(l) => l.labels,
-			Err(_) => [],
+		labels: if r.kind == "labels" {
+			match Json.decode[LabelsPayload](r.payload) {
+				Ok(l) => l.labels,
+				Err(_) => [],
+			}
+		} else {
+			[]
+		},
+		comment: if r.kind == "comment" {
+			match Json.decode[CommentPayload](r.payload) {
+				Ok(c) => Some(c.body),
+				Err(_) => None,
+			}
+		} else {
+			None
 		},
 		reason: r.reason,
 		proposed_at: r.proposed_at,

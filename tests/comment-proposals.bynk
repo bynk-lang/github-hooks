@@ -1,0 +1,202 @@
+// #103, step 1: the `comment` kind of proposal, approved or declined by a
+// maintainer, against an in-memory D1 with the migrations applied. GitHub is
+// stubbed at the wire. It's 12:00 UTC on 5 November; accuser is a maintainer;
+// installation 42 delivered for `bynk-lang/secret`.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+const NUDGE: String = "@alice @bob, this pull request has been waiting on your review for 5 days (team: core)."
+
+fn seed() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'pull_request', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+		// A comment proposal for pull request 30, and one whose payload is broken.
+		SqlStatement {
+			sql: "INSERT INTO proposals (id, repo, kind, target, title, payload, reason, proposed_at, expires_at, status) VALUES (1, 'bynk-lang/secret', 'comment', 30, 'Faster builds', ?1, 'Ready for 5 days, past the 3-day threshold.', '2026-11-05T07:43:00.000Z', '2026-11-19T07:43:00.000Z', 'pending'), (2, 'bynk-lang/secret', 'comment', 31, NULL, '{\"text\": 1}', 'r', '2026-11-05T07:43:00.000Z', '2026-11-19T07:43:00.000Z', 'pending')",
+			params: [
+				Text(Json.encodePlain(CommentPayload {
+					body: NUDGE,
+					wait_since: Some("2026-10-31T09:00:00.000Z"),
+				})),
+			],
+		},
+	]
+}
+
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+type Settled = {
+	status: String,
+	outcome: Option[String],
+}
+
+type Audited = {
+	action: String,
+	proposal: Option[Int],
+	status: Option[Int],
+	outcome: String,
+}
+
+case "Mine shows a comment proposal's text, and no labels" {
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals.first() == Some(ProposalWaiting {
+		id: 1,
+		repo: "bynk-lang/secret",
+		kind: "comment",
+		target: 30,
+		title: Some("Faster builds"),
+		labels: [],
+		comment: Some(NUDGE),
+		reason: "Ready for 5 days, past the 3-day threshold.",
+		proposed_at: "2026-11-05T07:43:00.000Z",
+		expires_at: "2026-11-19T07:43:00.000Z",
+	})
+	// A payload that doesn't decode shows no text, rather than failing Mine.
+	expect m.proposals.skip(1).first().map((p) => p.comment) == Some(None)
+}
+
+case "approving a comment posts it as the App, once, and audits it" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{\"id\": 77, \"body\": \"…\"}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Ok(ProposalDecided {
+		id: 1,
+		status: "approved",
+		message: "Commented on bynk-lang/secret#30",
+	})
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/secret/issues/30/comments"
+	// Only the text is posted: the wait's start stays in the proposal.
+	expect GitHubHttp.post called once with body == Json.encodePlain(CommentBody { body: NUDGE })
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(Settled { status: "approved", outcome: Some("commented") }))
+	let audit <- Deliveries.select[Audited]("FROM maintainer_actions ORDER BY id", [])
+	expect audit == Ok([
+		Audited {
+			action: "approve-proposal",
+			proposal: Some(1),
+			status: Some(201),
+			outcome: "commented",
+		},
+	])
+	let again <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect again == Conflict("proposal 1 was already approved")
+	expect GitHubHttp.post called once
+}
+
+case "a refused comment fails the proposal with GitHub's reason" {
+	stub GitHubHttp.post(_, _, _) returns answer(403, "{\"message\": \"Resource not accessible by integration\"}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"GitHub refused the comment (does the App have Issues and Pull requests: Read and write?): 403 Resource not accessible by integration"
+	)
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(Settled {
+		status: "failed",
+		outcome: Some("403 Resource not accessible by integration"),
+	}))
+}
+
+case "a 200 isn't taken for a posted comment" {
+	stub GitHubHttp.post(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is BadGateway(_)
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))
+}
+
+case "declining a comment posts nothing" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("declined"))
+}
+
+case "a comment whose payload doesn't decode fails, and nothing is posted" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 2 }
+	) by Maintainer("accuser")
+	expect r is ServerError(_)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 2", [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))
+}
+
+case "what each kind asks of GitHub" {
+	let Ok(l) = actionOf("labels", "{\"labels\":[\"bug\"]}", "bynk-lang/secret", 12) else {
+		expect false
+	}
+	expect l.url == "https://api.github.com/repos/bynk-lang/secret/issues/12/labels"
+	expect l.ok == 200
+	let Ok(c) = actionOf(
+		"comment",
+		"{\"body\":\"Hi\",\"wait_since\":null}",
+		"bynk-lang/secret",
+		30
+	) else {
+		expect false
+	}
+	expect c.url == "https://api.github.com/repos/bynk-lang/secret/issues/30/comments"
+	expect c.body == "{\"body\":\"Hi\"}"
+	expect c.ok == 201
+	expect actionOf("labels", "{\"body\":\"Hi\"}", "bynk-lang/secret", 30) is Err(_)
+	expect actionOf("comment", "{\"labels\":[]}", "bynk-lang/secret", 30) is Err(_)
+	expect actionOf(
+		"poke",
+		"{}",
+		"bynk-lang/secret",
+		30
+	) == Err("the App doesn't know how to act on a poke proposal")
+}
+
+case "the rebuilt table still refuses a kind it doesn't know" {
+	let bad <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect bad is Err(_)
+}

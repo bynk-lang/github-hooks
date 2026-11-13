@@ -187,7 +187,8 @@ type SettingsProblem = {
 ---
 A proposal waiting on a maintainer (#88): what the App would do (`kind`, on
 issue or pull request `target` of `repo`), and why. For `labels`, `labels`
-are the labels it would add. It expires, unanswered, at `expires_at`.
+are the labels it would add; for `comment`, `comment` is the text it would
+post. It expires, unanswered, at `expires_at`.
 ---
 type ProposalWaiting = {
 	id: Int,
@@ -196,6 +197,7 @@ type ProposalWaiting = {
 	target: Int,
 	title: Option[String],
 	labels: List[String],
+	comment: Option[String],
 	reason: String,
 	proposed_at: String,
 	expires_at: String,
