@@ -6,6 +6,8 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
 ### Added
 
 - Issue triage (#95, #69 slice 2), the first phase 5 feature: when an issue
@@ -712,7 +714,8 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/bynk-lang/github-hooks/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bynk-lang/github-hooks/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/bynk-lang/github-hooks/releases/tag/v0.1.0
