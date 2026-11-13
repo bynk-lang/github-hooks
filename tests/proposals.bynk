@@ -181,7 +181,7 @@ case "a refused apply fails the proposal with GitHub's reason, and isn't tried a
 		ProposalDecision { id: 1 }
 	) by Maintainer("accuser")
 	expect r == BadGateway(
-		"GitHub refused the labels (does the App have Issues and Pull requests: Read and write?): 403 Resource not accessible by integration"
+		"GitHub refused the labels (a missing permission, Issues and Pull requests: Read and write, or a locked conversation): 403 Resource not accessible by integration"
 	)
 	let row <- Deliveries.firstAs[Settled](SETTLED, [])
 	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))

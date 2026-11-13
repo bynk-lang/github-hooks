@@ -7,8 +7,13 @@
 -- with `comment` allowed, keeping every row and id, and its indexes are
 -- recreated. `claude_calls.proposal` and `maintainer_actions.proposal` refer
 -- to proposals by id, which the copy keeps.
+--
+-- `id` becomes AUTOINCREMENT, as `maintainer_actions.id` is: without it, a new
+-- row takes max(id) + 1, so a pruned highest id would be reused, and the
+-- audit's references (kept for good) would point at a proposal they never
+-- meant. The copy seeds `sqlite_sequence` from the highest id it inserts.
 CREATE TABLE proposals_v2 (
-  id           INTEGER PRIMARY KEY,
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
   repo         TEXT    NOT NULL COLLATE NOCASE,
   kind         TEXT    NOT NULL CHECK (kind IN ('labels', 'comment')),
   target       INTEGER NOT NULL,            -- the issue or pull request number

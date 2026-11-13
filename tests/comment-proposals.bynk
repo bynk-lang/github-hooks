@@ -116,7 +116,7 @@ case "a refused comment fails the proposal with GitHub's reason" {
 		ProposalDecision { id: 1 }
 	) by Maintainer("accuser")
 	expect r == BadGateway(
-		"GitHub refused the comment (does the App have Issues and Pull requests: Read and write?): 403 Resource not accessible by integration"
+		"GitHub refused the comment (a missing permission, Issues and Pull requests: Read and write, or a locked conversation): 403 Resource not accessible by integration"
 	)
 	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
 	expect row == Ok(Some(Settled {
@@ -228,4 +228,24 @@ case "a pending comment doesn't stand in for a labels proposal on the same targe
 	)
 	expect first == Ok(3)
 	expect again == Ok(3)
+}
+
+case "a pruned highest id isn't reused, so the audit's references stay true" {
+	stub LiveFeed.publishMaintainers(_) returns ()
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// Proposals 1 and 2 are seeded; retention removes 2.
+	let pruned <- Deliveries.run("DELETE FROM proposals WHERE id = 2", [])
+	expect pruned is Ok(_)
+	let next <- proposeLabels(
+		NewProposal {
+			repo: "bynk-lang/secret",
+			target: 31,
+			title: None,
+			labels: ["bug"],
+			reason: "r",
+		},
+		None
+	)
+	expect next == Ok(3)
 }

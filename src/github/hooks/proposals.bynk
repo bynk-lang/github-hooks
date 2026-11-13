@@ -353,7 +353,7 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 	} else {
 		match answer.status {
 			Some(403) => BadGateway(
-				"GitHub refused \(action.noun) (does the App have Issues and Pull requests: Read and write?): \(answer.outcome)"
+				"GitHub refused \(action.noun) (a missing permission, Issues and Pull requests: Read and write, or a locked conversation): \(answer.outcome)"
 			),
 			Some(_) => BadGateway("GitHub refused \(action.noun): \(answer.outcome)"),
 			None => BadGateway(
