@@ -6,6 +6,8 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
 ### Added
 
 - Stale pull request nudges (#103, #69 slice 3): each weekday at 07:43 UTC,
@@ -741,7 +743,8 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/bynk-lang/github-hooks/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/bynk-lang/github-hooks/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bynk-lang/github-hooks/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bynk-lang/github-hooks/compare/v0.1.0...v0.2.0
