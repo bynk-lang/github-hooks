@@ -35,7 +35,7 @@ jobs:
       # The pinned wrangler (package.json), which `bynk dev` prefers to the
       # latest from npx, so a new local runtime arrives as a reviewed bump.
       - run: npm ci --no-audit --no-fund
-      - uses: bynk-lang/setup-bynk@cc53d0ce6eae266a845aaf138cc44b59af02eab0 # v2.0.0
+      - uses: bynk-lang/setup-bynk@3ee807123be2578fd5d5be518fbc2b489aef6171 # v2.0.1
         with:
           # Pushes and pull requests use BYNK_VERSION; the canary passes newer
           # releases in.
