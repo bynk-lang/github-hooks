@@ -597,7 +597,7 @@ service api from http {
 	on POST("/github") (
 		headers: RequestHeaders,
 		body: Bytes
-	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot, Facts {
+	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot, Facts, Triage {
 		let Ok(d) = read(
 			headers.get("X-GitHub-Event"),
 			headers.get("X-GitHub-Delivery"),
@@ -637,6 +637,7 @@ service api from http {
 		// A redelivery reacts too, so a failed action is retried; one that
 		// worked is not repeated (see `Bot`).
 		~> Bot.react(d, body)
+		~> Triage.run(d, body)
 		~> Facts.extract(d, body, r.changes > 0)
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
