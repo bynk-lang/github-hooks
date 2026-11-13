@@ -429,3 +429,84 @@ case "a pull request's lock is recorded from its delivery, and kept when one doe
 	let locked <- Deliveries.first("SELECT locked FROM pull_requests", [])
 	expect locked == Ok(Some("{\"locked\":1}"))
 }
+
+// Decoys: rows that must not be taken for these pull requests'.
+
+--- Rows about other repositories' pull requests numbered as `bynk-lang/secret`'s, older facts that must lose to newer ones, and proposals that must not stand in for a nudge.
+fn decoys() -> List[SqlStatement] {
+	[
+		// Another repository's #1 and #6: a later ready, review and request, and a request.
+		SqlStatement {
+			sql: "INSERT INTO pull_request_events (delivery, repo, number, action, at) VALUES ('x-1', 'bynk-lang/decoy', 1, 'ready_for_review', '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+		review(9001, "bynk-lang/decoy", 1, "dave", 0, "2026-11-05T00:00:00.000Z"),
+		SqlStatement {
+			sql: "INSERT INTO pull_request_review_requests (repo, number, reviewer, team, requested_at) VALUES ('bynk-lang/decoy', 1, 'mallory', 0, '2026-11-05T00:00:00.000Z'), ('bynk-lang/decoy', 6, 'mallory', 0, '2026-10-01T00:00:00.000Z')",
+			params: [],
+		},
+		// #10 was ready twice: the later one counts. #2 was reviewed twice: the later one counts.
+		SqlStatement {
+			sql: "INSERT INTO pull_request_events (delivery, repo, number, action, at) VALUES ('e-10a', 'bynk-lang/secret', 10, 'ready_for_review', '2026-10-20T00:00:00.000Z')",
+			params: [],
+		},
+		review(200, SECRET, 2, "erin", 0, "2026-10-21T00:00:00.000Z"),
+		// A later delivery for secret without an installation doesn't hide the one that has it.
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-4', 'ping', 'bynk-lang/secret', NULL, 1, '2026-11-05T07:00:00.000Z')",
+			params: [],
+		},
+		// Another repository's nudge for #1, and one for #99, for secret #1's wait; and a pending labels proposal on secret #1.
+		SqlStatement {
+			sql: "INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/decoy', 'comment', 1, ?1, 'r', '2026-11-04T07:43:00.000Z', '2026-11-18T07:43:00.000Z', 'pending'), ('bynk-lang/secret', 'comment', 99, ?1, 'r', '2026-11-04T07:43:00.000Z', '2026-11-18T07:43:00.000Z', 'pending'), ('bynk-lang/secret', 'labels', 1, '{\"labels\":[\"bug\"]}', 'r', '2026-11-04T07:43:00.000Z', '2026-11-18T07:43:00.000Z', 'pending')",
+			params: [Text(payload("Hi", "2026-11-01T07:00:00.000Z"))],
+		},
+	]
+}
+
+case "rows about other pull requests, older facts, and other proposals don't change who's nudged" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	let decoyed <- Deliveries.batch(decoys())
+	expect seeded is Ok(_)
+	expect decoyed is Ok(_)
+	let r <- nudges.schedule("43 7 * * 1-5", due())
+	expect r == Ok(())
+	let nudged <- Deliveries.select[Proposed](
+		"FROM proposals WHERE kind = 'comment' AND repo = 'bynk-lang/secret' AND status = 'pending' ORDER BY target",
+		[]
+	)
+	let Ok(rows) = nudged else {
+		expect false
+	}
+	// The same five as without the decoys, worded the same: no mallory, and #1 still 4 days.
+	expect rows.map((p) => p.target) == [1, 7, 8, 9, 12]
+	expect rows
+		.first()
+		.map(
+			(p) => p.payload
+		) == Some(payload(
+		"@alice @bob, this pull request has been waiting on your review for 4 days (team: core).",
+		"2026-11-01T07:00:00.000Z"
+	))
+	// The other repository's nudge and #99's, not waiting, are expired; the labels proposal is left.
+	let others <- Deliveries.select[Proposed](
+		"FROM proposals WHERE NOT (kind = 'comment' AND repo = 'bynk-lang/secret' AND target IN (1, 7, 8, 9, 12)) ORDER BY id",
+		[]
+	)
+	expect others.map((xs) => xs.map((p) => p.status)) == Ok(["expired", "expired", "pending"])
+}
+
+--- A proposal's expiry.
+type Expiry = {
+	expires_at: String,
+}
+
+case "a nudge waits 14 days for a decision" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let row <- Deliveries.firstAs[Expiry]("FROM proposals WHERE target = 1", [])
+	expect row == Ok(Some(Expiry { expires_at: "2026-11-19T07:43:00.000Z" }))
+}
