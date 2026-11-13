@@ -1,0 +1,195 @@
+context github.hooks
+
+---
+Stale pull request nudges (#69, slice 3; #103), weekday mornings at 07:43
+UTC (07:43 GMT, 08:43 BST). A ready pull request whose wait for review has
+passed its repository's `nudges.after_days` gets a proposed comment to the
+people still requested to review it, at most once per wait. A maintainer
+approves it in Mine before it's posted.
+
+A pull request is waiting when it's open, not a draft, not opened by a bot,
+not locked, and has at least one review request (a person or a team). Its
+wait starts when it last became ready for review, and starts again with each
+review by someone other than its author and not a bot. Only repositories whose
+`.github/bynk-hooks.yml` turns `nudges` on are nudged, read as the
+installation that last delivered for them. `at` is the scheduled time, so a
+run measures the wait to when it was due, not when it ran.
+---
+service nudges from cron {
+	on schedule("43 7 * * 1-5") (at: Int) -> Effect[Result[(), String]] given Deliveries, Logger, Tokens, Clock, AppAuth, GitHubHttp, LiveFeed {
+		runNudges(Instant.fromEpochMillis(at))
+	}
+}
+
+--- A pull request waiting on review, as the nudge query reads it.
+type WaitingPull = {
+	repo: String,
+	number: Int,
+	title: String,
+	since: String,
+	days: Int,
+	people: String,
+	teams: String,
+	installation: Option[Int],
+}
+
+--- What a run did, for its log line.
+type NudgeTally = {
+	proposed: Int,
+	already: Int,
+	early: Int,
+	off: Int,
+	failed: List[String],
+}
+
+--- One run, at `now`: the waiting pull requests, their repositories' settings, and a proposal for each one past its threshold.
+fn runNudges(now: Instant) -> Effect[Result[(), String]] given Deliveries, Logger, Tokens, Clock, AppAuth, GitHubHttp, LiveFeed {
+	let Ok(text) <- Deliveries.all(
+		"""
+		SELECT p.repo, p.number, p.title,
+		  max(
+		    coalesce((SELECT max(e.at) FROM pull_request_events e
+		              WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'), ''),
+		    coalesce(p.ready_at, p.opened_at),
+		    coalesce((SELECT max(r.submitted_at) FROM pull_request_reviews r
+		              WHERE r.repo = p.repo AND r.number = p.number AND r.submitted_at IS NOT NULL
+		                AND r.reviewer_is_bot = 0
+		                AND (r.reviewer IS NULL OR r.reviewer != p.author COLLATE NOCASE)), '')
+		  ) AS since,
+		  (SELECT json_group_array(reviewer) FROM (
+		     SELECT q.reviewer FROM pull_request_review_requests q
+		     WHERE q.repo = p.repo AND q.number = p.number AND q.team = 0
+		     ORDER BY q.reviewer COLLATE NOCASE)) AS people,
+		  (SELECT json_group_array(reviewer) FROM (
+		     SELECT q.reviewer FROM pull_request_review_requests q
+		     WHERE q.repo = p.repo AND q.number = p.number AND q.team = 1
+		     ORDER BY q.reviewer COLLATE NOCASE)) AS teams,
+		  (SELECT d.installation FROM deliveries d
+		   WHERE d.repo = p.repo COLLATE NOCASE AND d.installation IS NOT NULL
+		   ORDER BY d.received_at DESC LIMIT 1) AS installation
+		FROM pull_requests p
+		WHERE p.state = 'open' AND p.draft = 0 AND p.author_is_bot = 0 AND p.locked = 0
+		  AND EXISTS (SELECT 1 FROM pull_request_review_requests q WHERE q.repo = p.repo AND q.number = p.number)
+		ORDER BY p.repo, p.number
+		""",
+		[]
+	) else match {
+		Err(e) => nudgesFailed("the waiting pull requests", sqlError(e)),
+	}
+	let Ok(rows) = Json.decodeSql[List[NudgeRow]](text) else match {
+		Err(e) => nudgesFailed("the waiting pull requests", jsonError(e)),
+	}
+	let waiting = rows.map((r) => WaitingPull {
+		repo: r.repo,
+		number: r.number,
+		title: r.title,
+		since: r.since,
+		days: daysSince(r.since, now),
+		people: r.people,
+		teams: r.teams,
+		installation: r.installation,
+	})
+	let start = NudgeTally {
+		proposed: 0,
+		already: 0,
+		early: 0,
+		off: 0,
+		failed: [],
+	}
+	let tally <- waiting.foldEff(start, (t, w) => nudgeOne(t, w, now))
+	let _ <- Logger.info(
+		"nudges: \(waiting.length()) waiting on review; proposed \(tally.proposed), already nudged this wait \(tally.already), not yet due \(tally.early), nudges off \(tally.off)"
+	)
+	let true = tally.failed.length() > 0 else { Effect.pure(Ok(())) }
+	Effect.pure(Err(joined(tally.failed, "; ")))
+}
+
+--- A waiting row before its wait is measured. `people` and `teams` are JSON lists.
+type NudgeRow = {
+	repo: String,
+	number: Int,
+	title: String,
+	since: String,
+	people: String,
+	teams: String,
+	installation: Option[Int],
+}
+
+---
+Whole days from `since` (an ISO time) to `now`. A time that doesn't parse
+counts as no wait, so it's never nudged on a guess.
+---
+fn daysSince(since: String, now: Instant) -> Int {
+	match Instant.fromIso(since) {
+		Some(t) => (now - t).toMillis().div(86400000),
+		None => 0,
+	}
+}
+
+--- One waiting pull request: its repository's settings, its threshold, and its proposal.
+fn nudgeOne(
+	t: NudgeTally,
+	w: WaitingPull,
+	now: Instant
+) -> Effect[NudgeTally] given Deliveries, Logger, Tokens, Clock, AppAuth, GitHubHttp, LiveFeed {
+	let Some(installation) = w.installation else {
+		Effect.pure(NudgeTally { ...t, off: t.off + 1 })
+	}
+	let settings <- settingsFor(installation, w.repo)
+	let true = settings.nudges.enabled else { Effect.pure(NudgeTally { ...t, off: t.off + 1 }) }
+	let threshold = settings.nudges.after_days
+	let true = w.days >= threshold else { Effect.pure(NudgeTally { ...t, early: t.early + 1 }) }
+	let people = Json.decode[List[String]](w.people).getOrElse([])
+	let teams = Json.decode[List[String]](w.teams).getOrElse([])
+	let made <- proposeComment(
+		NudgeProposal {
+			repo: w.repo,
+			target: w.number,
+			title: Some(w.title),
+			body: nudgeText(people, teams, w.days),
+			waitSince: w.since,
+			reason: "Waiting on review for \(dayCount(w.days)), past this repository's \(threshold)-day threshold.",
+		},
+		now
+	)
+	match made {
+		Ok(Some(_)) => Effect.pure(NudgeTally { ...t, proposed: t.proposed + 1 }),
+		Ok(None) => Effect.pure(NudgeTally { ...t, already: t.already + 1 }),
+		Err(why) => {
+			let _ <- Logger.error("could not propose a nudge for \(w.repo)#\(w.number): \(why)")
+			Effect.pure(NudgeTally {
+				...t,
+				failed: t.failed.append("\(w.repo)#\(w.number): \(why)"),
+			})
+		},
+	}
+}
+
+---
+A nudge's text: each person still requested @-mentioned, and each team named
+without the @, so a whole team isn't notified. With no person to mention, it
+says only that the pull request is waiting.
+---
+fn nudgeText(people: List[String], teams: List[String], days: Int) -> String {
+	let named = if teams.length() == 0 {
+		""
+	} else if teams.length() == 1 {
+		" (team: \(joined(teams, ", ")))"
+	} else {
+		" (teams: \(joined(teams, ", ")))"
+	}
+	if people.length() == 0 {
+		"This pull request has been waiting on review for \(dayCount(days))\(named)."
+	} else {
+		"\(joined(people.map((p) => "@\(p)"), " ")), this pull request has been waiting on your review for \(dayCount(days))\(named)."
+	}
+}
+
+fn dayCount(n: Int) -> String {
+	if n == 1 { "1 day" } else { "\(n) days" }
+}
+
+fn nudgesFailed(what: String, why: String) -> Effect[Result[(), String]] given Logger {
+	let _ <- Logger.error("nudges: could not read \(what): \(why)")
+	Effect.pure(Err("could not read \(what): \(why)"))
+}

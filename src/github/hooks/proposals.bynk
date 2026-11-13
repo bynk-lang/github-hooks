@@ -496,3 +496,56 @@ fn claudeToday(now: Instant) -> Effect[Result[ClaudeToday, String]] given Delive
 		total_cap: capOf(totalCapSet, CLAUDE_CAP_TOTAL),
 	}))
 }
+
+--- A nudge's comment to propose (#103): its text, and the start of the wait it's for.
+type NudgeProposal = {
+	repo: String,
+	target: Int,
+	title: Option[String],
+	body: String,
+	waitSince: String,
+	reason: String,
+}
+
+---
+Proposes posting `c.body` on `c.target` in `c.repo`, at `now`, once per wait:
+nothing is recorded when the target already has a `comment` proposal for the
+same `waitSince` (whatever became of it), or a pending one at all. Answers the
+new proposal's id, or `None` when one of those stood in the way. Open
+maintainers' pages hear of a new one.
+---
+fn proposeComment(
+	c: NudgeProposal,
+	now: Instant
+) -> Effect[Result[Option[Int], String]] given Deliveries, LiveFeed {
+	let added <- Deliveries.first(
+		"""
+		INSERT INTO proposals (repo, kind, target, title, payload, reason, proposed_at, expires_at, status)
+		SELECT ?1, 'comment', ?2, ?3, ?4, ?5, ?6, ?7, 'pending'
+		WHERE NOT EXISTS (SELECT 1 FROM proposals
+		                  WHERE repo = ?1 AND kind = 'comment' AND target = ?2
+		                    AND (json_extract(payload, '$.wait_since') = ?8
+		                         OR (status = 'pending' AND expires_at > ?6)))
+		RETURNING id
+		""",
+		[
+			Text(c.repo),
+			Integer(c.target),
+			text(c.title),
+			Text(Json.encodePlain(CommentPayload { body: c.body, wait_since: Some(c.waitSince) })),
+			Text(c.reason),
+			Text(now.toIso()),
+			Text((now + PROPOSAL_WAIT).toIso()),
+			Text(c.waitSince),
+		]
+	)
+	let Ok(row) = added else match {
+		Err(e) => Effect.pure(Err("could not record the proposal: \(sqlError(e))")),
+	}
+	let Some(r) = row else { Effect.pure(Ok(None)) }
+	let Ok(made) = Json.decodeSql[ProposalId](r) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	let _ <- LiveFeed.publishMaintainers(proposalEvent(c.repo, c.target, "pending"))
+	Effect.pure(Ok(Some(made.id)))
+}

@@ -79,8 +79,8 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 					sql: """
 						INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
 						                           opened_at, ready_at, closed_at, merged_at, commits, additions, deletions,
-						                           changed_files, updated_at, merge_commit_sha, head_sha)
-						VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+						                           changed_files, updated_at, merge_commit_sha, head_sha, locked)
+						VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, coalesce(?21, 0))
 						ON CONFLICT (repo, number) DO UPDATE SET
 						  title = excluded.title, author = excluded.author, author_is_bot = excluded.author_is_bot,
 						  base = excluded.base, head = excluded.head, draft = excluded.draft, state = excluded.state,
@@ -91,6 +91,7 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 						  changed_files = coalesce(excluded.changed_files, pull_requests.changed_files),
 						  merge_commit_sha = coalesce(excluded.merge_commit_sha, pull_requests.merge_commit_sha),
 						  head_sha = coalesce(excluded.head_sha, pull_requests.head_sha),
+						  locked = coalesce(?21, pull_requests.locked),
 						  updated_at = excluded.updated_at
 						WHERE excluded.updated_at > pull_requests.updated_at
 						   OR (excluded.updated_at = pull_requests.updated_at
@@ -117,6 +118,7 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 						Text(p.updatedAt),
 						text(p.mergeCommitSha),
 						text(p.headSha),
+						boolean(p.locked),
 					],
 				},
 				// Then `ready_at`, which moves only earlier, whatever the row's

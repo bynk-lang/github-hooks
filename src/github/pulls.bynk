@@ -63,6 +63,8 @@ type PullPayload = {
 	changed_files: Option[Int],
 	requested_reviewers: Option[List[UserRef]] = None,
 	requested_teams: Option[List[TeamRef]] = None,
+	--- Whether its conversation is locked (#103): GitHub sends it in every delivery and REST read.
+	locked: Option[Bool] = None,
 }
 
 ---
@@ -96,6 +98,8 @@ type PullFact = {
 	reason: Option[String],
 	--- The head commit (#53), for the PR's CI.
 	headSha: Option[String] = None,
+	--- Whether its conversation is locked (#103), when this delivery says.
+	locked: Option[Bool] = None,
 	--- Whose review it waits on, as this delivery says: the whole set, when it says.
 	reviewers: Option[List[String]] = None,
 	teams: Option[List[String]] = None,
@@ -169,6 +173,7 @@ fn pullFact(
 		updatedAt: updated,
 		reason: reason,
 		headSha: pr.head.sha,
+		locked: pr.locked,
 		reviewers: pr.requested_reviewers.map((us) => us.map((u) => u.login)),
 		teams: pr.requested_teams.map((ts) => ts.map((t) => t.slug)),
 		requestedUser: None,
