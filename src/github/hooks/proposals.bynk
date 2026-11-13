@@ -79,6 +79,37 @@ fn actionOf(
 	}
 }
 
+---
+Whether a claimed proposal still applies: a nudge (a `comment` with a
+`wait_since`) only while its pull request is open, as recorded. The nudge job
+expires a nudge whose reason has gone each weekday morning; this catches one
+approved in between. Every other proposal applies as it is.
+---
+fn stillApplies(p: ClaimedProposal) -> Effect[Result[(), String]] given Deliveries {
+	let true = p.kind == "comment" else { Effect.pure(Ok(())) }
+	let Ok(c) = Json.decode[CommentPayload](p.payload) else { Effect.pure(Ok(())) }
+	let true = c.wait_since.isSome() else { Effect.pure(Ok(())) }
+	let found <- Deliveries.first(
+		"SELECT state FROM pull_requests WHERE repo = ?1 COLLATE NOCASE AND number = ?2",
+		[Text(p.repo), Integer(p.target)]
+	)
+	match found {
+		Ok(Some(row)) => match Json.decodeSql[PullState](row) {
+			Ok(s) => if s.state == "open" {
+				Effect.pure(Ok(()))
+			} else {
+				Effect.pure(Err("is no longer waiting: the pull request is \(s.state)"))
+			},
+			Err(_) => Effect.pure(Ok(())),
+		},
+		_ => Effect.pure(Ok(())),
+	}
+}
+
+type PullState = {
+	state: String,
+}
+
 --- A comment as GitHub's API takes it.
 type CommentBody = {
 	body: String,
@@ -291,6 +322,14 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 		Err(e) => {
 			let _ <- Logger.error("could not decode proposal \(id): \(jsonError(e))")
 			ServerError("could not read the proposal")
+		},
+	}
+	let Ok(open) <- stillApplies(p) else match {
+		Err(why) => {
+			let _ <- settle(id, "expired", why)
+			let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
+			let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "expired"))
+			Conflict("proposal \(id) \(why), so nothing was posted")
 		},
 	}
 	let Ok(action) = actionOf(p.kind, p.payload, p.repo, p.target) else match {

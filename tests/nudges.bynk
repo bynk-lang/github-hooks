@@ -239,7 +239,7 @@ case "pull requests past their repository's threshold get a nudge, worded for wh
 	// Each repository's settings are read once, in name order: quiet's, then secret's.
 	expect GitHubHttp.get called 2 times
 	expect LiveFeed.publishMaintainers called 5 times with e.kind == "proposal"
-	expect Logger.info called with msg == "nudges: 9 waiting on review; proposed 5, already nudged this wait 0, not yet due 2, nudges off 2"
+	expect Logger.info called with msg == "nudges: 9 waiting on review; proposed 5, already nudged this wait 0, not yet due 2, nudges off 2, expired 0 no longer waiting"
 }
 
 case "a second run in the same wait proposes nothing more" {
@@ -250,7 +250,7 @@ case "a second run in the same wait proposes nothing more" {
 	let _ <- nudges.schedule("43 7 * * 1-5", due())
 	let rows <- Deliveries.select[Proposed](PROPOSED, [])
 	expect rows.map((xs) => xs.length()) == Ok(5)
-	expect Logger.info called with msg == "nudges: 9 waiting on review; proposed 0, already nudged this wait 5, not yet due 2, nudges off 2"
+	expect Logger.info called with msg == "nudges: 9 waiting on review; proposed 0, already nudged this wait 5, not yet due 2, nudges off 2, expired 0 no longer waiting"
 }
 
 case "a declined nudge holds for its wait; a review starts a new wait, which may be nudged" {
@@ -287,7 +287,7 @@ case "a declined nudge holds for its wait; a review starts a new wait, which may
 	))
 }
 
-case "a pending nudge from an earlier wait stands, rather than a second one" {
+case "a review while a nudge is pending expires it, and the new wait gets its own" {
 	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
@@ -297,9 +297,83 @@ case "a pending nudge from an earlier wait stands, rather than a second one" {
 		[]
 	)
 	expect reviewed is Ok(_)
+	// The next morning the old nudge's reason has gone; four days on, the new wait is due.
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 86400000)
 	let _ <- nudges.schedule("43 7 * * 1-5", due() + 5 * 86400000)
-	let one <- Deliveries.select[Proposed]("FROM proposals WHERE target = 1", [])
-	expect one.map((xs) => xs.length()) == Ok(1)
+	let both <- Deliveries.select[Proposed]("FROM proposals WHERE target = 1 ORDER BY id", [])
+	let Ok(rows) = both else {
+		expect false
+	}
+	expect rows.map((p) => p.status) == ["expired", "pending"]
+}
+
+case "a pending nudge whose pull request is merged, or no longer requested, is expired" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let merged <- Deliveries.run(
+		"UPDATE pull_requests SET state = 'merged' WHERE repo = 'bynk-lang/secret' AND number = 1",
+		[]
+	)
+	let unasked <- Deliveries.run(
+		"DELETE FROM pull_request_review_requests WHERE repo = 'bynk-lang/secret' AND number = 12",
+		[]
+	)
+	expect merged is Ok(_)
+	expect unasked is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 86400000)
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	let Ok(all) = rows else {
+		expect false
+	}
+	expect all.filter((p) => p.status == "expired").map((p) => p.target) == [1, 12]
+	// 2 is newly due a day later (3 days since carol's review).
+	expect all.filter((p) => p.status == "pending").map((p) => p.target) == [2, 7, 8, 9]
+	expect Logger.info called with msg.endsWith("expired 2 no longer waiting")
+	expect LiveFeed.publishMaintainers called with e.kind == "proposal" && e.status == "expired"
+}
+
+case "a labels proposal, or a comment that isn't a nudge, is never expired by the job" {
+	let seeded <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'labels', 1, '{\"labels\":[\"bug\"]}', 'r', '2026-11-01T00:00:00.000Z', '2026-11-15T00:00:00.000Z', 'pending'), ('bynk-lang/secret', 'comment', 2, '{\"body\":\"Hi\"}', 'r', '2026-11-01T00:00:00.000Z', '2026-11-15T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect seeded is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let rows <- Deliveries.select[Proposed](PROPOSED, [])
+	expect rows.map((xs) => xs.map((p) => p.status)) == Ok(["pending", "pending"])
+}
+
+case "the wait starts no earlier than the first review request" {
+	stub GitHubHttp.get(_, _) returns each [nudgesOff(), nudgesOn()]
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	// Ready since October, but nobody was asked until yesterday.
+	let asked <- Deliveries.batch(
+		[
+			pull(SECRET, 20, "Asked late", "accuser", 0, 0, "open", "2026-10-01T00:00:00.000Z", 0),
+			SqlStatement {
+				sql: "INSERT INTO pull_request_review_requests (repo, number, reviewer, team, requested_at) VALUES ('bynk-lang/secret', 20, 'alice', 0, '2026-11-04T07:43:00.000Z'), ('bynk-lang/secret', 20, 'erin', 0, '2026-11-05T00:00:00.000Z')",
+				params: [],
+			},
+		]
+	)
+	expect asked is Ok(_)
+	let _ <- nudges.schedule("43 7 * * 1-5", due())
+	let late <- Deliveries.select[Proposed]("FROM proposals WHERE target = 20", [])
+	expect late == Ok([])
+	// Three days after the first ask, it's due, though erin was asked later.
+	let _ <- nudges.schedule("43 7 * * 1-5", due() + 2 * 86400000)
+	let due3 <- Deliveries.select[Proposed]("FROM proposals WHERE target = 20", [])
+	expect due3.map(
+		(xs) => xs.map((p) => p.payload)
+	) == Ok([
+		payload(
+			"@alice @erin, this pull request has been waiting on your review for 3 days.",
+			"2026-11-04T07:43:00.000Z"
+		),
+	])
 }
 
 case "a repository with nudges off, or none read, proposes nothing" {
@@ -317,7 +391,7 @@ case "nothing waiting, nothing read" {
 	let r <- nudges.schedule("43 7 * * 1-5", due())
 	expect r == Ok(())
 	expect GitHubHttp.get never called
-	expect Logger.info called with msg == "nudges: 0 waiting on review; proposed 0, already nudged this wait 0, not yet due 0, nudges off 0"
+	expect Logger.info called with msg == "nudges: 0 waiting on review; proposed 0, already nudged this wait 0, not yet due 0, nudges off 0, expired 0 no longer waiting"
 }
 
 case "the wording: people mentioned, teams named, one day or many" {

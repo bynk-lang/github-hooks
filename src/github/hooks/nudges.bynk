@@ -9,8 +9,12 @@ approves it in Mine before it's posted.
 
 A pull request is waiting when it's open, not a draft, not opened by a bot,
 not locked, and has at least one review request (a person or a team). Its
-wait starts when it last became ready for review, and starts again with each
-review by someone other than its author and not a bot. Only repositories whose
+wait starts at the latest of: when it last became ready for review, its
+earliest outstanding review request (so no one is told they've waited longer
+than they were asked), and its last review by someone other than its author
+and not a bot. A pending nudge whose pull request is no longer waiting, or is
+waiting since a different time, is expired first, so it can't be approved
+after its reason has gone. Only repositories whose
 `.github/bynk-hooks.yml` turns `nudges` on are nudged, read as the
 installation that last delivered for them. `at` is the scheduled time, so a
 run measures the wait to when it was due, not when it ran.
@@ -51,6 +55,8 @@ fn runNudges(now: Instant) -> Effect[Result[(), String]] given Deliveries, Logge
 		    coalesce((SELECT max(e.at) FROM pull_request_events e
 		              WHERE e.repo = p.repo AND e.number = p.number AND e.action = 'ready_for_review'), ''),
 		    coalesce(p.ready_at, p.opened_at),
+		    coalesce((SELECT min(q.requested_at) FROM pull_request_review_requests q
+		              WHERE q.repo = p.repo AND q.number = p.number), ''),
 		    coalesce((SELECT max(r.submitted_at) FROM pull_request_reviews r
 		              WHERE r.repo = p.repo AND r.number = p.number AND r.submitted_at IS NOT NULL
 		                AND r.reviewer_is_bot = 0
@@ -96,12 +102,55 @@ fn runNudges(now: Instant) -> Effect[Result[(), String]] given Deliveries, Logge
 		off: 0,
 		failed: [],
 	}
+	let Ok(lapsed) <- expireLapsed(waiting, now) else match {
+		Err(why) => nudgesFailed("the pending nudges", why),
+	}
 	let tally <- waiting.foldEff(start, (t, w) => nudgeOne(t, w, now))
 	let _ <- Logger.info(
-		"nudges: \(waiting.length()) waiting on review; proposed \(tally.proposed), already nudged this wait \(tally.already), not yet due \(tally.early), nudges off \(tally.off)"
+		"nudges: \(waiting.length()) waiting on review; proposed \(tally.proposed), already nudged this wait \(tally.already), not yet due \(tally.early), nudges off \(tally.off), expired \(lapsed) no longer waiting"
 	)
 	let true = tally.failed.length() > 0 else { Effect.pure(Ok(())) }
 	Effect.pure(Err(joined(tally.failed, "; ")))
+}
+
+--- A waiting pull request's key, for matching its pending nudge.
+type WaitKey = {
+	repo: String,
+	number: Int,
+	since: String,
+}
+
+---
+Expires each pending nudge whose pull request isn't among `waiting` with the
+same wait start: it's been merged, closed, reviewed, made a draft or locked,
+or nobody is requested any more. Answers how many, and tells open
+maintainers' pages when there were any.
+---
+fn expireLapsed(
+	waiting: List[WaitingPull],
+	now: Instant
+) -> Effect[Result[Int, String]] given Deliveries, LiveFeed {
+	let keys = waiting.map((w) => WaitKey { repo: w.repo, number: w.number, since: w.since })
+	let Ok(r) <- Deliveries.run(
+		"""
+		UPDATE proposals SET status = 'expired', decided_at = ?1, outcome = 'no longer waiting on review'
+		WHERE kind = 'comment' AND status = 'pending'
+		  AND json_extract(payload, '$.wait_since') IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM json_each(?2) w
+		                  WHERE json_extract(w.value, '$.repo') = proposals.repo
+		                    AND json_extract(w.value, '$.number') = proposals.target
+		                    AND json_extract(w.value, '$.since') = json_extract(proposals.payload, '$.wait_since'))
+		""",
+		[Text(now.toIso()), Text(Json.encodePlain(keys))]
+	) else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	let _ <- if r.changes > 0 {
+		LiveFeed.publishMaintainers(proposalEvent("", 0, "expired"))
+	} else {
+		Effect.pure(())
+	}
+	Effect.pure(Ok(r.changes))
 }
 
 --- A waiting row before its wait is measured. `people` and `teams` are JSON lists.

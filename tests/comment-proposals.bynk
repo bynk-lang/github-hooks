@@ -249,3 +249,44 @@ case "a pruned highest id isn't reused, so the audit's references stay true" {
 	)
 	expect next == Ok(3)
 }
+
+case "a nudge for a pull request that's no longer open is refused, and expired" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let merged <- Deliveries.run(
+		"INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, updated_at) VALUES ('bynk-lang/secret', 30, 'Faster builds', 'accuser', 0, 'main', 'b', 0, 'merged', '2026-10-01T00:00:00.000Z', '2026-11-05T09:00:00.000Z')",
+		[]
+	)
+	expect merged is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict(
+		"proposal 1 is no longer waiting: the pull request is merged, so nothing was posted"
+	)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(Settled {
+		status: "expired",
+		outcome: Some("is no longer waiting: the pull request is merged"),
+	}))
+}
+
+case "a nudge for a pull request that's still open is posted" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let open <- Deliveries.run(
+		"INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, updated_at) VALUES ('bynk-lang/secret', 30, 'Faster builds', 'accuser', 0, 'main', 'b', 0, 'open', '2026-10-01T00:00:00.000Z', '2026-11-05T09:00:00.000Z')",
+		[]
+	)
+	expect open is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+	expect GitHubHttp.post called once
+}
