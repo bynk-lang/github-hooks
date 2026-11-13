@@ -1,0 +1,12 @@
+# This repository's settings for its own GitHub App (docs/settings.md).
+# Every feature is off unless it's turned on here.
+
+# Issue triage (#95, docs/proposals.md#issue-triage): Claude Haiku 5.5 suggests
+# labels for each new issue, and a maintainer approves or declines them in
+# Mine. Only the labels that say what an issue is about are offered: the ones
+# for pull requests (dependencies, github_actions, javascript), the canary's
+# own, and the maintainers' decisions (duplicate, invalid, wontfix, good first
+# issue, help wanted) are left to people.
+triage:
+  enabled: true
+  labels: [bug, enhancement, documentation, question]
