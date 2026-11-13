@@ -6,6 +6,32 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Stale pull request nudges (#103, #69 slice 3): each weekday at 07:43 UTC,
+  a ready pull request whose wait for review has reached its repository's
+  `nudges.after_days` (in whole 24-hour periods, weekends included) gets a
+  proposed comment to the people still requested to review it
+  ([proposals.md](docs/proposals.md#stale-pull-request-nudges)).
+  There's no Claude call. Nothing is posted until a maintainer approves.
+  - **Waiting:** open, not a draft, not a bot's, not locked, with someone
+    requested. The wait starts at the latest of becoming ready, the earliest
+    outstanding request, and the last review by someone other than the
+    author and not a bot.
+  - **The wording:** people still requested are @-mentioned, and teams are
+    named without the @.
+  - **Once per wait:** a decline holds until the wait starts again.
+  - **No stale nudges:** each run expires a pending nudge whose pull request
+    is no longer waiting, and approving one for a pull request that's no
+    longer open is refused with a `409`.
+- A second kind of proposal, `comment` (#103): approving posts the comment
+  as the App (`201`), and Mine shows its text in full. Migration `0026`
+  rebuilds `proposals` to allow it, with `id` now `AUTOINCREMENT`, so a
+  pruned id is never reused. A `403` now names a locked conversation as well
+  as the permissions.
+- Whether a pull request's conversation is locked is recorded (migration
+  `0027`), from each delivery and the daily sync.
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

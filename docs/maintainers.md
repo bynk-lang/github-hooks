@@ -336,8 +336,11 @@ Phase 5's features (#69) don't act on GitHub by themselves: each records
 what it would do as a **proposal**, and a maintainer approves or declines it
 (#88, migration `0024`). [proposals.md](proposals.md) is the overview: how
 the pieces fit, and what is sent to Anthropic and kept. Nothing is posted
-until a maintainer approves. The first kind is `labels`: add these labels to
-that issue or pull request.
+until a maintainer approves. There are two kinds:
+
+- `labels` (triage): add these labels to that issue or pull request;
+- `comment` (nudges, migration `0026`): post this comment on it. Mine shows
+  the comment in full, as text.
 
 - **In Mine:** each pending proposal shows its target, what it would do, the
   reason it was proposed, and **Approve** and **Decline**. Approving asks for
@@ -349,24 +352,36 @@ that issue or pull request.
     statement, so two maintainers, or two clicks, act on it once; meanwhile
     another decision on it is a `409` ("is being decided").
   - **The action** is asked of GitHub as the installation that last
-    delivered for the repository: for `labels`,
-    `POST /repos/{repo}/issues/{target}/labels`. GitHub **creates** a label
-    the repository doesn't have, rather than refusing it, so the labels
-    shown in Mine are exactly what will appear.
+    delivered for the repository:
+    - for `labels`, `POST /repos/{repo}/issues/{target}/labels`, which
+      answers `200`. GitHub **creates** a label the repository doesn't have,
+      rather than refusing it, so the labels shown in Mine are exactly what
+      will appear;
+    - for `comment`, `POST /repos/{repo}/issues/{target}/comments` with
+      only the text, which answers `201`.
+  - **A nudge that no longer applies** (a `comment` for a pull request that
+    is no longer open, as recorded) is refused with a `409` before anything
+    is posted, and expires. The nudge job also expires pending nudges whose
+    reason has gone, each weekday morning
+    ([proposals.md](proposals.md#stale-pull-request-nudges)).
   - **The end:** `approved` when GitHub accepted it. A proposal left
     `approving` is one whose Worker stopped before GitHub answered (a call
-    that outlived the request, say): the labels may or may not be on the
-    target, and it isn't tried again.
+    that outlived the request, say): the labels or the comment may or may
+    not be on the target, and it isn't tried again. Check a stuck nudge by
+    hand before doing anything else, as posting it again would ping people
+    twice.
   - **A refusal** leaves the proposal `failed`, with GitHub's reason, and a
-    `502`; a `403` means the App lacks **Issues: Read and write**. It isn't
-    tried again: the feature proposes afresh if it still applies.
+    `502`. A `403` means the App lacks **Issues** or **Pull requests: Read
+    and write**, or the conversation is locked; GitHub's reason says which.
+    It isn't tried again: the feature proposes afresh if it still applies.
 - **Declining** (`POST /maintainers/proposals/decline`, `{id}`) asks nothing
   of GitHub.
 - **Refusals:** `404` for an unknown proposal; `409` for one already decided
   (and how), expired, or being decided right now. Both routes count against
   `ActionLimit`, as re-runs do.
 - **One at a time:** a target with a pending proposal of a kind keeps that
-  one: proposing again answers its id.
+  one. Proposing labels again answers its id; a nudge isn't proposed again
+  while one is pending, nor twice for the same wait.
 - **Expiry:** a proposal waits 14 days. Past that it can't be decided, and
   hourly retention marks it `expired`. Decided proposals are removed 90 days
   after the decision.

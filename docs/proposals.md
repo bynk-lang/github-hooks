@@ -14,14 +14,15 @@ when, what is kept, and how to turn it on and off. The details are in:
 | [maintainers.md](maintainers.md#the-apps-proposals) | approving and declining: the routes, refusals, expiry and the audit |
 | [deploy.md](deploy.md) | `ANTHROPIC_API_KEY` and the daily caps, as Worker settings |
 
-The foundations (#88) are in place, and **issue triage** is the first feature
-that proposes ([below](#issue-triage)). Each feature arrives as its own slice
-of #69, and this page gains a section for each:
+The foundations (#88) are in place, and two features propose:
+[issue triage](#issue-triage) and
+[stale pull request nudges](#stale-pull-request-nudges). Each feature
+arrives as its own slice of #69, and this page gains a section for each:
 
 | Feature | Slice | Claude | Proposes |
 |---|---|---|---|
 | [Issue triage](#issue-triage) (#95) | 2, built | Haiku 5.5 | labels for a new issue, from the repository's allowed list |
-| Stale pull request nudges | 3 | none | a comment to a ready pull request's reviewers |
+| [Stale pull request nudges](#stale-pull-request-nudges) (#103) | 3, built | none | a comment to a ready pull request's reviewers |
 | Release notes drafts | 4 | Opus 5.5 | notes for a release, from the pull requests it shipped |
 | Weekly summary | 5 | Opus 5.5 | the organisation's week, posted to a Discussion |
 
@@ -221,13 +222,83 @@ Chinese and Japanese text. At most 300 tokens come back. It runs on
 Haiku 5.5, and `claude_calls` records each call's tokens, so the real cost
 is in D1.
 
+## Stale pull request nudges
+
+Slice 3 of #69, built in #103. Each weekday morning the App looks for ready
+pull requests that have waited on review longer than their repository allows,
+and proposes a comment to the people still asked to review each one. Approving
+it posts the comment as the App. There's **no Claude call**: the wording is
+fixed, so nothing is sent to Anthropic.
+
+**Turning it on**, in the repository's `.github/bynk-hooks.yml`
+([settings.md](settings.md)):
+
+```yaml
+nudges:
+  enabled: true
+  after_days: 3      # 1 to 30; 3 if left out
+```
+
+**When it runs.** At 07:43 UTC, Monday to Friday: 07:43 GMT or 08:43 BST, at
+the start of the UK working day, and never at the weekend.
+
+**What counts as waiting.** A pull request is waiting when it is open, not a
+draft, not opened by a bot, not locked, and someone (a person or a team) is
+still asked to review it. Its wait starts at the latest of:
+
+- when it last became ready for review;
+- its earliest outstanding review request, so no one is told they've waited
+  longer than they were asked;
+- its last review by someone other than its author, and not a bot. The
+  author's own replies, or an automated reviewer's, don't restart it.
+
+It's nudged once the wait reaches `after_days` whole 24-hour periods,
+counted to the scheduled time, weekends included. So a wait that started
+on Monday at 17:00 is one whole day old at Wednesday's 07:43 run, and two
+at Thursday's.
+
+**What is proposed.** A `comment`, for example:
+
+> @alice @bob, this pull request has been waiting on your review for 4 days
+> (team: core).
+
+Each person still requested is @-mentioned. Teams are named without the @,
+so a whole team isn't notified; with only teams requested, the comment
+mentions no one. Mine shows the comment in full, so you approve exactly what
+will be posted.
+
+**Once per wait.** A pull request gets at most one nudge per wait, whatever
+became of it: **a decline holds until the wait starts again**, after a review
+or a new round of ready for review. A pending nudge from an earlier wait
+stands rather than a second one.
+
+**A nudge whose reason has gone isn't posted.**
+
+- Each run first **expires** a pending nudge whose pull request is no longer
+  waiting (merged, closed, reviewed, back to draft, locked, or no one
+  requested), or is waiting since a different time.
+- Approving a nudge whose pull request is no longer open, as the App last
+  recorded it, is refused with a `409`, and the nudge expires. That covers
+  the hours between runs, and the weekend.
+- Approval checks **only** that the pull request is still open. Anything
+  else that changes after the morning's run waits for the next run to
+  expire the nudge: a review, removed requests (it would mention people no
+  longer asked), a move back to draft, or a lock (GitHub then refuses the
+  comment with a `403`, and the proposal ends `failed`). Check the pull
+  request before approving a nudge that's been waiting a while.
+
+**Its log.** Each run logs one line, such as "nudges: 9 waiting on review;
+proposed 2, already nudged this wait 3, not yet due 2, nudges off 2, expired
+1 no longer waiting". A proposal it can't record fails the run, naming the
+pull request, after the others have been tried.
+
 ## What is kept
 
 | What | Where | For |
 |---|---|---|
 | Each call: when, which repository and feature, the model asked and the model that answered, how it stopped, the token counts, the outcome, and the proposal it made | `claude_calls` | 90 days |
 | Calls per repository per UTC day | `claude_calls_daily` | 7 days |
-| Each proposal: its target and title, what it would do, Claude's reason, and how it was decided | `proposals` | pending for up to 14 days; 90 days after a decision |
+| Each proposal: its target and title, what it would do, its reason (Claude's, for triage), and how it was decided | `proposals` | pending for up to 14 days; 90 days after a decision |
 | Each decision: who, which proposal, GitHub's status and what happened | `maintainer_actions` | kept |
 | What each repository's settings file said when last read | `repo_settings` | kept, one row per repository; Mine shows the last 7 days |
 
@@ -247,10 +318,11 @@ cron does the pruning.
 2. **The caps** (optional). Set `CLAUDE_DAILY_CAP_REPO` and
    `CLAUDE_DAILY_CAP_TOTAL` if the defaults don't suit. Changing one that's
    already on the Worker takes a deploy with *overwrite secrets*.
-3. **The App's permissions.** The App already has what the foundations need:
-   **Contents: Read-only** for the settings file, and **Issues: Read and
-   write** to apply labels ([github-app.md](github-app.md)). A later
-   feature that needs more says so in its own section.
+3. **The App's permissions.** The App already has what these features
+   need: **Contents: Read-only** for the settings file, **Issues: Read and
+   write** to apply labels, and **Pull requests: Read and write** to comment
+   on a pull request ([github-app.md](github-app.md)). A later feature that
+   needs more says so in its own section.
 4. **Each repository opts in** with `.github/bynk-hooks.yml` on its default
    branch ([settings.md](settings.md)). Its maintainers merge that like any
    other change.
