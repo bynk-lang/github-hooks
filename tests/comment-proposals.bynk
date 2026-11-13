@@ -11,6 +11,10 @@ stub AppAuth.token(_) returns Ok("ghs_test")
 const NUDGE: String = "@alice @bob, this pull request has been waiting on your review for 5 days (team: core)."
 
 fn seed() -> List[SqlStatement] {
+	waitingThirty().concat(seedProposals())
+}
+
+fn seedProposals() -> List[SqlStatement] {
 	[
 		SqlStatement {
 			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
@@ -250,43 +254,148 @@ case "a pruned highest id isn't reused, so the audit's references stay true" {
 	expect next == Ok(3)
 }
 
-case "a nudge for a pull request that's no longer open is refused, and expired" {
-	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
-	let seeded <- Deliveries.batch(seed())
-	expect seeded is Ok(_)
-	let merged <- Deliveries.run(
-		"INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, updated_at) VALUES ('bynk-lang/secret', 30, 'Faster builds', 'accuser', 0, 'main', 'b', 0, 'merged', '2026-10-01T00:00:00.000Z', '2026-11-05T09:00:00.000Z')",
-		[]
-	)
-	expect merged is Ok(_)
-	let r <- api.POST(
-		"/maintainers/proposals/approve",
-		ProposalDecision { id: 1 }
-	) by Maintainer("accuser")
-	expect r == Conflict(
-		"proposal 1 is no longer waiting: the pull request is merged, so nothing was posted"
-	)
-	expect GitHubHttp.post never called
-	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
-	expect row == Ok(Some(Settled {
-		status: "expired",
-		outcome: Some("is no longer waiting: the pull request is merged"),
-	}))
+--- Pull request 30 of `bynk-lang/secret`, waiting on alice since 31 October 09:00, as proposal 1's nudge was made for.
+fn waitingThirty() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, ready_at, updated_at) VALUES ('bynk-lang/secret', 30, 'Faster builds', 'accuser', 0, 'main', 'b', 0, 'open', '2026-10-01T00:00:00.000Z', '2026-10-31T09:00:00.000Z', '2026-11-05T09:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO pull_request_review_requests (repo, number, reviewer, team, requested_at) VALUES ('bynk-lang/secret', 30, 'alice', 0, '2026-10-01T00:00:00.000Z')",
+			params: [],
+		},
+	]
 }
 
-case "a nudge for a pull request that's still open is posted" {
+case "a nudge for a pull request still waiting since then is posted" {
 	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
 	let seeded <- Deliveries.batch(seed())
 	expect seeded is Ok(_)
-	let open <- Deliveries.run(
-		"INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state, opened_at, updated_at) VALUES ('bynk-lang/secret', 30, 'Faster builds', 'accuser', 0, 'main', 'b', 0, 'open', '2026-10-01T00:00:00.000Z', '2026-11-05T09:00:00.000Z')",
-		[]
-	)
-	expect open is Ok(_)
 	let r <- api.POST(
 		"/maintainers/proposals/approve",
 		ProposalDecision { id: 1 }
 	) by Maintainer("accuser")
 	expect r is Ok(_)
 	expect GitHubHttp.post called once
+}
+
+case "a nudge for a pull request that's been merged is refused, and expired" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let merged <- Deliveries.run("UPDATE pull_requests SET state = 'merged' WHERE number = 30", [])
+	expect merged is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict("proposal 1 is no longer waiting on review, so nothing was posted")
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Settled]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(Settled {
+		status: "expired",
+		outcome: Some("is no longer waiting on review"),
+	}))
+}
+
+case "a nudge is refused once no one is requested" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let unasked <- Deliveries.run("DELETE FROM pull_request_review_requests WHERE number = 30", [])
+	expect unasked is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict("proposal 1 is no longer waiting on review, so nothing was posted")
+	expect GitHubHttp.post never called
+}
+
+case "a nudge for a pull request back in draft is refused" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let drafted <- Deliveries.run("UPDATE pull_requests SET draft = 1 WHERE number = 30", [])
+	expect drafted is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Conflict(_)
+	expect GitHubHttp.post never called
+}
+
+case "a nudge for a locked pull request is refused" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let locked <- Deliveries.run("UPDATE pull_requests SET locked = 1 WHERE number = 30", [])
+	expect locked is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Conflict(_)
+	expect GitHubHttp.post never called
+}
+
+case "a nudge whose wait has started again since is refused" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let reviewed <- Deliveries.run(
+		"INSERT INTO pull_request_reviews (review_id, repo, number, reviewer, reviewer_is_bot, state, submitted_at) VALUES (1, 'bynk-lang/secret', 30, 'alice', 0, 'commented', '2026-11-04T12:00:00.000Z')",
+		[]
+	)
+	expect reviewed is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict(
+		"proposal 1 is no longer waiting since then: its wait has started again, so nothing was posted"
+	)
+	expect GitHubHttp.post never called
+}
+
+case "a comment that isn't a nudge is posted without a check" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let plain <- Deliveries.run(
+		"INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES (5, 'bynk-lang/secret', 'comment', 40, '{\"body\":\"Hi\"}', 'r', '2026-11-05T07:43:00.000Z', '2026-11-19T07:43:00.000Z', 'pending')",
+		[]
+	)
+	expect plain is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 5 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+}
+
+--- Where a proposal stands, and who's deciding it.
+type Claim = {
+	status: String,
+	decided_by: Option[String],
+}
+
+case "a check that can't be made gives the claim back, and expires nothing" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{}")
+	stub Deliveries.all(_, _) returns Err(Failed("D1_ERROR: database is locked"))
+	let seeded <- Deliveries.batch(seed())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == ServiceUnavailable(
+		"proposal 1 couldn't be checked, so nothing was posted; try again"
+	)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[Claim]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(Claim { status: "pending", decided_by: None }))
+	expect Logger.error called with msg.startsWith("could not check proposal 1 still applies: ")
 }

@@ -22,8 +22,9 @@ All notable changes to github-hooks. The format follows
     named without the @.
   - **Once per wait:** a decline holds until the wait starts again.
   - **No stale nudges:** each run expires a pending nudge whose pull request
-    is no longer waiting, and approving one for a pull request that's no
-    longer open is refused with a `409`.
+    is no longer waiting. Approving a nudge checks it again against the same
+    test, and refuses it with a `409` if the pull request is no longer
+    waiting, or its wait has started again since.
 - A second kind of proposal, `comment` (#103): approving posts the comment
   as the App (`201`), and Mine shows its text in full. Migration `0026`
   rebuilds `proposals` to allow it, with `id` now `AUTOINCREMENT`, so a
