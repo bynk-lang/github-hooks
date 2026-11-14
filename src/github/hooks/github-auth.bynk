@@ -167,6 +167,7 @@ Kept apart from `GitHubApi` so a call can be made again with a fresh token.
 capability GitHubHttp {
 	fn post(token: String, url: String, body: String) -> Effect[Result[Response, String]]
 	fn get(token: String, url: String) -> Effect[Result[Response, String]]
+	fn patch(token: String, url: String, body: String) -> Effect[Result[Response, String]]
 }
 
 provides GitHubHttp = FetchGitHubHttp given Fetch {
@@ -178,6 +179,21 @@ provides GitHubHttp = FetchGitHubHttp given Fetch {
 			authorization: Some("Bearer \(token)"),
 			headers: apiHeaders(),
 			body: None,
+		})
+		match sent {
+			Ok(res) => Effect.pure(Ok(res)),
+			Err(_) => Effect.pure(Err("GitHub could not be reached")),
+		}
+	}
+
+	fn patch(token: String, url: String, body: String) -> Effect[Result[Response, String]] {
+		let sent <- Fetch.send(Request {
+			method: Patch,
+			url: url,
+			contentType: Some("application/json"),
+			authorization: Some("Bearer \(token)"),
+			headers: apiHeaders(),
+			body: Some(body),
 		})
 		match sent {
 			Ok(res) => Effect.pure(Ok(res)),

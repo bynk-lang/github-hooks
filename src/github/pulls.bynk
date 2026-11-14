@@ -65,6 +65,13 @@ type PullPayload = {
 	requested_teams: Option[List[TeamRef]] = None,
 	--- Whether its conversation is locked (#103): GitHub sends it in every delivery and REST read.
 	locked: Option[Bool] = None,
+	--- Its labels (#110), as every delivery and REST read lists them.
+	labels: Option[List[PullLabel]] = None,
+}
+
+--- A label as a pull request lists it.
+type PullLabel = {
+	name: String,
 }
 
 ---
@@ -100,6 +107,8 @@ type PullFact = {
 	headSha: Option[String] = None,
 	--- Whether its conversation is locked (#103), when this delivery says.
 	locked: Option[Bool] = None,
+	--- Its labels' names (#110), when this delivery lists them.
+	labels: Option[List[String]] = None,
 	--- Whose review it waits on, as this delivery says: the whole set, when it says.
 	reviewers: Option[List[String]] = None,
 	teams: Option[List[String]] = None,
@@ -174,6 +183,7 @@ fn pullFact(
 		reason: reason,
 		headSha: pr.head.sha,
 		locked: pr.locked,
+		labels: pr.labels.map((ls) => ls.map((l) => l.name)),
 		reviewers: pr.requested_reviewers.map((us) => us.map((u) => u.login)),
 		teams: pr.requested_teams.map((ts) => ts.map((t) => t.slug)),
 		requestedUser: None,

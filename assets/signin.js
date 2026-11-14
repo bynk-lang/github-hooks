@@ -325,15 +325,20 @@
       };
       const what = p.kind === "labels" ? `add ${p.labels.join(", ")}`
         : p.kind === "comment" ? "comment"
+        : p.kind === "release_notes" ? "write the release notes"
         : p.kind;
-      // A comment is shown in full, as text, so the maintainer approves exactly what's posted.
-      const said = p.kind === "comment" && p.comment ? node("blockquote", { class: "proposal-comment" }, p.comment) : null;
-      // `/issues/N` serves an issue or a pull request alike.
+      // A comment, or release notes, are shown in full, as text, so the maintainer approves exactly what's written.
+      const text = p.kind === "comment" ? p.comment : p.kind === "release_notes" ? p.notes : null;
+      const said = text ? node("blockquote", { class: "proposal-comment" }, text) : null;
+      // A release links to its page by tag; `/issues/N` serves an issue or a pull request alike.
+      const target = p.kind === "release_notes" && p.release
+        ? node("a", { href: `https://github.com/${p.repo}/releases/tag/${encodeURIComponent(p.release)}` }, `${p.repo} ${p.release}`, p.title && p.title !== p.release ? ` ${p.title}` : "")
+        : link(p.repo, p.target, "issues", p.title || "");
       return [
-        link(p.repo, p.target, "issues", p.title || ""), ` · ${what} · `, node("span", { class: "proposal-reason" }, p.reason),
+        target, ` · ${what} · `, node("span", { class: "proposal-reason" }, p.reason),
         said,
         ` · proposed ${ago(p.proposed_at)} ago · `,
-        decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.repo}#${p.target}? The App does it on GitHub at once.`),
+        decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.kind === "release_notes" ? `${p.repo} ${p.release || ""}` : `${p.repo}#${p.target}`}? The App does it on GitHub at once.`),
         " ", decide("Decline", "/maintainers/proposals/decline", null), " ", note,
       ];
     });
