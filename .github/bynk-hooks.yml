@@ -10,3 +10,11 @@
 triage:
   enabled: true
   labels: [bug, enhancement, documentation, question]
+
+# Stale pull request nudges (#103, docs/proposals.md#stale-pull-request-nudges):
+# each weekday at 07:43 UTC, a ready pull request that has waited on its
+# requested reviewers for 3 whole days or more gets a proposed comment to
+# them, which a maintainer approves or declines in Mine.
+nudges:
+  enabled: true
+  after_days: 3
