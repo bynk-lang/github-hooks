@@ -19,7 +19,7 @@ capability Facts {
 	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()]
 }
 
-provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock, GitHubApi, Tokens, AppAuth, GitHubHttp {
+provides Facts = DeliveryFacts given Deliveries, Logger, Secrets, LiveFeed, Edge, Clock, GitHubApi, Tokens, AppAuth, GitHubHttp, ReleaseNotes {
 	fn extract(d: Delivery, body: Bytes, fresh: Bool) -> Effect[()] {
 		let _ <- recordVisibility(body)
 		let _ <- if d.event == "pull_request_review" {

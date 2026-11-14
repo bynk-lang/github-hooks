@@ -287,6 +287,15 @@ case "which descriptions may be filled" {
 	expect !fillableNotes(Some("## What's Changed\n\nWe rewrote everything."))
 	// Notes that only mention the link somewhere are someone's.
 	expect !fillableNotes(Some("Our notes.\n\n**Full Changelog**: https://example.com"))
+	// A paragraph of someone's own, anywhere, makes it written.
+	expect !fillableNotes(Some(EDITED))
+	// GitHub's list with new contributors is generated.
+	expect fillableNotes(
+		Some("## What's Changed\n* Faster builds by @alice in https://github.com/bynk-lang/secret/pull/30\n\n## New Contributors\n* @alice made their first contribution in https://github.com/bynk-lang/secret/pull/30\n\n**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0")
+	)
+	// Two changelog lines, or an entry without its link, aren't GitHub's.
+	expect !fillableNotes(Some(GENERATED.concat("\n**Full Changelog**: https://example.com")))
+	expect !fillableNotes(Some("## What's Changed\n* Faster builds\n\n**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0"))
 	// Anything after the changelog line is someone's too.
 	expect !fillableNotes(Some(GENERATED.concat("\n\nThanks, everyone!")))
 }
@@ -387,4 +396,14 @@ case "the last label taken off leaves none" {
 	expect off is Accepted(_)
 	let labels <- Deliveries.select[PullLabelRow](LABELS_OF_25, [])
 	expect labels == Ok([])
+}
+
+case "Mine shows the generated list release notes would replace" {
+	let seeded <- Deliveries.batch(seedNotes().append(overGenerated()))
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals.first().map((p) => p.replaces) == Some(Some(GENERATED))
 }
