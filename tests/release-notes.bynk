@@ -314,6 +314,16 @@ case "the rendering, without a summary or with a long one" {
 		pulls,
 		pulls
 	) == "s\n\n## Other\n\n- One (#1) by @a\n- Two (#2) by @b"
+	// A summary of exactly the limit is kept whole.
+	let full = renderNotes(
+		NotesAnswer {
+			summary: joined(repeated("x", 800), ""),
+			groups: [],
+		},
+		pulls,
+		pulls
+	)
+	expect full.startsWith(joined(repeated("x", 800), "").concat("\n\n## Other"))
 	let long = renderNotes(
 		NotesAnswer {
 			summary: joined(repeated("x", 900), ""),
@@ -655,4 +665,68 @@ case "the changelog line is the generated list's" {
 	) == Some("**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0")
 	expect changelogLine(None) == None
 	expect changelogLine(Some("Our notes.")) == None
+}
+
+case "only this repository's release, pull requests, labels and claim count" {
+	stub GitHubHttp.get(_, _) returns notesOn()
+	stub AnthropicHttp.post(_, _, _) returns replying(GROUPED)
+	let seeded <- Deliveries.batch(
+		shipped().concat(
+			[
+				SqlStatement {
+					sql: """
+						INSERT INTO pull_requests (repo, number, title, author, author_is_bot, base, head, draft, state,
+						                           opened_at, merged_at, updated_at, released_in, released_at)
+						VALUES ('bynk-lang/other', 40, 'Elsewhere', 'carol', 0, 'main', 'z', 0, 'merged', '2026-11-01T00:00:00.000Z',
+						        '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z', 'v0.5.0', '2026-11-05T11:30:00.000Z')
+					""",
+					params: [],
+				},
+				SqlStatement {
+					sql: "INSERT INTO pull_request_labels (repo, number, label) VALUES ('bynk-lang/other', 30, 'elsewhere')",
+					params: [],
+				},
+				SqlStatement {
+					sql: """
+						INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+						  ('bynk-lang/secret', 'labels', 9001, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'declined'),
+						  ('bynk-lang/other', 'release_notes', 9001, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'declined')
+					""",
+					params: [],
+				},
+				SqlStatement {
+					sql: "INSERT INTO actions (delivery, action, status, detail) VALUES ('r-1', 'welcome', 'done', 'welcomed')",
+					params: [],
+				},
+			]
+		)
+	)
+	expect seeded is Ok(_)
+	let _ <- ReleaseNotes.draft(delivery("r-1"), emptyRelease())
+	// Another repository's v0.5.0, and #30's labels there, aren't this release's.
+	expect AnthropicHttp.post called once with !body.contains("Elsewhere") && !body.contains("elsewhere")
+	let p <- Deliveries.firstAs[Proposed](
+		"FROM proposals WHERE kind = 'release_notes' AND repo = 'bynk-lang/secret'",
+		[]
+	)
+	expect p.map((x) => x.map((r) => r.payload)) == Ok(Some(payloadOf(NOTES, None)))
+	// The delivery's other action is left as it was.
+	let welcome <- Deliveries.firstAs[Ran]("FROM actions WHERE action = 'welcome'", [])
+	expect welcome == Ok(Some(Ran { status: "done", detail: Some("welcomed") }))
+}
+
+type Expiring = {
+	proposed_at: String,
+	expires_at: String,
+}
+
+case "release notes wait 14 days for a maintainer" {
+	stub LiveFeed.publishMaintainers(_) returns ()
+	let made <- proposeReleaseNotes(notesFor(None, None), "Notes.", None)
+	expect made == Ok(Some(1))
+	let row <- Deliveries.firstAs[Expiring]("FROM proposals", [])
+	expect row == Ok(Some(Expiring {
+		proposed_at: "2026-11-05T12:00:00.000Z",
+		expires_at: "2026-11-19T12:00:00.000Z",
+	}))
 }

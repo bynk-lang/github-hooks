@@ -330,8 +330,8 @@ fn renderNotes(a: NotesAnswer, sent: List[ShippedPull], shipped: List[ShippedPul
 	} else {
 		summary
 	}
-	let parts = if lead == "" { sections } else { [lead].concat(sections) }
-	joined(parts, "\n\n")
+	// `joined` passes over an empty summary at the start.
+	joined([lead].concat(sections), "\n\n")
 }
 
 type Placed = {
