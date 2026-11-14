@@ -377,7 +377,7 @@ case "a comment that isn't a nudge is posted without a check" {
 }
 
 --- Where a proposal stands, and who's deciding it.
-type Claim = {
+type ClaimRow = {
 	status: String,
 	decided_by: Option[String],
 }
@@ -395,7 +395,7 @@ case "a check that can't be made gives the claim back, and expires nothing" {
 		"proposal 1 couldn't be checked, so nothing was posted; try again"
 	)
 	expect GitHubHttp.post never called
-	let row <- Deliveries.firstAs[Claim]("FROM proposals WHERE id = 1", [])
-	expect row == Ok(Some(Claim { status: "pending", decided_by: None }))
+	let row <- Deliveries.firstAs[ClaimRow]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(ClaimRow { status: "pending", decided_by: None }))
 	expect Logger.error called with msg.startsWith("could not check proposal 1 still applies: ")
 }

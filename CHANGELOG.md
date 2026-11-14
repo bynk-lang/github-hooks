@@ -15,6 +15,11 @@ All notable changes to github-hooks. The format follows
   them. `~>` is deprecated and goes in the next Bynk release; a fault or
   `Err` in a detached effect is now reported by the runtime instead of lost.
   `BYNK_VERSION` moves to v0.603.10 with them, as `.detach()` needs it.
+  The tests rename their `Claimed` and `Claim` types to `ClaimedRow` and
+  `ClaimRow`, and qualify two `Unavailable(` as `ClaudeOutcome.Unavailable(`:
+  this release's standard library newly exports `Claim` (and its variant
+  `Claimed`) and `ContainerError`, which a suite's own types and a bare
+  variant name can no longer share a name with.
 
 ## [0.5.0] - 2026-11-13
 
