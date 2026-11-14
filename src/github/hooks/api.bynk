@@ -636,9 +636,9 @@ service api from http {
 		// Act after answering: GitHub waits at most 10 seconds for the reply.
 		// A redelivery reacts too, so a failed action is retried; one that
 		// worked is not repeated (see `Bot`).
-		~> Bot.react(d, body)
-		~> Triage.run(d, body)
-		~> Facts.extract(d, body, r.changes > 0)
+		do Bot.react(d, body).detach()
+		do Triage.run(d, body).detach()
+		do Facts.extract(d, body, r.changes > 0).detach()
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")
 			Ok("duplicate")
