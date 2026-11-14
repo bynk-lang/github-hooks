@@ -1,0 +1,390 @@
+// #110, step 1: the `release_notes` kind of proposal, and pull requests'
+// labels, against an in-memory D1 with the migrations applied. GitHub is
+// stubbed at the wire. It's 12:00 UTC on 5 November; accuser is a maintainer;
+// installation 42 delivered for `bynk-lang/secret`.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+fixture shippedPull = "fixtures/github/pull_request.closed.json"
+
+const NOTES: String = "Faster builds.\n\n## Features\n\n- Faster builds (#30, @accuser)"
+
+const GENERATED: String = "## What's Changed\n* Faster builds by @accuser in https://github.com/bynk-lang/secret/pull/30\n\n\n**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0"
+
+fn seedNotes() -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'release', 'bynk-lang/secret', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO proposals (id, repo, kind, target, title, payload, reason, proposed_at, expires_at, status) VALUES (1, 'bynk-lang/secret', 'release_notes', 9001, 'v0.5.0', ?1, 'v0.5.0 was published with an empty description.', '2026-11-05T10:00:00.000Z', '2026-11-19T10:00:00.000Z', 'pending')",
+			params: [
+				Text(Json.encodePlain(ReleaseNotesPayload {
+					release_id: 9001,
+					tag: "v0.5.0",
+					body: NOTES,
+					seen: None,
+				})),
+			],
+		},
+	]
+}
+
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+--- The release as GitHub answers it, with `body` as JSON (`null` or a quoted string).
+fn release(body: String) -> Result[Response, String] {
+	answer(200, "{\"id\": 9001, \"tag_name\": \"v0.5.0\", \"body\": \(body)}")
+}
+
+type NotesSettled = {
+	status: String,
+	outcome: Option[String],
+	decided_by: Option[String],
+}
+
+case "Mine shows a release's notes, and its tag" {
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	expect m.proposals == [
+		ProposalWaiting {
+			id: 1,
+			repo: "bynk-lang/secret",
+			kind: "release_notes",
+			target: 9001,
+			title: Some("v0.5.0"),
+			labels: [],
+			comment: None,
+			notes: Some(NOTES),
+			release: Some("v0.5.0"),
+			reason: "v0.5.0 was published with an empty description.",
+			proposed_at: "2026-11-05T10:00:00.000Z",
+			expires_at: "2026-11-19T10:00:00.000Z",
+		},
+	]
+}
+
+case "approving release notes re-reads the release, then writes its description" {
+	stub GitHubHttp.get(_, _) returns release("null")
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{\"id\": 9001}")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Ok(ProposalDecided {
+		id: 1,
+		status: "approved",
+		message: "Wrote the notes for bynk-lang/secret v0.5.0",
+	})
+	expect GitHubHttp.get called once with url == "https://api.github.com/repos/bynk-lang/secret/releases/9001"
+	expect GitHubHttp.patch called once with url == "https://api.github.com/repos/bynk-lang/secret/releases/9001"
+	// Only the description is sent: the release's id and tag stay in the proposal.
+	expect GitHubHttp.patch called once with body == Json.encodePlain(CommentBody { body: NOTES })
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[NotesSettled]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(NotesSettled {
+		status: "approved",
+		outcome: Some("wrote the notes"),
+		decided_by: Some("accuser"),
+	}))
+}
+
+const EDITED: String = "## What's Changed\n\nHighlights: builds are faster.\n\n* Faster builds by @accuser in https://github.com/bynk-lang/secret/pull/30\n\n\n**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0"
+
+--- Proposal 1 as made over GitHub's generated list, `seen` when proposing.
+const SEEN_GENERATED: String = "UPDATE proposals SET payload = ?1 WHERE id = 1"
+
+fn overGenerated() -> SqlStatement {
+	SqlStatement {
+		sql: SEEN_GENERATED,
+		params: [
+			Text(Json.encodePlain(ReleaseNotesPayload {
+				release_id: 9001,
+				tag: "v0.5.0",
+				body: NOTES,
+				seen: Some(GENERATED),
+			})),
+		],
+	}
+}
+
+case "GitHub's generated list, unchanged since the notes were proposed, is replaced" {
+	stub GitHubHttp.get(_, _) returns release(Json.encode(GENERATED))
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes().append(overGenerated()))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+	expect GitHubHttp.patch called once
+}
+
+case "a generated list someone has edited since is kept" {
+	// Still the generated list's shape, with a maintainer's highlights added.
+	stub GitHubHttp.get(_, _) returns release(Json.encode(EDITED))
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes().append(overGenerated()))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Conflict(_)
+	expect GitHubHttp.patch never called
+}
+
+case "a generated list that appeared after notes for an empty description is kept" {
+	stub GitHubHttp.get(_, _) returns release(Json.encode(GENERATED))
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Conflict(_)
+	expect GitHubHttp.patch never called
+}
+
+case "a description written since is kept, and the notes expire" {
+	stub GitHubHttp.get(_, _) returns release("\"Hand-written notes.\"")
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict(
+		"proposal 1 is no longer needed: the release's description has been written or changed, so nothing was posted"
+	)
+	expect GitHubHttp.patch never called
+	let row <- Deliveries.firstAs[NotesSettled]("FROM proposals WHERE id = 1", [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("expired"))
+}
+
+case "notes for a deleted release expire" {
+	stub GitHubHttp.get(_, _) returns answer(404, "{\"message\": \"Not Found\"}")
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict(
+		"proposal 1 is no longer needed: the release is gone, so nothing was posted"
+	)
+	expect GitHubHttp.patch never called
+}
+
+case "a release that can't be read gives the claim back" {
+	stub GitHubHttp.get(_, _) returns answer(502, "Bad Gateway")
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == ServiceUnavailable(
+		"proposal 1 couldn't be checked, so nothing was posted; try again"
+	)
+	expect GitHubHttp.patch never called
+	let row <- Deliveries.firstAs[NotesSettled]("FROM proposals WHERE id = 1", [])
+	expect row == Ok(Some(NotesSettled { status: "pending", outcome: None, decided_by: None }))
+	expect Logger.error called with msg == "could not check proposal 1 still applies: GitHub answered 502 for the release"
+}
+
+case "a release whose answer doesn't decode gives the claim back" {
+	stub GitHubHttp.get(_, _) returns answer(200, "not json")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is ServiceUnavailable(_)
+}
+
+case "a refused write names the permission it needs" {
+	stub GitHubHttp.get(_, _) returns release("\"\"")
+	stub GitHubHttp.patch(_, _, _) returns answer(403, "{\"message\": \"Resource not accessible by integration\"}")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"GitHub refused the release notes (does the App have Contents: Read and write?): 403 Resource not accessible by integration"
+	)
+}
+
+case "notes for a repository no installation delivered for fail before GitHub is asked" {
+	stub GitHubHttp.get(_, _) returns release("null")
+	let seeded <- Deliveries.batch(seedNotes())
+	expect seeded is Ok(_)
+	let gone <- Deliveries.run("UPDATE deliveries SET installation = NULL", [])
+	expect gone is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == ServiceUnavailable("no installation of the App has delivered for bynk-lang/secret")
+	expect GitHubHttp.get never called
+}
+
+case "what release notes ask of GitHub" {
+	let Ok(n) = actionOf(
+		"release_notes",
+		"{\"release_id\":9001,\"tag\":\"v0.5.0\",\"body\":\"Hi\"}",
+		"bynk-lang/secret",
+		9001
+	) else {
+		expect false
+	}
+	expect n.url == "https://api.github.com/repos/bynk-lang/secret/releases/9001"
+	expect n.body == "{\"body\":\"Hi\"}"
+	expect n.ok == 200
+	expect n.patch
+	expect actionOf("release_notes", "{\"body\":\"Hi\"}", "bynk-lang/secret", 9001) is Err(_)
+	// The other kinds are sent with a POST.
+	let Ok(c) = actionOf("comment", "{\"body\":\"Hi\"}", "bynk-lang/secret", 30) else {
+		expect false
+	}
+	expect !c.patch
+}
+
+case "which descriptions may be filled" {
+	expect fillableNotes(None)
+	expect fillableNotes(Some(""))
+	expect fillableNotes(Some("  \n "))
+	expect fillableNotes(Some(GENERATED))
+	expect fillableNotes(
+		Some("**Full Changelog**: https://github.com/bynk-lang/secret/commits/v0.1.0")
+	)
+	expect !fillableNotes(Some("Hand-written notes."))
+	// A heading alone isn't GitHub's list: it lacks the changelog link.
+	expect !fillableNotes(Some("## What's Changed\n\nWe rewrote everything."))
+	// Notes that only mention the link somewhere are someone's.
+	expect !fillableNotes(Some("Our notes.\n\n**Full Changelog**: https://example.com"))
+	// Anything after the changelog line is someone's too.
+	expect !fillableNotes(Some(GENERATED.concat("\n\nThanks, everyone!")))
+}
+
+case "which descriptions are still unwritten at approval" {
+	expect stillUnwritten(None, None)
+	expect stillUnwritten(Some(" "), Some(GENERATED))
+	expect stillUnwritten(Some(GENERATED), Some(GENERATED))
+	// GitHub may hand back the same text with other trailing space.
+	expect stillUnwritten(Some(GENERATED.concat("\n")), Some(GENERATED))
+	expect !stillUnwritten(Some(GENERATED), None)
+	expect !stillUnwritten(Some("Hand-written."), Some(GENERATED))
+}
+
+case "the rebuilt table takes release notes, and still refuses a kind it doesn't know" {
+	let ok <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'release_notes', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect ok is Ok(_)
+	let bad <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect bad is Err(_)
+}
+
+--- PR #25 at `updated`, labelled `labels` (as JSON objects), after `action`.
+fn labelledPull(action: String, updated: String, labels: String) -> Bytes {
+	Bytes.fromUtf8(shippedPull
+		.replace("\"action\": \"closed\"", "\"action\": \"\(action)\"")
+		.replace("\"labels\": []", "\"labels\": \(labels)")
+		.replace("\"updated_at\": \"2026-11-05T08:10:14Z\"", "\"updated_at\": \"\(updated)\""))
+}
+
+fn delivery(id: String) -> RequestHeaders {
+	RequestHeaders.of(["X-GitHub-Event: pull_request", "X-GitHub-Delivery: \(id)"])
+}
+
+type PullLabelRow = {
+	label: String,
+}
+
+const LABELS_OF_25: String = "FROM pull_request_labels WHERE number = 25 ORDER BY label"
+
+case "a pull request's labels are recorded, and replaced by a newer delivery" {
+	let first <- api.POST(
+		"/github",
+		delivery("l-1"),
+		labelledPull(
+			"labeled",
+			"2026-11-05T08:00:00Z",
+			"[{\"name\": \"enhancement\"}, {\"name\": \"ci\"}]"
+		)
+	) by GitHub
+	expect first is Accepted(_)
+	let before <- Deliveries.select[PullLabelRow](LABELS_OF_25, [])
+	expect before == Ok([PullLabelRow { label: "ci" }, PullLabelRow { label: "enhancement" }])
+	let second <- api.POST(
+		"/github",
+		delivery("l-2"),
+		labelledPull("unlabeled", "2026-11-05T08:05:00Z", "[{\"name\": \"ci\"}]")
+	) by GitHub
+	expect second is Accepted(_)
+	let after <- Deliveries.select[PullLabelRow](LABELS_OF_25, [])
+	expect after == Ok([PullLabelRow { label: "ci" }])
+}
+
+case "an older delivery doesn't replace newer labels" {
+	let newer <- api.POST(
+		"/github",
+		delivery("l-1"),
+		labelledPull("labeled", "2026-11-05T08:05:00Z", "[{\"name\": \"bug\"}]")
+	) by GitHub
+	expect newer is Accepted(_)
+	let older <- api.POST(
+		"/github",
+		delivery("l-2"),
+		labelledPull("labeled", "2026-11-05T08:00:00Z", "[{\"name\": \"enhancement\"}]")
+	) by GitHub
+	expect older is Accepted(_)
+	let labels <- Deliveries.select[PullLabelRow](LABELS_OF_25, [])
+	expect labels == Ok([PullLabelRow { label: "bug" }])
+}
+
+case "the last label taken off leaves none" {
+	let on <- api.POST(
+		"/github",
+		delivery("l-1"),
+		labelledPull("labeled", "2026-11-05T08:00:00Z", "[{\"name\": \"bug\"}]")
+	) by GitHub
+	expect on is Accepted(_)
+	let off <- api.POST(
+		"/github",
+		delivery("l-2"),
+		labelledPull("unlabeled", "2026-11-05T08:05:00Z", "[]")
+	) by GitHub
+	expect off is Accepted(_)
+	let labels <- Deliveries.select[PullLabelRow](LABELS_OF_25, [])
+	expect labels == Ok([])
+}

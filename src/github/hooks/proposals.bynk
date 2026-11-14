@@ -3,7 +3,8 @@ context github.hooks
 // The App's proposals (#88, step 2): what a feature of #69 would do, recorded
 // and waiting on a maintainer, who approves or declines it in Mine. Nothing
 // is posted to GitHub until a maintainer approves. Two kinds: `labels`
-// (triage, #69 slice 2) and `comment` (stale pull request nudges, slice 3).
+// (triage, #69 slice 2), `comment` (stale pull request nudges, slice 3) and
+// `release_notes` (release notes drafts, slice 4).
 
 --- How long a proposal waits for a decision before it expires.
 const PROPOSAL_WAIT: Duration = 14.days
@@ -40,6 +41,50 @@ type ProposalAction = {
 	done: String,
 	message: String,
 	noun: String,
+	--- `PATCH` rather than `POST`.
+	patch: Bool = false,
+	--- What a `403` most likely means.
+	refused: String = "a missing permission, Issues and Pull requests: Read and write, or a locked conversation",
+}
+
+---
+The `release_notes` kind's payload: the release, and the notes for its
+description. `seen` is the description when the notes were proposed (GitHub's
+generated list, or `None` when it was empty): approval writes only over an
+empty description or that one, unchanged.
+---
+type ReleaseNotesPayload = {
+	release_id: Int,
+	tag: String,
+	body: String,
+	seen: Option[String] = None,
+}
+
+--- A release's description as GitHub answers it.
+type ReleaseBody = {
+	body: Option[String],
+}
+
+---
+Whether release notes may be proposed for a release's description: it's
+empty, or looks like GitHub's generated list (it starts "## What's Changed",
+or is the changelog link alone, and ends with the "**Full Changelog**" line).
+This is only the shape: an edited list can pass, so approval writes only
+over the description seen when proposing, unchanged (`stillUnwritten`).
+---
+fn fillableNotes(body: Option[String]) -> Bool {
+	let said = body.getOrElse("").trim()
+	let lines = said.split("\n")
+	let last = lines.get(lines.length() - 1).getOrElse("").trim()
+	said == ""
+		|| ((said.startsWith("## What's Changed") || said.startsWith("**Full Changelog**"))
+			&& last.startsWith("**Full Changelog**"))
+}
+
+--- Whether a release's description, as GitHub answers it now, is still empty, or still the one `seen` when the notes were proposed.
+fn stillUnwritten(now: Option[String], seen: Option[String]) -> Bool {
+	let current = now.getOrElse("").trim()
+	current == "" || Some(current) == seen.map((s) => s.trim())
 }
 
 --- What approving a proposal of `kind` with `payload` on `repo`'s `target` asks of GitHub, or why it can't be read.
@@ -74,6 +119,20 @@ fn actionOf(
 			}),
 			Err(e) => Err("its payload did not decode: \(jsonError(e))"),
 		}
+	} else if kind == "release_notes" {
+		match Json.decode[ReleaseNotesPayload](payload) {
+			Ok(n) => Ok(ProposalAction {
+				url: "https://api.github.com/repos/\(repo)/releases/\(n.release_id)",
+				body: Json.encodePlain(CommentBody { body: n.body }),
+				ok: 200,
+				done: "wrote the notes",
+				message: "Wrote the notes for \(repo) \(n.tag)",
+				noun: "the release notes",
+				patch: true,
+				refused: "does the App have Contents: Read and write?",
+			}),
+			Err(e) => Err("its payload did not decode: \(jsonError(e))"),
+		}
 	} else {
 		Err("the App doesn't know how to act on a \(kind) proposal")
 	}
@@ -91,8 +150,12 @@ Answers `None` when it still applies, `Some(why)` when it no longer does,
 and `Err` when it couldn't be checked (a D1 error): the caller expires only
 the second, and gives the claim back for the third.
 ---
-fn stillApplies(p: ClaimedProposal) -> Effect[Result[Option[String], String]] given Deliveries {
+fn stillApplies(
+	p: ClaimedProposal,
+	installation: Int
+) -> Effect[Result[Option[String], String]] given Deliveries, AppAuth, GitHubHttp {
 	let applies: Option[String] = None
+	let true = p.kind != "release_notes" else { releaseStillEmpty(p, installation) }
 	let true = p.kind == "comment" else { Effect.pure(Ok(applies)) }
 	let Ok(c) = Json.decode[CommentPayload](p.payload) else { Effect.pure(Ok(applies)) }
 	let Some(since) = c.wait_since else { Effect.pure(Ok(applies)) }
@@ -106,6 +169,38 @@ fn stillApplies(p: ClaimedProposal) -> Effect[Result[Option[String], String]] gi
 		} else {
 			Effect.pure(Ok(Some("is no longer waiting since then: its wait has started again")))
 		},
+	}
+}
+
+---
+Whether a release's notes still apply: GitHub, asked now, says its
+description is still empty, or still the one seen when the notes were
+proposed. A description written or edited since is `Some(why)`; GitHub not
+answering is `Err`.
+---
+fn releaseStillEmpty(
+	p: ClaimedProposal,
+	installation: Int
+) -> Effect[Result[Option[String], String]] given AppAuth, GitHubHttp {
+	let applies: Option[String] = None
+	let Ok(n) = Json.decode[ReleaseNotesPayload](p.payload) else { Effect.pure(Ok(applies)) }
+	let url = "https://api.github.com/repos/\(p.repo)/releases/\(n.release_id)"
+	let Ok(res) <- asApp(installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	if res.status == 404 {
+		Effect.pure(Ok(Some("is no longer needed: the release is gone")))
+	} else if res.status != 200 {
+		Effect.pure(Err("GitHub answered \(res.status) for the release"))
+	} else {
+		match Json.decode[ReleaseBody](res.body) {
+			Ok(r) => if stillUnwritten(r.body, n.seen) {
+				Effect.pure(Ok(applies))
+			} else {
+				Effect.pure(Ok(Some("is no longer needed: the release's description has been written or changed")))
+			},
+			Err(_) => Effect.pure(Err("GitHub's release didn't decode")),
+		}
 	}
 }
 
@@ -335,7 +430,29 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			ServerError("could not read the proposal")
 		},
 	}
-	let Ok(lapsed) <- stillApplies(p) else match {
+	let found <- Deliveries.first(
+		"""
+		SELECT (SELECT d.installation FROM deliveries d
+		        WHERE d.repo = ?1 COLLATE NOCASE AND d.installation IS NOT NULL
+		        ORDER BY d.received_at DESC LIMIT 1) AS installation
+		""",
+		[Text(p.repo)]
+	)
+	let installation: Option[Int] = match found {
+		Ok(Some(r)) => match Json.decodeSql[InstallationOf](r) {
+			Ok(i) => i.installation,
+			Err(_) => None,
+		},
+		_ => None,
+	}
+	let Some(inst) = installation else {
+		let why = "no installation of the App has delivered for \(p.repo)"
+		let _ <- settle(id, "failed", why)
+		let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
+		let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "failed"))
+		ServiceUnavailable(why)
+	}
+	let Ok(lapsed) <- stillApplies(p, inst) else match {
 		Err(why) => {
 			// Not knowing isn't evidence it stopped applying: give the claim back.
 			let _ <- unclaim(id)
@@ -360,29 +477,11 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			ServerError("proposal \(id) could not be read: \(why)")
 		},
 	}
-	let found <- Deliveries.first(
-		"""
-		SELECT (SELECT d.installation FROM deliveries d
-		        WHERE d.repo = ?1 COLLATE NOCASE AND d.installation IS NOT NULL
-		        ORDER BY d.received_at DESC LIMIT 1) AS installation
-		""",
-		[Text(p.repo)]
-	)
-	let installation: Option[Int] = match found {
-		Ok(Some(r)) => match Json.decodeSql[InstallationOf](r) {
-			Ok(i) => i.installation,
-			Err(_) => None,
-		},
-		_ => None,
-	}
-	let Some(inst) = installation else {
-		let why = "no installation of the App has delivered for \(p.repo)"
-		let _ <- settle(id, "failed", why)
-		let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
-		let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "failed"))
-		ServiceUnavailable(why)
-	}
-	let sent <- asApp(inst, (token) => GitHubHttp.post(token, action.url, action.body))
+	let sent <- asApp(inst, (token) => if action.patch {
+		GitHubHttp.patch(token, action.url, action.body)
+	} else {
+		GitHubHttp.post(token, action.url, action.body)
+	})
 	let answer = match sent {
 		Ok(res) => if res.status == action.ok {
 			ActionOutcome {
@@ -413,7 +512,7 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 	} else {
 		match answer.status {
 			Some(403) => BadGateway(
-				"GitHub refused \(action.noun) (a missing permission, Issues and Pull requests: Read and write, or a locked conversation): \(answer.outcome)"
+				"GitHub refused \(action.noun) (\(action.refused)): \(answer.outcome)"
 			),
 			Some(_) => BadGateway("GitHub refused \(action.noun): \(answer.outcome)"),
 			None => BadGateway(
@@ -519,10 +618,17 @@ fn pendingProposals(
 		} else {
 			None
 		},
+		notes: releaseNotesOf(r).map((n) => n.body),
+		release: releaseNotesOf(r).map((n) => n.tag),
 		reason: r.reason,
 		proposed_at: r.proposed_at,
 		expires_at: r.expires_at,
 	})))
+}
+
+--- A `release_notes` proposal's payload, or `None` for another kind or one that doesn't decode.
+fn releaseNotesOf(r: ProposalRow) -> Option[ReleaseNotesPayload] {
+	if r.kind == "release_notes" { Json.decode[ReleaseNotesPayload](r.payload).ok() } else { None }
 }
 
 --- Today's Claude calls against the caps, for Mine's footer.

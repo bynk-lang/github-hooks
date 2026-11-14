@@ -132,7 +132,41 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 				},
 			]
 		)
+		.concat(pullLabelSet(p))
 		.concat(reviewRequestChange(p))
+}
+
+---
+A pull request's labels (#110), replaced whole by a delivery or sync that
+lists them, unless the row is strictly newer: every delivery and REST read
+lists the full set, so the latest one's is the set.
+
+Deliveries in the same second share an `updated_at`, so each replaces the
+set, in arrival order (#68's tie): two labels added in a second, delivered
+in reverse, leave the first one's set. The daily sync corrects it within a
+day; release notes, which group by these, are only a draft for a person.
+---
+fn pullLabelSet(p: PullFact) -> List[SqlStatement] {
+	let Some(labels) = p.labels else { [] }
+	[
+		SqlStatement {
+			sql: """
+				DELETE FROM pull_request_labels
+				WHERE repo = ?1 AND number = ?2
+				  AND NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?3)
+			""",
+			params: [Text(p.repo), Integer(p.number), Text(p.updatedAt)],
+		},
+		SqlStatement {
+			sql: """
+				INSERT INTO pull_request_labels (repo, number, label)
+				SELECT ?1, ?2, value FROM json_each(?4)
+				WHERE NOT EXISTS (SELECT 1 FROM pull_requests WHERE repo = ?1 AND number = ?2 AND updated_at > ?3)
+				ON CONFLICT (repo, number, label) DO NOTHING
+			""",
+			params: [Text(p.repo), Integer(p.number), Text(p.updatedAt), Text(Json.encode(labels))],
+		},
+	]
 }
 
 // Replaces a pull request's review requests (#53) with the set its fact

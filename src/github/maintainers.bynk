@@ -188,7 +188,8 @@ type SettingsProblem = {
 A proposal waiting on a maintainer (#88): what the App would do (`kind`, on
 issue or pull request `target` of `repo`), and why. For `labels`, `labels`
 are the labels it would add; for `comment`, `comment` is the text it would
-post. It expires, unanswered, at `expires_at`.
+post; for `release_notes`, `notes` are the notes for release `release` (its
+tag, `target` being its id). It expires, unanswered, at `expires_at`.
 ---
 type ProposalWaiting = {
 	id: Int,
@@ -198,6 +199,8 @@ type ProposalWaiting = {
 	title: Option[String],
 	labels: List[String],
 	comment: Option[String],
+	notes: Option[String] = None,
+	release: Option[String] = None,
 	reason: String,
 	proposed_at: String,
 	expires_at: String,
