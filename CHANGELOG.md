@@ -6,6 +6,21 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Ready for Bynk v0.603.10 (#114): the pinned `wrangler` moves from 4.160.0
+  to 4.162.0, the minimum this Bynk release's `bynk deploy` accepts, and the
+  three `~>` sends after the webhook reply (`Bot.react`, `Triage.run`,
+  `Facts.extract`) become `do ….detach()`, as `bynk check --fix` rewrites
+  them. `~>` is deprecated and goes in the next Bynk release; a fault or
+  `Err` in a detached effect is now reported by the runtime instead of lost.
+  `BYNK_VERSION` moves to v0.603.10 with them, as `.detach()` needs it.
+  The tests rename their `Claimed` and `Claim` types to `ClaimedRow` and
+  `ClaimRow`, and qualify two `Unavailable(` as `ClaudeOutcome.Unavailable(`:
+  this release's standard library newly exports `Claim` (and its variant
+  `Claimed`) and `ContainerError`, which a suite's own types and a bare
+  variant name can no longer share a name with.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added

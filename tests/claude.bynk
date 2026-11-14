@@ -57,7 +57,7 @@ type CallRow = {
 }
 
 --- A repository's calls claimed today.
-type Claimed = {
+type ClaimedRow = {
 	calls: Int,
 }
 
@@ -86,8 +86,8 @@ case "an answer is the text block, recorded with its usage and a cache hit" {
 		cache_read_input_tokens: Some(610),
 		fell_back: Some(0),
 	}))
-	let claimed <- Deliveries.firstAs[Claimed](BYNK_CLAIMS, [])
-	expect claimed == Ok(Some(Claimed { calls: 1 }))
+	let claimed <- Deliveries.firstAs[ClaimedRow](BYNK_CLAIMS, [])
+	expect claimed == Ok(Some(ClaimedRow { calls: 1 }))
 }
 
 --- The parts of a request body the API reads, decoded back.
@@ -204,17 +204,17 @@ case "a repository's cap, then the day's total, stop calls before they're sent" 
 	expect other.outcome is Answered(_)
 	expect past.outcome == Capped("overall")
 	expect AnthropicHttp.post called 3 times
-	let capped <- Deliveries.firstAs[Claimed](
+	let capped <- Deliveries.firstAs[ClaimedRow](
 		"FROM (SELECT count(*) AS calls FROM claude_calls WHERE outcome = 'capped')",
 		[]
 	)
-	expect capped == Ok(Some(Claimed { calls: 2 }))
+	expect capped == Ok(Some(ClaimedRow { calls: 2 }))
 }
 
 case "an error status or no answer gives the claim back, and is recorded" {
 	stub AnthropicHttp.post(_, _, _) returns each [answering(529, "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"), Err("Anthropic could not be reached")]
 	let overloaded <- askClaude(asking("bynk-lang/bynk", Haiku))
-	expect overloaded.outcome == Unavailable(
+	expect overloaded.outcome == ClaudeOutcome.Unavailable(
 		"Anthropic answered 529 (overloaded_error: Overloaded)"
 	)
 	let row <- Deliveries.firstAs[CallRow](LATEST_CALL, [])
@@ -222,17 +222,17 @@ case "an error status or no answer gives the claim back, and is recorded" {
 		(r) => r.map((x) => "\(x.outcome) \(x.status.getOrElse(0))")
 	) == Ok(Some("failed 529"))
 	let unreachable <- askClaude(asking("bynk-lang/bynk", Haiku))
-	expect unreachable.outcome == Unavailable("Anthropic could not be reached")
-	let claimed <- Deliveries.firstAs[Claimed](BYNK_CLAIMS, [])
-	expect claimed == Ok(Some(Claimed { calls: 0 }))
+	expect unreachable.outcome == ClaudeOutcome.Unavailable("Anthropic could not be reached")
+	let claimed <- Deliveries.firstAs[ClaimedRow](BYNK_CLAIMS, [])
+	expect claimed == Ok(Some(ClaimedRow { calls: 0 }))
 }
 
 case "a reply that doesn't decode is unavailable, and keeps its claim" {
 	stub AnthropicHttp.post(_, _, _) returns answering(200, "{\"model\":\"claude-haiku-5-5\"}")
 	let a <- askClaude(asking("bynk-lang/bynk", Haiku))
 	expect a.outcome is Unavailable(_)
-	let claimed <- Deliveries.firstAs[Claimed](BYNK_CLAIMS, [])
-	expect claimed == Ok(Some(Claimed { calls: 1 }))
+	let claimed <- Deliveries.firstAs[ClaimedRow](BYNK_CLAIMS, [])
+	expect claimed == Ok(Some(ClaimedRow { calls: 1 }))
 }
 
 case "a cap's setting is a whole number of at least 0, or the default" {
