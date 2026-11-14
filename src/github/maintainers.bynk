@@ -201,6 +201,8 @@ type ProposalWaiting = {
 	comment: Option[String],
 	notes: Option[String] = None,
 	release: Option[String] = None,
+	--- For `release_notes`: the description approving replaces (GitHub's generated list), or `None` when it was empty.
+	replaces: Option[String] = None,
 	reason: String,
 	proposed_at: String,
 	expires_at: String,
