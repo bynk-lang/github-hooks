@@ -14,7 +14,7 @@ All notable changes to github-hooks. The format follows
   `Facts.extract`) become `do ….detach()`, as `bynk check --fix` rewrites
   them. `~>` is deprecated and goes in the next Bynk release; a fault or
   `Err` in a detached effect is now reported by the runtime instead of lost.
-  `BYNK_VERSION` is unchanged: the canary moves it.
+  `BYNK_VERSION` moves to v0.603.10 with them, as `.detach()` needs it.
 
 ## [0.5.0] - 2026-11-13
 
