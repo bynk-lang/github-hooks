@@ -67,18 +67,36 @@ type ReleaseBody = {
 
 ---
 Whether release notes may be proposed for a release's description: it's
-empty, or looks like GitHub's generated list (it starts "## What's Changed",
-or is the changelog link alone, and ends with the "**Full Changelog**" line).
-This is only the shape: an edited list can pass, so approval writes only
-over the description seen when proposing, unchanged (`stillUnwritten`).
+empty, or has only the lines of GitHub's generated list: its two headings
+("## What's Changed", "## New Contributors"), entries (`* … in https://…`),
+and one "**Full Changelog**: …" line, last. A paragraph of someone's own
+anywhere makes it written. An entry reworded in place still passes: Mine
+shows the description approving replaces (`seen`), and approval writes only
+over that, unchanged (`stillUnwritten`).
 ---
 fn fillableNotes(body: Option[String]) -> Bool {
-	let said = body.getOrElse("").trim()
-	let lines = said.split("\n")
-	let last = lines.get(lines.length() - 1).getOrElse("").trim()
-	said == ""
-		|| ((said.startsWith("## What's Changed") || said.startsWith("**Full Changelog**"))
-			&& last.startsWith("**Full Changelog**"))
+	let lines = body.getOrElse("").split("\n").map((l) => l.trim()).filter((l) => l != "")
+	let changelogs = lines.filter((l) => l.startsWith("**Full Changelog**: "))
+	let last = lines.get(lines.length() - 1).getOrElse("")
+	lines.length() == 0
+		|| (changelogs.length() == 1
+			&& last.startsWith("**Full Changelog**: ")
+			&& lines.all((l) => generatedLine(l)))
+}
+
+--- Whether one line is one GitHub's generated list has.
+fn generatedLine(l: String) -> Bool {
+	l == "## What's Changed"
+		|| l == "## New Contributors"
+		|| (l.startsWith("* ") && l.contains(" in https://"))
+		|| l.startsWith("**Full Changelog**: ")
+}
+
+--- The generated list's "**Full Changelog**: …" line, kept below the notes that replace it.
+fn changelogLine(description: Option[String]) -> Option[String] {
+	description.getOrElse("").split("\n").map((l) => l.trim()).filter((l) => l.startsWith(
+		"**Full Changelog**: "
+	)).first()
 }
 
 --- Whether a release's description, as GitHub answers it now, is still empty, or still the one `seen` when the notes were proposed.
@@ -620,6 +638,7 @@ fn pendingProposals(
 		},
 		notes: releaseNotesOf(r).map((n) => n.body),
 		release: releaseNotesOf(r).map((n) => n.tag),
+		replaces: releaseNotesOf(r).andThen((n) => n.seen),
 		reason: r.reason,
 		proposed_at: r.proposed_at,
 		expires_at: r.expires_at,

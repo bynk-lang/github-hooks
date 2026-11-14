@@ -112,7 +112,10 @@ fn draftNotes(
 			let Ok(a) = Json.decode[NotesAnswer](text) else match {
 				Err(e) => ended("Claude's answer did not decode: \(e.kind) at \(e.path)"),
 			}
-			let notes = renderNotes(a, sent, shipped)
+			let notes = match changelogLine(n.description) {
+				Some(c) => "\(renderNotes(a, sent, shipped))\n\n\(c)",
+				None => renderNotes(a, sent, shipped),
+			}
 			let Ok(id) <- proposeReleaseNotes(n, notes, answer.call) else match {
 				Err(why) => mayRetry("could not propose: \(why)"),
 			}
@@ -213,8 +216,13 @@ const MAX_NOTES_PULLS: Int = 200
 --- The most of Claude's summary kept, in characters.
 const NOTES_SUMMARY_LIMIT: Int = 800
 
---- The notes' call: Opus, medium effort, with room to think.
-const NOTES_MAX_TOKENS: Int = 4000
+---
+The notes' call: Opus, medium effort. The budget bounds its thinking as
+well as its answer, and a reply cut off isn't retried, so it's roomy: placing
+200 numbers after reading their titles needs it, and only what's produced is
+billed.
+---
+const NOTES_MAX_TOKENS: Int = 16000
 
 --- The headings, in the order the notes list them. Claude chooses among them; Other takes the rest.
 const NOTES_HEADINGS: List[String] = ["Features", "Fixes", "Documentation", "Other"]
@@ -316,7 +324,7 @@ fn renderNotes(a: NotesAnswer, sent: List[ShippedPull], shipped: List[ShippedPul
 			"## \(h)\n\n\(joined(under.map((p) => noteLine(p)), "\n"))"
 		}
 	}).filter((s) => s != "")
-	let summary = plainLine(a.summary)
+	let summary = plainText(a.summary)
 	let lead = if summary.length() > NOTES_SUMMARY_LIMIT {
 		summary.slice(0, NOTES_SUMMARY_LIMIT).trim().concat("…")
 	} else {
@@ -333,15 +341,52 @@ type Placed = {
 
 --- One pull request's line: its title, as plain text on one line, its number and its author.
 fn noteLine(p: ShippedPull) -> String {
-	"- \(plainLine(p.title)) (#\(p.number)) by @\(p.author)"
+	"- \(plainText(p.title)) (#\(p.number)) by @\(p.author)"
 }
 
 ---
-Anyone's text, made safe to place on one line of the notes: each run of
-whitespace, line breaks included, becomes one space, so it can't start a heading or a list item of its own, and an
-`@` is followed by a zero-width space, so it can't mention anyone. The
-authors are mentioned by the App's own lines, from recorded logins.
+Anyone's text (a title, or Claude's summary), made plain text on one line of
+the notes, by construction:
+- each run of whitespace, line breaks included, becomes one space, so it
+  can't span lines;
+- Markdown's inline punctuation is backslash-escaped (`MARKDOWN_PUNCTUATION`),
+  so it makes no link, image, HTML, emphasis, code, table or reference
+  (`org/repo#1`, `#1`);
+- a leading `-`, `+`, `=` or `1.` or `1)` is escaped too, so it can't start a
+  list or underline a heading: `#` and `>`, the other block starts, are
+  escaped everywhere;
+- an `@` is followed by a zero-width space, so it can't mention anyone.
+
+The authors are mentioned by the App's own lines, from recorded logins, and
+each line's number is the App's.
 ---
-fn plainLine(s: String) -> String {
-	s.replaceRegex("\\s+", " ").replace("@", "@\u{200B}").trim()
+fn plainText(s: String) -> String {
+	let line = s.replaceRegex("\\s+", " ").trim()
+	let escaped = MARKDOWN_PUNCTUATION
+		.fold(line, (acc, c) => acc.replace(c, "\\\(c)"))
+		.replace("@", "@\u{200B}")
+	if escaped.startsWith("-")
+		|| escaped.startsWith("+")
+		|| escaped.startsWith("=")
+		|| escaped.matchesRegex("^[0-9]+[.)].*") {
+		"\\\(escaped)"
+	} else {
+		escaped
+	}
 }
+
+--- Markdown's inline punctuation, the backslash first so the others' escapes aren't escaped again.
+const MARKDOWN_PUNCTUATION: List[String] = [
+	"\\",
+	"`",
+	"*",
+	"_",
+	"[",
+	"]",
+	"<",
+	">",
+	"!",
+	"|",
+	"~",
+	"#",
+]
