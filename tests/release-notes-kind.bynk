@@ -31,6 +31,7 @@ fn seedNotes() -> List[SqlStatement] {
 					release_id: 9001,
 					tag: "v0.5.0",
 					body: NOTES,
+					seen: None,
 				})),
 			],
 		},
@@ -104,7 +105,53 @@ case "approving release notes re-reads the release, then writes its description"
 	}))
 }
 
-case "GitHub's generated list is replaced too" {
+const EDITED: String = "## What's Changed\n\nHighlights: builds are faster.\n\n* Faster builds by @accuser in https://github.com/bynk-lang/secret/pull/30\n\n\n**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0"
+
+--- Proposal 1 as made over GitHub's generated list, `seen` when proposing.
+const SEEN_GENERATED: String = "UPDATE proposals SET payload = ?1 WHERE id = 1"
+
+fn overGenerated() -> SqlStatement {
+	SqlStatement {
+		sql: SEEN_GENERATED,
+		params: [
+			Text(Json.encodePlain(ReleaseNotesPayload {
+				release_id: 9001,
+				tag: "v0.5.0",
+				body: NOTES,
+				seen: Some(GENERATED),
+			})),
+		],
+	}
+}
+
+case "GitHub's generated list, unchanged since the notes were proposed, is replaced" {
+	stub GitHubHttp.get(_, _) returns release(Json.encode(GENERATED))
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes().append(overGenerated()))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+	expect GitHubHttp.patch called once
+}
+
+case "a generated list someone has edited since is kept" {
+	// Still the generated list's shape, with a maintainer's highlights added.
+	stub GitHubHttp.get(_, _) returns release(Json.encode(EDITED))
+	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
+	let seeded <- Deliveries.batch(seedNotes().append(overGenerated()))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Conflict(_)
+	expect GitHubHttp.patch never called
+}
+
+case "a generated list that appeared after notes for an empty description is kept" {
 	stub GitHubHttp.get(_, _) returns release(Json.encode(GENERATED))
 	stub GitHubHttp.patch(_, _, _) returns answer(200, "{}")
 	let seeded <- Deliveries.batch(seedNotes())
@@ -113,8 +160,8 @@ case "GitHub's generated list is replaced too" {
 		"/maintainers/proposals/approve",
 		ProposalDecision { id: 1 }
 	) by Maintainer("accuser")
-	expect r is Ok(_)
-	expect GitHubHttp.patch called once
+	expect r is Conflict(_)
+	expect GitHubHttp.patch never called
 }
 
 case "a description written since is kept, and the notes expire" {
@@ -127,7 +174,7 @@ case "a description written since is kept, and the notes expire" {
 		ProposalDecision { id: 1 }
 	) by Maintainer("accuser")
 	expect r == Conflict(
-		"proposal 1 is no longer needed: the release's description has been written, so nothing was posted"
+		"proposal 1 is no longer needed: the release's description has been written or changed, so nothing was posted"
 	)
 	expect GitHubHttp.patch never called
 	let row <- Deliveries.firstAs[NotesSettled]("FROM proposals WHERE id = 1", [])
@@ -240,6 +287,18 @@ case "which descriptions may be filled" {
 	expect !fillableNotes(Some("## What's Changed\n\nWe rewrote everything."))
 	// Notes that only mention the link somewhere are someone's.
 	expect !fillableNotes(Some("Our notes.\n\n**Full Changelog**: https://example.com"))
+	// Anything after the changelog line is someone's too.
+	expect !fillableNotes(Some(GENERATED.concat("\n\nThanks, everyone!")))
+}
+
+case "which descriptions are still unwritten at approval" {
+	expect stillUnwritten(None, None)
+	expect stillUnwritten(Some(" "), Some(GENERATED))
+	expect stillUnwritten(Some(GENERATED), Some(GENERATED))
+	// GitHub may hand back the same text with other trailing space.
+	expect stillUnwritten(Some(GENERATED.concat("\n")), Some(GENERATED))
+	expect !stillUnwritten(Some(GENERATED), None)
+	expect !stillUnwritten(Some("Hand-written."), Some(GENERATED))
 }
 
 case "the rebuilt table takes release notes, and still refuses a kind it doesn't know" {

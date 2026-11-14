@@ -47,11 +47,17 @@ type ProposalAction = {
 	refused: String = "a missing permission, Issues and Pull requests: Read and write, or a locked conversation",
 }
 
---- The `release_notes` kind's payload: the release, and the notes for its description.
+---
+The `release_notes` kind's payload: the release, and the notes for its
+description. `seen` is the description when the notes were proposed (GitHub's
+generated list, or `None` when it was empty): approval writes only over an
+empty description or that one, unchanged.
+---
 type ReleaseNotesPayload = {
 	release_id: Int,
 	tag: String,
 	body: String,
+	seen: Option[String] = None,
 }
 
 --- A release's description as GitHub answers it.
@@ -60,15 +66,25 @@ type ReleaseBody = {
 }
 
 ---
-Whether a release's description may be filled with notes: it's empty, or
-only GitHub's generated list ("## What's Changed" and "**Full Changelog**",
-or the changelog link alone). A description someone wrote is never touched.
+Whether release notes may be proposed for a release's description: it's
+empty, or looks like GitHub's generated list (it starts "## What's Changed",
+or is the changelog link alone, and ends with the "**Full Changelog**" line).
+This is only the shape: an edited list can pass, so approval writes only
+over the description seen when proposing, unchanged (`stillUnwritten`).
 ---
 fn fillableNotes(body: Option[String]) -> Bool {
 	let said = body.getOrElse("").trim()
+	let lines = said.split("\n")
+	let last = lines.get(lines.length() - 1).getOrElse("").trim()
 	said == ""
 		|| ((said.startsWith("## What's Changed") || said.startsWith("**Full Changelog**"))
-			&& said.contains("**Full Changelog**"))
+			&& last.startsWith("**Full Changelog**"))
+}
+
+--- Whether a release's description, as GitHub answers it now, is still empty, or still the one `seen` when the notes were proposed.
+fn stillUnwritten(now: Option[String], seen: Option[String]) -> Bool {
+	let current = now.getOrElse("").trim()
+	current == "" || Some(current) == seen.map((s) => s.trim())
 }
 
 --- What approving a proposal of `kind` with `payload` on `repo`'s `target` asks of GitHub, or why it can't be read.
@@ -158,8 +174,9 @@ fn stillApplies(
 
 ---
 Whether a release's notes still apply: GitHub, asked now, says its
-description is still empty or generated. A description written since is
-`Some(why)`; GitHub not answering is `Err`.
+description is still empty, or still the one seen when the notes were
+proposed. A description written or edited since is `Some(why)`; GitHub not
+answering is `Err`.
 ---
 fn releaseStillEmpty(
 	p: ClaimedProposal,
@@ -177,10 +194,10 @@ fn releaseStillEmpty(
 		Effect.pure(Err("GitHub answered \(res.status) for the release"))
 	} else {
 		match Json.decode[ReleaseBody](res.body) {
-			Ok(r) => if fillableNotes(r.body) {
+			Ok(r) => if stillUnwritten(r.body, n.seen) {
 				Effect.pure(Ok(applies))
 			} else {
-				Effect.pure(Ok(Some("is no longer needed: the release's description has been written")))
+				Effect.pure(Ok(Some("is no longer needed: the release's description has been written or changed")))
 			},
 			Err(_) => Effect.pure(Err("GitHub's release didn't decode")),
 		}

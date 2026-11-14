@@ -140,6 +140,11 @@ fn pullStatements(p: PullFact) -> List[SqlStatement] {
 A pull request's labels (#110), replaced whole by a delivery or sync that
 lists them, unless the row is strictly newer: every delivery and REST read
 lists the full set, so the latest one's is the set.
+
+Deliveries in the same second share an `updated_at`, so each replaces the
+set, in arrival order (#68's tie): two labels added in a second, delivered
+in reverse, leave the first one's set. The daily sync corrects it within a
+day; release notes, which group by these, are only a draft for a person.
 ---
 fn pullLabelSet(p: PullFact) -> List[SqlStatement] {
 	let Some(labels) = p.labels else { [] }
