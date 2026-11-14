@@ -715,3 +715,62 @@ fn proposeComment(
 	let _ <- LiveFeed.publishMaintainers(proposalEvent(c.repo, c.target, "pending"))
 	Effect.pure(Ok(Some(made.id)))
 }
+
+---
+Proposes `notes` for release `n`'s description (#110), linked to Claude's
+`call`: once per release, whatever became of an earlier proposal, so a
+decline is final. The description the delivery gave is recorded as `seen`
+(`None` when empty), so approval writes only over it, unchanged. Answers the
+new proposal's id, or `None` when the release already has one.
+---
+fn proposeReleaseNotes(
+	n: NotesRelease,
+	notes: String,
+	call: Option[Int]
+) -> Effect[Result[Option[Int], String]] given Deliveries, Clock, LiveFeed {
+	let now <- Clock.now()
+	let seen = n.description.map((s) => s.trim()).filter((s) => s != "")
+	let added <- Deliveries.first(
+		"""
+		INSERT INTO proposals (repo, kind, target, title, payload, reason, proposed_at, expires_at, status)
+		SELECT ?1, 'release_notes', ?2, ?3, ?4, ?5, ?6, ?7, 'pending'
+		WHERE NOT EXISTS (SELECT 1 FROM proposals
+		                  WHERE repo = ?1 AND kind = 'release_notes' AND target = ?2)
+		RETURNING id
+		""",
+		[
+			Text(n.repo),
+			Integer(n.releaseId),
+			Text(n.name.filter((s) => s.trim() != "").getOrElse(n.tag)),
+			Text(Json.encodePlain(ReleaseNotesPayload {
+				release_id: n.releaseId,
+				tag: n.tag,
+				body: notes,
+				seen: n.description.filter((s) => s.trim() != ""),
+			})),
+			Text(if seen.isSome() {
+				"\(n.tag) was published with GitHub's generated list as its description."
+			} else {
+				"\(n.tag) was published with an empty description."
+			}),
+			Text(now.toIso()),
+			Text((now + PROPOSAL_WAIT).toIso()),
+		]
+	)
+	let Ok(row) = added else match {
+		Err(e) => Effect.pure(Err("could not record the proposal: \(sqlError(e))")),
+	}
+	let Some(r) = row else { Effect.pure(Ok(None)) }
+	let Ok(made) = Json.decodeSql[ProposalId](r) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	let _ <- match call {
+		Some(c) => Deliveries.run(
+			"UPDATE claude_calls SET proposal = ?1 WHERE id = ?2",
+			[Integer(made.id), Integer(c)]
+		),
+		None => Deliveries.run("SELECT 1", []),
+	}
+	let _ <- LiveFeed.publishMaintainers(proposalEvent(n.repo, n.releaseId, "pending"))
+	Effect.pure(Ok(Some(made.id)))
+}

@@ -19,8 +19,12 @@ fn recordTag(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {
 
 // Records a release (#36). A `deleted` delivery marks the row deleted (kept,
 // so lead times don't shift, but not shown); any other creates or refreshes
-// it, and one that publishes a final release matches what it shipped.
-fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger, GitHubApi {
+// it, and one that publishes a final release matches what it shipped, then
+// may have notes drafted from it (#110).
+fn recordRelease(
+	d: Delivery,
+	body: Bytes
+) -> Effect[()] given Deliveries, Logger, GitHubApi, ReleaseNotes {
 	let Ok(r) = releaseOf(body) else match {
 		Err(why) => Logger.error("could not read release from \(d.id): \(why)"),
 	}
@@ -48,10 +52,13 @@ fn recordRelease(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logge
 			"cannot match \(r.repo) \(r.tag) to pull requests: \(d.id) names no installation"
 		)
 	}
-	let Ok(_) <- shipRelease(installation, r) else match {
+	let Ok(matched) <- shipRelease(installation, r) else match {
 		Err(why) => Logger.error("could not match \(r.repo) \(r.tag) to pull requests: \(why)"),
 	}
-	Effect.pure(())
+	// Once its pull requests are matched, notes may be drafted from them
+	// (#110). A first release, or one GitHub can't compare, has none to draft from.
+	let true = matched else { Effect.pure(()) }
+	ReleaseNotes.draft(d, body)
 }
 
 // Records a release, then says whether open pages should hear of it: when
@@ -66,7 +73,7 @@ fn releaseChanged(
 	d: Delivery,
 	body: Bytes,
 	fresh: Bool
-) -> Effect[Option[LiveEvent]] given Deliveries, Logger, GitHubApi {
+) -> Effect[Option[LiveEvent]] given Deliveries, Logger, GitHubApi, ReleaseNotes {
 	let nothing: Option[LiveEvent] = None
 	let _ <- recordRelease(d, body)
 	let true = fresh else { Effect.pure(nothing) }
@@ -77,12 +84,13 @@ fn releaseChanged(
 }
 
 // Matches a final release a delivery published: finds the final release
-// before it, then matches what it shipped (`matchRelease`). A repository's
-// first release has nothing to compare against, so it stays unmatched.
+// before it, then matches what it shipped (`matchRelease`), answering whether
+// it was. A repository's first release has nothing to compare against, so it
+// stays unmatched.
 fn shipRelease(
 	installation: Int,
 	r: ReleaseFact
-) -> Effect[Result[(), String]] given Deliveries, Logger, GitHubApi {
+) -> Effect[Result[Bool, String]] given Deliveries, Logger, GitHubApi {
 	let Ok(found) <- previousRelease(installation, r, 1, []) else match {
 		Err(f) => Effect.pure(Err(f.message)),
 	}
@@ -94,12 +102,12 @@ fn shipRelease(
 				"\(r.repo) \(r.tag): no earlier final release among its latest \(found.searched) releases; its pull requests are left unknown"
 			)
 		}
-		markNoPrevious(r.repo, r.tag)
+		let Ok(_) <- markNoPrevious(r.repo, r.tag) else match {
+			Err(why) => Effect.pure(Err(why)),
+		}
+		Effect.pure(Ok(false))
 	}
-	let Ok(_) <- matchRelease(installation, r, previous) else match {
-		Err(why) => Effect.pure(Err(why)),
-	}
-	Effect.pure(Ok(()))
+	matchRelease(installation, r, previous)
 }
 
 // Records that a release was tried and has no previous final release to
