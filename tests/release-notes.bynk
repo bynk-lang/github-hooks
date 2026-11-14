@@ -525,3 +525,61 @@ case "a delivery without an installation is passed over" {
 	expect GitHubHttp.get never called
 	expect Logger.info called with msg == "release notes for bynk-lang/secret v0.5.0 skipped: no installation"
 }
+
+--- v0.5.0 as a delivery gives it: named `name`, with `description`.
+fn notesFor(name: Option[String], description: Option[String]) -> NotesRelease {
+	NotesRelease {
+		repo: "bynk-lang/secret",
+		releaseId: 9001,
+		tag: "v0.5.0",
+		name: name,
+		description: description,
+	}
+}
+
+case "one proposal per release: other kinds, releases and repositories don't stand in for it" {
+	stub LiveFeed.publishMaintainers(_) returns ()
+	let others <- Deliveries.run(
+		"""
+		INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+		  ('bynk-lang/secret', 'labels', 9001, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'declined'),
+		  ('bynk-lang/secret', 'release_notes', 9002, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'declined'),
+		  ('bynk-lang/other', 'release_notes', 9001, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'declined')
+		""",
+		[]
+	)
+	expect others is Ok(_)
+	let first <- proposeReleaseNotes(notesFor(Some("v0.5.0"), None), "Notes.", None)
+	expect first == Ok(Some(4))
+	let again <- proposeReleaseNotes(notesFor(Some("v0.5.0"), None), "Other notes.", None)
+	expect again == Ok(None)
+}
+
+case "a release without a name is titled by its tag, and a blank description isn't recorded as seen" {
+	stub LiveFeed.publishMaintainers(_) returns ()
+	let made <- proposeReleaseNotes(notesFor(Some(" "), Some("  \n")), "Notes.", None)
+	expect made == Ok(Some(1))
+	let p <- Deliveries.firstAs[Proposed](PROPOSED, [])
+	expect p == Ok(Some(Proposed {
+		kind: "release_notes",
+		target: 9001,
+		title: Some("v0.5.0"),
+		payload: payloadOf("Notes.", None),
+		reason: "v0.5.0 was published with an empty description.",
+		status: "pending",
+	}))
+	let named <- proposeReleaseNotes(
+		NotesRelease {
+			repo: "bynk-lang/secret",
+			releaseId: 9002,
+			tag: "v0.6.0",
+			name: Some("Autumn"),
+			description: None,
+		},
+		"Notes.",
+		None
+	)
+	expect named == Ok(Some(2))
+	let titled <- Deliveries.firstAs[Proposed]("FROM proposals WHERE id = 2", [])
+	expect titled.map((x) => x.map((r) => r.title)) == Ok(Some(Some("Autumn")))
+}
