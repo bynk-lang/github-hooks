@@ -361,6 +361,11 @@ case "weekly_summary decodes, with its category defaulting to Announcements" {
 	}
 	let off = settingsOf(readSettings("triage:\n  enabled: true\n"))
 	expect off.weekly_summary.enabled == false
+	// Its keys are known there, and only there.
+	expect readSettings("weekly_summary:\n  enabled: true\n  category: Weekly\n") is Decoded(_, [])
+	expect readSettings(
+		"triage:\n  enabled: true\n  category: Weekly\n"
+	) is Decoded(_, ["triage.category"])
 	// A misspelt key in the section is listed, not taken.
 	expect readSettings(
 		"weekly_summary:\n  enabled: true\n  catgory: Weekly\n"
