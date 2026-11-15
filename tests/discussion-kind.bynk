@@ -1,0 +1,318 @@
+// #119, step 1: the `discussion` kind of proposal, and the `weekly_summary`
+// settings, against an in-memory D1 with the migrations applied. GitHub's
+// GraphQL API is stubbed at the wire. It's 12:00 UTC on 5 November; accuser
+// is a maintainer; installation 42 delivered for `bynk-lang/github-hooks`.
+suite github.hooks
+
+stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+const POST_TITLE: String = "The week of 26 October 2026"
+
+const POST_BODY: String = "A quiet week, with one release.\n\n| Repository | Merged |\n|---|---|\n| bynk-lang/bynk | 3 |"
+
+fn seedPost(category: String) -> List[SqlStatement] {
+	[
+		SqlStatement {
+			sql: "INSERT INTO org_members (org, login, member, checked_at) VALUES ('bynk-lang', 'accuser', 1, '2026-11-05T11:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES ('d-1', 'push', 'bynk-lang/github-hooks', 42, 1, '2026-11-05T00:00:00.000Z')",
+			params: [],
+		},
+		SqlStatement {
+			sql: "INSERT INTO proposals (id, repo, kind, target, title, payload, reason, proposed_at, expires_at, status) VALUES (1, 'bynk-lang/github-hooks', 'discussion', 20261026, ?2, ?1, 'The week of 26 October 2026, from the public dashboard.', '2026-11-02T07:43:00.000Z', '2026-11-16T07:43:00.000Z', 'pending')",
+			params: [
+				Text(Json.encodePlain(DiscussionPayload {
+					week: "2026-10-26",
+					category: category,
+					title: POST_TITLE,
+					body: POST_BODY,
+				})),
+				Text(POST_TITLE),
+			],
+		},
+	]
+}
+
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+--- The repository as GraphQL answers it, with Discussions `on` and two categories.
+fn place(on: Bool) -> Result[Response, String] {
+	let enabled = if on { "true" } else { "false" }
+	answer(
+		200,
+		"{\"data\": {\"repository\": {\"id\": \"R_hooks\", \"hasDiscussionsEnabled\": \(enabled), \"discussionCategories\": {\"nodes\": [{\"id\": \"DIC_ann\", \"name\": \"Announcements\"}, {\"id\": \"DIC_gen\", \"name\": \"General\"}]}}}}"
+	)
+}
+
+fn posted() -> Result[Response, String] {
+	answer(
+		200,
+		"{\"data\": {\"createDiscussion\": {\"discussion\": {\"url\": \"https://github.com/bynk-lang/github-hooks/discussions/7\"}}}}"
+	)
+}
+
+type PostSettled = {
+	status: String,
+	outcome: Option[String],
+	decided_by: Option[String],
+}
+
+const SETTLED: String = "FROM proposals WHERE id = 1"
+
+type PostAudited = {
+	action: String,
+	proposal: Option[Int],
+	status: Option[Int],
+	outcome: String,
+}
+
+case "Mine shows the post, its title and its category" {
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.GET("/maintainers/mine") by Maintainer("accuser")
+	let Ok(m) = r else {
+		expect false
+	}
+	let Some(p) = m.proposals.first() else {
+		expect false
+	}
+	expect p.kind == "discussion"
+	expect p.target == 20261026
+	expect p.title == Some(POST_TITLE)
+	expect p.post == Some(POST_BODY)
+	expect p.category == Some("Announcements")
+	expect p.comment == None && p.notes == None
+}
+
+case "approving finds the category, then creates the discussion as the App" {
+	stub GitHubHttp.post(_, _, _) returns each [place(true), posted()]
+	let seeded <- Deliveries.batch(seedPost("announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Ok(ProposalDecided {
+		id: 1,
+		status: "approved",
+		message: "Posted The week of 26 October 2026 to bynk-lang/github-hooks's Discussions, in Announcements",
+	})
+	expect GitHubHttp.post called 2 times
+	expect GitHubHttp.post called with url == "https://api.github.com/graphql"
+	// First the lookup, for this repository; then the mutation, with the IDs it found and only the post.
+	expect GitHubHttp.post called with body == Json.encodePlain(GraphQLRequest { query: PLACE_QUERY, variables: PlaceVariables { owner: "bynk-lang", name: "github-hooks" } })
+	expect GitHubHttp.post called with body == Json.encodePlain(GraphQLRequest { query: POST_MUTATION, variables: PostVariables { repository: "R_hooks", category: "DIC_ann", title: POST_TITLE, body: POST_BODY } })
+	let row <- Deliveries.firstAs[PostSettled](SETTLED, [])
+	expect row == Ok(Some(PostSettled {
+		status: "approved",
+		outcome: Some("posted the discussion"),
+		decided_by: Some("accuser"),
+	}))
+	let audit <- Deliveries.select[PostAudited]("FROM maintainer_actions ORDER BY id", [])
+	expect audit == Ok([
+		PostAudited {
+			action: "approve-proposal",
+			proposal: Some(1),
+			status: Some(200),
+			outcome: "posted the discussion",
+		},
+	])
+}
+
+case "a category the repository doesn't have fails the proposal, naming the ones it has" {
+	stub GitHubHttp.post(_, _, _) returns each [place(true), posted()]
+	let seeded <- Deliveries.batch(seedPost("Weekly"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"proposal 1 has nowhere to be posted: bynk-lang/github-hooks has no Discussions category named Weekly (it has: Announcements, General)"
+	)
+	expect GitHubHttp.post called once
+	let row <- Deliveries.firstAs[PostSettled](SETTLED, [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))
+	expect LiveFeed.publishMaintainers called once with e.kind == "proposal"
+}
+
+case "Discussions turned off fails the proposal" {
+	stub GitHubHttp.post(_, _, _) returns each [place(false), posted()]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"proposal 1 has nowhere to be posted: Discussions are turned off in bynk-lang/github-hooks"
+	)
+	expect GitHubHttp.post called once
+}
+
+case "a repository GitHub doesn't find fails the proposal" {
+	stub GitHubHttp.post(_, _, _) returns answer(200, "{\"data\": {\"repository\": null}}")
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"proposal 1 has nowhere to be posted: GitHub found no repository bynk-lang/github-hooks"
+	)
+}
+
+case "a lookup GitHub forbids names the permission" {
+	stub GitHubHttp.post(_, _, _) returns answer(200, "{\"data\": {\"repository\": null}, \"errors\": [{\"type\": \"FORBIDDEN\", \"message\": \"Resource not accessible by integration\"}]}")
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"GitHub refused the discussion (does the App have Discussions: Read and write?): GraphQL: Resource not accessible by integration"
+	)
+	let row <- Deliveries.firstAs[PostSettled](SETTLED, [])
+	expect row.map(
+		(x) => x.map((s) => s.outcome)
+	) == Ok(Some(Some("GraphQL: Resource not accessible by integration")))
+}
+
+case "a 403 for the lookup names the permission" {
+	stub GitHubHttp.post(_, _, _) returns answer(403, "{\"message\": \"Resource not accessible by integration\"}")
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"GitHub refused the discussion (does the App have Discussions: Read and write?): 403 Resource not accessible by integration"
+	)
+}
+
+case "a mutation that answers errors in a 200 fails, with GraphQL's reason" {
+	stub GitHubHttp.post(_, _, _) returns each [place(true), answer(200, "{\"data\": {\"createDiscussion\": null}, \"errors\": [{\"message\": \"Body is too long\"}, {\"message\": \"Try again\"}]}")]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway("GitHub refused the discussion: GraphQL: Body is too long; Try again")
+	let row <- Deliveries.firstAs[PostSettled](SETTLED, [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))
+}
+
+case "a mutation GitHub forbids names the permission" {
+	stub GitHubHttp.post(_, _, _) returns each [place(true), answer(200, "{\"data\": null, \"errors\": [{\"type\": \"FORBIDDEN\", \"message\": \"Resource not accessible by integration\"}]}")]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == BadGateway(
+		"GitHub refused the discussion (does the App have Discussions: Read and write?): GraphQL: Resource not accessible by integration"
+	)
+}
+
+--- Where a proposal stands, and who's deciding it.
+type PostClaim = {
+	status: String,
+	decided_by: Option[String],
+}
+
+case "GitHub not answering the lookup gives the claim back" {
+	stub GitHubHttp.post(_, _, _) returns each [answer(502, "Bad Gateway"), Err("GitHub could not be reached"), answer(200, "not json")]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let first <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect first == ServiceUnavailable(
+		"proposal 1 couldn't be placed, so nothing was posted; try again"
+	)
+	let row <- Deliveries.firstAs[PostClaim](SETTLED, [])
+	expect row == Ok(Some(PostClaim { status: "pending", decided_by: None }))
+	expect Logger.error called with msg == "could not find where to post proposal 1: GitHub answered 502 for bynk-lang/github-hooks's Discussions"
+	let second <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect second is ServiceUnavailable(_)
+	let third <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect third is ServiceUnavailable(_)
+	expect GitHubHttp.post called 3 times
+}
+
+case "a discussion whose payload doesn't decode fails, and nothing is asked of GitHub" {
+	stub GitHubHttp.post(_, _, _) returns place(true)
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let broken <- Deliveries.run("UPDATE proposals SET payload = '{\"title\": 1}' WHERE id = 1", [])
+	expect broken is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is ServerError(_)
+	expect GitHubHttp.post never called
+}
+
+case "declining a discussion posts nothing" {
+	stub GitHubHttp.post(_, _, _) returns place(true)
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/decline",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[PostSettled](SETTLED, [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("declined"))
+}
+
+case "the rebuilt table takes discussions, and still refuses a kind it doesn't know" {
+	let ok <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/github-hooks', 'discussion', 20261102, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect ok is Ok(_)
+	let bad <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/github-hooks', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+		[]
+	)
+	expect bad is Err(_)
+}
+
+case "weekly_summary decodes, with its category defaulting to Announcements" {
+	let on = settingsOf(readSettings(
+		"weekly_summary:\n  enabled: true\n  category: Weekly notes\n"
+	))
+	expect on.weekly_summary == WeeklySummarySettings { enabled: true, category: "Weekly notes" }
+	let plain = settingsOf(readSettings("weekly_summary:\n  enabled: true\n"))
+	expect plain.weekly_summary == WeeklySummarySettings {
+		enabled: true,
+		category: "Announcements",
+	}
+	let off = settingsOf(readSettings("triage:\n  enabled: true\n"))
+	expect off.weekly_summary.enabled == false
+	// A misspelt key in the section is listed, not taken.
+	expect readSettings(
+		"weekly_summary:\n  enabled: true\n  catgory: Weekly\n"
+	) is Decoded(_, ["weekly_summary.catgory"])
+}

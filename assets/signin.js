@@ -326,16 +326,19 @@
       const what = p.kind === "labels" ? `add ${p.labels.join(", ")}`
         : p.kind === "comment" ? "comment"
         : p.kind === "release_notes" ? "write the release notes"
+        : p.kind === "discussion" ? `post to Discussions${p.category ? ` (${p.category})` : ""}`
         : p.kind;
       // A comment, or release notes, are shown in full, as text, so the maintainer approves exactly what's written.
-      const text = p.kind === "comment" ? p.comment : p.kind === "release_notes" ? p.notes : null;
+      const text = p.kind === "comment" ? p.comment : p.kind === "release_notes" ? p.notes : p.kind === "discussion" ? p.post : null;
       const said = text ? node("blockquote", { class: "proposal-comment" }, text) : null;
       // Release notes over GitHub's generated list show the list they replace, so it's clear what approving overwrites.
       const replaced = p.kind === "release_notes" && p.replaces
         ? node("details", {}, node("summary", {}, "Replaces the current description"), node("blockquote", { class: "proposal-comment" }, p.replaces))
         : null;
       // A release links to its page by tag; `/issues/N` serves an issue or a pull request alike.
-      const target = p.kind === "release_notes" && p.release
+      const target = p.kind === "discussion"
+        ? node("a", { href: `https://github.com/${p.repo}/discussions` }, `${p.repo} Discussions`, p.title ? ` ${p.title}` : "")
+        : p.kind === "release_notes" && p.release
         ? node("a", { href: `https://github.com/${p.repo}/releases/tag/${encodeURIComponent(p.release)}` }, `${p.repo} ${p.release}`, p.title && p.title !== p.release ? ` ${p.title}` : "")
         : link(p.repo, p.target, "issues", p.title || "");
       return [
@@ -343,7 +346,7 @@
         said,
         replaced,
         ` · proposed ${ago(p.proposed_at)} ago · `,
-        decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.kind === "release_notes" ? `${p.repo} ${p.release || ""}` : `${p.repo}#${p.target}`}? The App does it on GitHub at once.`),
+        decide("Approve", "/maintainers/proposals/approve", `Approve: ${what} on ${p.kind === "release_notes" ? `${p.repo} ${p.release || ""}` : p.kind === "discussion" ? p.repo : `${p.repo}#${p.target}`}? The App does it on GitHub at once.`),
         " ", decide("Decline", "/maintainers/proposals/decline", null), " ", note,
       ];
     });

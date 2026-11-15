@@ -15,6 +15,9 @@ nudges:
   after_days: 5
 release_notes:
   enabled: true
+weekly_summary:
+  enabled: true
+  category: Announcements
 ```
 ---
 type RepoSettings = {
@@ -27,6 +30,10 @@ type RepoSettings = {
 		after_days: 3,
 	},
 	release_notes: ReleaseNotesSettings = ReleaseNotesSettings { enabled: false },
+	weekly_summary: WeeklySummarySettings = WeeklySummarySettings {
+		enabled: false,
+		category: "Announcements",
+	},
 }
 
 --- Issue triage (#69, slice 2): `labels` are the only labels it may suggest.
@@ -46,6 +53,15 @@ type NudgeDays = Int where InRange(1, 30)
 --- Release notes drafts (#69, slice 4).
 type ReleaseNotesSettings = {
 	enabled: Bool = false,
+}
+
+---
+The weekly summary (#69, slice 5): posted to this repository's Discussions,
+in the category named `category` (matched without regard to case).
+---
+type WeeklySummarySettings = {
+	enabled: Bool = false,
+	category: String = "Announcements",
 }
 
 --- Where the settings live in a repository.
@@ -86,6 +102,10 @@ fn offSettings() -> RepoSettings {
 			after_days: 3,
 		},
 		release_notes: ReleaseNotesSettings { enabled: false },
+		weekly_summary: WeeklySummarySettings {
+			enabled: false,
+			category: "Announcements",
+		},
 	}
 }
 
@@ -186,13 +206,14 @@ fn unquoted(key: String) -> String {
 }
 
 fn knownSection(key: String) -> Bool {
-	key == "triage" || key == "nudges" || key == "release_notes"
+	key == "triage" || key == "nudges" || key == "release_notes" || key == "weekly_summary"
 }
 
 fn knownKey(section: String, key: String) -> Bool {
 	key == "enabled"
 		|| (section == "triage" && key == "labels")
 		|| (section == "nudges" && key == "after_days")
+		|| (section == "weekly_summary" && key == "category")
 }
 
 --- An `Invalid` settings file, for a context (which can't build a commons sum itself).
