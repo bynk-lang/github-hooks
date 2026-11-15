@@ -860,3 +860,54 @@ fn proposeReleaseNotes(
 	let _ <- LiveFeed.publishMaintainers(proposalEvent(n.repo, n.releaseId, "pending"))
 	Effect.pure(Ok(Some(made.id)))
 }
+
+---
+Proposes `post` to `repo`'s Discussions for the week `target` (its Monday,
+`yyyymmdd`), linked to Claude's `call`: once per repository and week,
+whatever became of an earlier one, so a decline is final for that week.
+Answers the new proposal's id, or `None` when the week already has one.
+---
+fn proposeDiscussion(
+	repo: String,
+	target: Int,
+	post: DiscussionPayload,
+	call: Option[Int]
+) -> Effect[Result[Option[Int], String]] given Deliveries, Clock, LiveFeed {
+	let now <- Clock.now()
+	let added <- Deliveries.first(
+		"""
+		INSERT INTO proposals (repo, kind, target, title, payload, reason, proposed_at, expires_at, status)
+		SELECT ?1, 'discussion', ?2, ?3, ?4, ?5, ?6, ?7, 'pending'
+		WHERE NOT EXISTS (SELECT 1 FROM proposals
+		                  WHERE repo = ?1 AND kind = 'discussion' AND target = ?2)
+		RETURNING id
+		""",
+		[
+			Text(repo),
+			Integer(target),
+			Text(post.title),
+			Text(Json.encodePlain(post)),
+			Text(
+				"\(post.title), drafted by Claude from the public dashboard's figures, for \(post.category)."
+			),
+			Text(now.toIso()),
+			Text((now + PROPOSAL_WAIT).toIso()),
+		]
+	)
+	let Ok(row) = added else match {
+		Err(e) => Effect.pure(Err("could not record the proposal: \(sqlError(e))")),
+	}
+	let Some(r) = row else { Effect.pure(Ok(None)) }
+	let Ok(made) = Json.decodeSql[ProposalId](r) else match {
+		Err(e) => Effect.pure(Err(jsonError(e))),
+	}
+	let _ <- match call {
+		Some(c) => Deliveries.run(
+			"UPDATE claude_calls SET proposal = ?1 WHERE id = ?2",
+			[Integer(made.id), Integer(c)]
+		),
+		None => Deliveries.run("SELECT 1", []),
+	}
+	let _ <- LiveFeed.publishMaintainers(proposalEvent(repo, target, "pending"))
+	Effect.pure(Ok(Some(made.id)))
+}
