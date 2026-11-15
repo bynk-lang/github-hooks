@@ -14,16 +14,17 @@ when, what is kept, and how to turn it on and off. The details are in:
 | [maintainers.md](maintainers.md#the-apps-proposals) | approving and declining: the routes, refusals, expiry and the audit |
 | [deploy.md](deploy.md) | `ANTHROPIC_API_KEY` and the daily caps, as Worker settings |
 
-The foundations (#88) are in place, and two features propose:
-[issue triage](#issue-triage) and
-[stale pull request nudges](#stale-pull-request-nudges). Each feature
+The foundations (#88) are in place, and three features propose:
+[issue triage](#issue-triage),
+[stale pull request nudges](#stale-pull-request-nudges) and
+[release notes drafts](#release-notes-drafts). Each feature
 arrives as its own slice of #69, and this page gains a section for each:
 
 | Feature | Slice | Claude | Proposes |
 |---|---|---|---|
 | [Issue triage](#issue-triage) (#95) | 2, built | Haiku 5.5 | labels for a new issue, from the repository's allowed list |
 | [Stale pull request nudges](#stale-pull-request-nudges) (#103) | 3, built | none | a comment to a ready pull request's reviewers |
-| Release notes drafts | 4 | Opus 5.5 | notes for a release, from the pull requests it shipped |
+| [Release notes drafts](#release-notes-drafts) (#110) | 4, built | Opus 5.5 | notes for a release, from the pull requests it shipped |
 | Weekly summary | 5 | Opus 5.5 | the organisation's week, posted to a Discussion |
 
 ## How it fits together
@@ -74,7 +75,8 @@ When a feature is on, one Messages API request carries:
   Each feature's section says what else they include: for triage, the
   repository's allowed labels with their descriptions.
 - **The material to work on**, as the user turn: for triage, the issue's
-  title and body. This is anyone's text, and may try to give instructions.
+  title and body; for release notes, the shipped pull requests' titles,
+  authors and labels. This is anyone's text, and may try to give instructions.
   It goes in the user turn as a quoted string, never the system prompt. The
   instructions say it is data to classify, not instructions to follow.
 - **The schema the reply must match.** For triage, the label field is a list
@@ -94,8 +96,11 @@ target and what it would do, not only by its reason.
   labels from the repository's allowed list, so the worst is a wrong label
   with a persuasive reason, which a maintainer declines.
 - **For the features that propose text to post** (release notes, the weekly
-  summary), a steered reply *is* the action. Each of those slices will state
-  its own reach, and what a maintainer should check, in its section here.
+  summary), a steered reply *is* the action. Each states its own reach, and
+  what a maintainer should check, in its section here. For release notes,
+  Claude only sorts the pull requests and writes a plain-text summary: the
+  App writes every line, and escapes the summary
+  ([below](#release-notes-drafts)).
 
 **Refusals.** Claude may decline a request. A refusal makes no proposal and
 is logged with its category. On Opus 5.5 the API's server-side fallback is
@@ -289,18 +294,158 @@ proposed 2, already nudged this wait 3, not yet due 2, nudges off 2, expired
 1 no longer waiting". A proposal it can't record fails the run, naming the
 pull request, after the others have been tried.
 
+## Release notes drafts
+
+Slice 4 of #69, built in #110. When a final release is published in a
+repository that turns release notes on, and its description is empty or only
+GitHub's generated list, Claude Opus 5.5 groups the pull requests it shipped
+and writes a short summary. The App writes the notes from that and from what
+it has recorded, and proposes them as a `release_notes` proposal in Mine.
+Approving it fills the release's description.
+
+**Turning it on**, in the repository's `.github/bynk-hooks.yml`
+([settings.md](settings.md)):
+
+```yaml
+release_notes:
+  enabled: true
+```
+
+It also needs the App's **Contents: Read and write** permission, to write a
+release's description ([github-app.md](github-app.md#4-permissions-and-events)).
+Without it, notes are still proposed, but approving them fails with GitHub's
+`403`, and Mine names the permission.
+
+**When it runs.** On the `released` delivery GitHub sends as a final release
+is published, or as a pre-release is made final, once the App has matched
+the pull requests it shipped ([releases.md](releases.md)). A release is left
+alone, with no call to Claude:
+
+- when it's a pre-release or a draft, or the delivery is only `published`;
+- when it couldn't be matched: a repository's first release, or one GitHub
+  can no longer compare with the release before it. Its settings aren't
+  even read;
+- when the repository's settings don't turn release notes on;
+- when its description is **written**: anything other than empty, or only
+  the lines of GitHub's generated list (its `## What's Changed` and
+  `## New Contributors` headings, its `* … in https://…` entries, and one
+  `**Full Changelog**: …` line, last). A paragraph of someone's own,
+  anywhere, makes it written;
+- when it has had a `release_notes` proposal before, whatever became of it.
+  **A decline is final for its release;**
+- when it shipped no pull request the App recorded.
+
+Each delivery is claimed once (`actions`, as `release_notes`), so a
+redelivery doesn't ask again.
+
+**What is sent.** One request: Opus 5.5, medium effort, `max_tokens` 16,000.
+Opus always thinks, and its thinking counts against that budget, so it's
+roomy; only what's produced is billed.
+
+- **System:** the instructions and the fixed headings (Features, Fixes,
+  Documentation, Other).
+- **User:** the release's tag and name, and each pull request it shipped, in
+  the order they were merged, as a JSON object: its number, title, author and
+  labels. Bodies, diffs and comments aren't sent. At most 200 pull requests
+  are sent; `more_not_shown` says how many more there were.
+- **Schema:** a `summary`, and `groups`, each a heading from the fixed set
+  with the numbers of the pull requests under it.
+
+**What is proposed.** Claude only sorts, and writes the summary. The App
+writes the notes:
+
+```markdown
+Builds are faster, and a crash on Windows is fixed.
+
+## Features
+
+- Faster builds (#30) by @accuser
+
+## Fixes
+
+- Fix a crash on Windows (#31) by @alice
+
+**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0
+```
+
+- The summary comes first, cut at 800 characters. Each heading follows in
+  the fixed order, and a heading with nothing under it is left out.
+- Each line is the App's own, from the pull request as recorded: its title,
+  its number and its author. A number Claude names that the release didn't
+  ship is dropped. A pull request is listed once, under the first heading
+  that names it. One Claude didn't place, or wasn't shown, goes under
+  **Other**, so every shipped pull request is listed.
+- **Titles and the summary are plain text, by construction.** Each is put on
+  one line, with Markdown's punctuation backslash-escaped, and a leading
+  list, quote or heading marker escaped too. An `@` in them is followed by a
+  zero-width space. So neither can add a heading, list, link, image, HTML,
+  table, `#n` or `org/repo#n` reference, or mention anyone. The only
+  mentions are the App's own `by @<author>`. A bare URL is still linked by
+  GitHub, but shows as itself. A title with code in backticks shows its
+  backticks.
+- Over GitHub's generated list, its **Full Changelog** line is kept below
+  the notes.
+- Mine shows the notes in full, as text, linked to the release. Over a
+  generated list, it also shows the description approving replaces, under
+  *Replaces the current description*.
+
+**Approving it** re-reads the release from GitHub first. The notes are
+written only if its description is still empty, or still exactly the one
+seen when they were proposed. Otherwise the approval is refused with a
+`409`, the proposal expires, and nothing is written. A release that's been
+deleted is refused the same way. If GitHub can't be asked, the proposal is
+given back, still pending, with a `503`. See
+[maintainers.md](maintainers.md#the-apps-proposals).
+
+**Its reach under prompt injection.** A title written to steer Claude can
+choose which heading each pull request goes under, and what the summary
+says, in plain text. It can't add a line, a link, a mention or a pull
+request, drop one, or change a title or an author. So read the summary as
+you would anyone's text before approving: it is the part a steered reply
+reaches, and it is published on the release page as written.
+
+**When it ends without a proposal.** Every run's end is recorded in
+`actions` (`detail`) and logged:
+
+| Ended | Status | Meaning |
+|---|---|---|
+| proposed notes for … pull requests (proposal …) | `done` | a proposal is waiting in Mine |
+| it already has a release notes proposal | `done` | a decline is final |
+| it shipped no recorded pull request | `done` | nothing to write about |
+| Claude declined to write the notes | `done` | a refusal, logged with its category |
+| Claude's reply was cut off | `done` | it ran out of its 16,000 tokens |
+| Claude's answer did not decode: … | `done` | the reply didn't match the schema |
+| the … daily cap on Claude calls is reached | `failed` | see [the daily caps](#the-daily-caps) |
+| Claude could not be asked: … | `failed` | Anthropic unreachable, or an error status |
+| ANTHROPIC_API_KEY is not set | `failed` | no key on the Worker |
+| could not … | `failed` | a D1 error: looking up, reading or proposing |
+
+A release passed over before the claim records nothing. One whose
+description is written, or whose delivery names no installation, logs why;
+one that isn't a final release, wasn't matched, or is in a repository with
+release notes off is passed over without a word. A `failed` run isn't retried by itself:
+redelivering the release's `released` delivery once the cause has passed runs
+it again.
+
+**Its cost.** One call per release. It's the instructions (a few hundred
+tokens) plus about 20 to 40 tokens a pull request, so roughly 4,000 to
+8,000 for 200. The answer is a few tokens a pull request plus the summary, and
+Opus's thinking on top. `claude_calls` records each call's tokens, so the
+real cost is in D1.
+
 ## What is kept
 
 | What | Where | For |
 |---|---|---|
 | Each call: when, which repository and feature, the model asked and the model that answered, how it stopped, the token counts, the outcome, and the proposal it made | `claude_calls` | 90 days |
 | Calls per repository per UTC day | `claude_calls_daily` | 7 days |
-| Each proposal: its target and title, what it would do, its reason (Claude's, for triage), and how it was decided | `proposals` | pending for up to 14 days; 90 days after a decision |
+| Each proposal: its target and title, what it would do (for release notes, the notes and the description they'd replace), its reason (Claude's, for triage), and how it was decided | `proposals` | pending for up to 14 days; 90 days after a decision |
 | Each decision: who, which proposal, GitHub's status and what happened | `maintainer_actions` | kept |
 | What each repository's settings file said when last read | `repo_settings` | kept, one row per repository; Mine shows the last 7 days |
 
 The App does **not** keep the text it sends to Claude (an issue's body,
-say), nor Claude's reply beyond what the proposal holds. What Anthropic
+say), nor Claude's reply beyond what the proposal holds (for release notes,
+the notes it wrote from it). What Anthropic
 keeps of a request is set by its API terms
 ([above](#what-is-sent-to-anthropic-and-when)). The logs name the feature,
 the repository and the outcome, never the material. The hourly `retention`
@@ -315,11 +460,12 @@ cron does the pruning.
 2. **The caps** (optional). Set `CLAUDE_DAILY_CAP_REPO` and
    `CLAUDE_DAILY_CAP_TOTAL` if the defaults don't suit. Changing one that's
    already on the Worker takes a deploy with *overwrite secrets*.
-3. **The App's permissions.** The App already has what these features
-   need: **Contents: Read-only** for the settings file, **Issues: Read and
-   write** to apply labels, and **Pull requests: Read and write** to comment
-   on a pull request ([github-app.md](github-app.md)). A later feature that
-   needs more says so in its own section.
+3. **The App's permissions.** The App needs **Contents: Read-only** for the
+   settings file, **Issues: Read and write** to apply labels, and **Pull
+   requests: Read and write** to comment on a pull request. Release notes
+   raise Contents to **Read and write**, to write a release's description
+   ([github-app.md](github-app.md#4-permissions-and-events)). A later
+   feature that needs more says so in its own section.
 4. **Each repository opts in** with `.github/bynk-hooks.yml` on its default
    branch ([settings.md](settings.md)). Its maintainers merge that like any
    other change.

@@ -6,8 +6,40 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Release notes drafts (#110, #69 slice 4): when a final release is
+  published in a repository whose `.github/bynk-hooks.yml` turns
+  `release_notes` on, and its description is empty or only GitHub's
+  generated list, Claude Opus 5.5 groups the pull requests it shipped under
+  Features, Fixes, Documentation and Other, and writes a short summary
+  ([proposals.md](docs/proposals.md#release-notes-drafts)). Nothing is
+  written until a maintainer approves.
+  - **The App writes the notes:** each line is a shipped pull request's
+    recorded title, number and author. Claude only sorts them: a number that
+    didn't ship is dropped, and one it didn't place goes under Other.
+  - **Plain text by construction:** titles and the summary are kept to one
+    line, with Markdown escaped and `@` defused, so neither can add a
+    heading, link, image, HTML, reference or mention.
+  - **Never over someone's writing:** notes are proposed only over an empty
+    description or GitHub's own list, whose Full Changelog line is kept.
+    Approving re-reads the release and writes only if its description is
+    still the one seen, so an edit since is kept. Mine shows the notes, and
+    the description they'd replace.
+  - **Once per release:** a decline is final. At most 200 pull requests are
+    sent; the rest are listed under Other.
+  - **A new proposal kind,** `release_notes`, written with
+    `PATCH /repos/{repo}/releases/{id}` (#111, migration `0028`).
+- Pull requests' labels are recorded, from every `pull_request` delivery and
+  the daily sync, in `pull_request_labels` (#111, migration `0028`).
+
 ### Changed
 
+- **The App needs Contents: Read and write** for release notes, to write a
+  release's description ([github-app.md](docs/github-app.md#4-permissions-and-events)).
+  An organisation owner approves the change on the installation. Without
+  it, approving release notes fails with a `403` that names the permission.
+- A refused approval names the permission its kind needs.
 - Ready for Bynk v0.603.10 (#114): the pinned `wrangler` moves from 4.160.0
   to 4.162.0, the minimum this Bynk release's `bynk deploy` accepts, and the
   three `~>` sends after the webhook reply (`Bot.react`, `Triage.run`,

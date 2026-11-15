@@ -336,11 +336,15 @@ Phase 5's features (#69) don't act on GitHub by themselves: each records
 what it would do as a **proposal**, and a maintainer approves or declines it
 (#88, migration `0024`). [proposals.md](proposals.md) is the overview: how
 the pieces fit, and what is sent to Anthropic and kept. Nothing is posted
-until a maintainer approves. There are two kinds:
+until a maintainer approves. There are three kinds:
 
 - `labels` (triage): add these labels to that issue or pull request;
 - `comment` (nudges, migration `0026`): post this comment on it. Mine shows
-  the comment in full, as text.
+  the comment in full, as text;
+- `release_notes` (release notes, migration `0028`): write these notes as
+  that release's description. Its target is the release's id. Mine shows the
+  notes in full, as text, linked to the release by its tag, and the
+  description they'd replace, when it wasn't empty.
 
 - **In Mine:** each pending proposal shows its target, what it would do, the
   reason it was proposed, and **Approve** and **Decline**. Approving asks for
@@ -358,7 +362,9 @@ until a maintainer approves. There are two kinds:
       rather than refusing it, so the labels shown in Mine are exactly what
       will appear;
     - for `comment`, `POST /repos/{repo}/issues/{target}/comments` with
-      only the text, which answers `201`.
+      only the text, which answers `201`;
+    - for `release_notes`, `PATCH /repos/{repo}/releases/{target}` with only
+      the notes, which answers `200`.
   - **A nudge that no longer applies** is refused with a `409` before
     anything is posted, and expires: its pull request is no longer waiting
     on review as the nudge job reads it, or is waiting since a different
@@ -366,6 +372,12 @@ until a maintainer approves. There are two kinds:
     is given back, still pending, with a `503`: try again. The nudge job also expires pending nudges whose
     reason has gone, each weekday morning
     ([proposals.md](proposals.md#stale-pull-request-nudges)).
+  - **Release notes whose release has changed** are refused the same way:
+    approving re-reads the release from GitHub, and writes only if its
+    description is still empty, or still exactly the one seen when the notes
+    were proposed. A description written or edited since, or a release
+    that's gone, is a `409`, and the proposal expires. If GitHub can't be
+    asked, the proposal is given back, still pending, with a `503`.
   - **The end:** `approved` when GitHub accepted it. A proposal left
     `approving` is one whose Worker stopped before GitHub answered (a call
     that outlived the request, say): the labels or the comment may or may
@@ -373,8 +385,10 @@ until a maintainer approves. There are two kinds:
     hand before doing anything else, as posting it again would ping people
     twice.
   - **A refusal** leaves the proposal `failed`, with GitHub's reason, and a
-    `502`. A `403` means the App lacks **Issues** or **Pull requests: Read
-    and write**, or the conversation is locked; GitHub's reason says which.
+    `502`. For labels or a comment, a `403` means the App lacks **Issues**
+    or **Pull requests: Read and write**, or the conversation is locked;
+    GitHub's reason says which. For release notes, it means the App lacks
+    **Contents: Read and write**.
     It isn't tried again: the feature proposes afresh if it still applies.
 - **Declining** (`POST /maintainers/proposals/decline`, `{id}`) asks nothing
   of GitHub.
@@ -383,7 +397,8 @@ until a maintainer approves. There are two kinds:
   `ActionLimit`, as re-runs do.
 - **One at a time:** a target with a pending proposal of a kind keeps that
   one. Proposing labels again answers its id; a nudge isn't proposed again
-  while one is pending, nor twice for the same wait.
+  while one is pending, nor twice for the same wait; a release gets one set
+  of notes, whatever became of it.
 - **Expiry:** a proposal waits 14 days. Past that it can't be decided, and
   hourly retention marks it `expired`. Decided proposals are removed 90 days
   after the decision.

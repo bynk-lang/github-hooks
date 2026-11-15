@@ -102,6 +102,13 @@ push that changes the file is what tells the App to read it again. Without
 the permission, every phase 5 feature stays off, and the dashboard's Mine
 names the permission.
 
+Release notes drafts ([proposals.md](proposals.md#release-notes-drafts))
+need **Contents** raised to **Read and write**, to write a release's
+description when a maintainer approves its notes
+(`PATCH /repos/{repo}/releases/{id}`). Without it GitHub refuses the write
+with a `403`, which the dashboard reports, naming the permission; nothing
+else changes. Read and write also covers the settings file's read.
+
 Maintainers' actions ([maintainers.md](maintainers.md#actions)) need
 **Actions** raised to **Read and write**, to re-run failed jobs. Without it
 GitHub refuses each re-run with a `403`, which the dashboard reports.
