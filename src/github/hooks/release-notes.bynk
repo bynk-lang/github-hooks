@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 ---
 Release notes drafts (#69, slice 4; #110): when a final release is published
 in a repository whose `.github/bynk-hooks.yml` turns `release_notes` on, and

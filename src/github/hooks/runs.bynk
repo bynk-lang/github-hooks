@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Logger }
+
 // Records a job from a `workflow_job` delivery (#42). The row only moves
 // forward: a delivery replaces it when its status is further along
 // (queued/waiting < in_progress < completed), or equally far (filling in what

@@ -1,5 +1,9 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlReadError, SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+consumes bynk.crypto { Crypto }
+
 service api from http {
 	// GitHub caps a delivery's payload at 25 MB (25,000,000 bytes). This cap is
 	// 25 MiB (26,214,400 bytes), so a delivery at GitHub's limit still fits.

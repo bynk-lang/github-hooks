@@ -53,6 +53,10 @@ All notable changes to github-hooks. The format follows
   `discussion` event isn't needed. Without it, approving a summary fails
   with a `403` that names the permission.
 - Built with Bynk v0.606.0 (#120), after the Bynk canary passed with it.
+- **Bynk v0.614.0** (#126). `BYNK_VERSION` moves from v0.606.0, and every
+  file now has its own `consumes` for the names it uses from other units, as
+  v0.614.0's per-file `consumes` asks (bynk-lang/bynk#3536). Added with
+  `bynk check --fix`; no behaviour changes, and `bynk check` has no warnings.
 
 ## [0.6.0] - 2026-11-15
 

@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 ---
 The facts the dashboards read, extracted from a delivery after it is
 answered: whether its repository is public (from any delivery that says); for

@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // Lets a maintainer request through (#53), within their per-login limit,
 // with a session that hasn't been signed out (checked, or refused if it
 // can't be), once GitHub still counts them a

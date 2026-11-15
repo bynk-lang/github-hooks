@@ -5,6 +5,9 @@
 // v0.5.0 (id 9001) shipped #30, #31 and #32, merged in that order.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+
 env {
 	ANTHROPIC_API_KEY = "test-anthropic-key"
 }

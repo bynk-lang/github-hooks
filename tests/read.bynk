@@ -2,6 +2,8 @@
 // seeds the rows it reads with explicit `received_at` times.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlError }
+
 case "activity lists the newest deliveries first" {
 	let _ <- Deliveries.run(
 		"""

@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlError, SqlRun, SqlValue }
+consumes bynk { Logger, Secrets }
+
 ---
 What the service does in response to a delivery, after answering it. Each
 action runs at most once per delivery: it is claimed in `actions` first, and a

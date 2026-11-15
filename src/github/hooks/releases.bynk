@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+consumes bynk { Logger }
+
 // Records a tag a push delivery pushed (#36), so the release workflow's runs
 // can be told from its runs on branches. The first push of a tag is kept.
 fn recordTag(d: Delivery, body: Bytes) -> Effect[()] given Deliveries, Logger {

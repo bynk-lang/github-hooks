@@ -3,6 +3,8 @@
 // is 2026-08-07 and 7 days back is 2026-10-29.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlError, SqlStatement }
+
 --- 2026-11-05T00:00:00Z, as the scheduled time in epoch milliseconds.
 fn nowMs() -> Int {
 	1793836800000

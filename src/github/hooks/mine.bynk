@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // `GET /maintainers/mine`'s lists, for `login`, read one after another: each
 // is small, and a failure in any is the answer's.
 //

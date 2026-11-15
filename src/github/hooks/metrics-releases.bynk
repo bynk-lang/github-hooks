@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // /metrics/releases's figures (#53): the public route's, or with `everything`, a
 // maintainer's, which include private repositories and `DASHBOARD_EXCLUDE`'s.
 fn metricsReleases(
