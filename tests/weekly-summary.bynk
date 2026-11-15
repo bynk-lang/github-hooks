@@ -350,6 +350,7 @@ case "a refusal or a reply cut off isn't written, and the run is fine; a cap or 
 	let refused <- runWeeklySummaries(Instant.fromEpochMillis(MONDAY))
 	expect refused == Ok(())
 	expect Logger.warn called with msg == "weekly summary for bynk-lang/github-hooks not written: Claude declined to write the summary"
+	expect Logger.info called with msg == "weekly summary for 9 November 2026: proposed 0, already proposed 0, quiet 0, off 1, not written 1"
 	let cut <- runWeeklySummaries(Instant.fromEpochMillis(MONDAY))
 	expect cut == Ok(())
 	expect Logger.warn called with msg == "weekly summary for bynk-lang/github-hooks not written: Claude's reply was cut off"
@@ -438,4 +439,144 @@ case "the week, its title and target, and the table's times" {
 	expect hoursText(Some(47)) == "47 h"
 	expect hoursText(Some(48)) == "2 d"
 	expect hoursText(Some(71)) == "2 d"
+}
+
+--- One issue in github-hooks, opened at `opened` and closed at `closed`, if it is.
+fn issue(number: Int, opened: String, closed: Option[String]) -> SqlStatement {
+	SqlStatement {
+		sql: """
+			INSERT INTO issues (repo, number, title, author, author_is_bot, author_association, state, opened_at, closed_at, updated_at, comments)
+			VALUES ('bynk-lang/github-hooks', ?1, 'An issue', 'dave', 0, 'NONE', 'open', ?2, ?3, ?2, 0)
+		""",
+		params: [
+			Integer(number),
+			Text(opened),
+			match closed {
+				Some(c) => Text(c),
+				None => Null,
+			},
+		],
+	}
+}
+
+--- Work at the week's edges: Monday 00:00 is in it, and the next Monday 00:00 isn't.
+fn edgesOfTheWeek() -> List[SqlStatement] {
+	hosts().concat(
+		[
+			merged(
+				"bynk-lang/github-hooks",
+				1,
+				"At the start",
+				"alice",
+				"2026-11-08T22:00:00.000Z",
+				"2026-11-09T00:00:00.000Z"
+			),
+			issue(1, "2026-11-09T00:00:00.000Z", Some("2026-11-16T00:00:00.000Z")),
+			issue(2, "2026-11-01T00:00:00.000Z", Some("2026-11-09T00:00:00.000Z")),
+			issue(3, "2026-11-16T00:00:00.000Z", None),
+			issue(4, "2026-11-08T23:59:59.000Z", Some("2026-11-08T23:59:59.500Z")),
+			SqlStatement {
+				sql: """
+					INSERT INTO workflow_runs (repo, run_id, attempt, workflow, path, branch, sha, event, status, conclusion, created_at, queued_at, started_at, completed_at, updated_at) VALUES
+					  ('bynk-lang/github-hooks', 1, 1, 'CI', 'ci.yml', 'main', 's', 'push', 'completed', 'timed_out', '2026-11-08T23:00:00.000Z', '2026-11-08T23:00:00.000Z', '2026-11-08T23:00:00.000Z', '2026-11-09T00:00:00.000Z', '2026-11-09T00:00:00.000Z'),
+					  ('bynk-lang/github-hooks', 2, 1, 'CI', 'ci.yml', 'main', 's', 'push', 'completed', 'failure', '2026-11-15T23:00:00.000Z', '2026-11-15T23:00:00.000Z', '2026-11-15T23:00:00.000Z', '2026-11-16T00:00:00.000Z', '2026-11-16T00:00:00.000Z'),
+					  ('bynk-lang/github-hooks', 3, 1, 'CI', 'ci.yml', 'main', 's', 'push', 'completed', 'failure', '2026-11-08T23:00:00.000Z', '2026-11-08T23:00:00.000Z', '2026-11-08T23:00:00.000Z', '2026-11-08T23:59:59.000Z', '2026-11-08T23:59:59.000Z'),
+					  ('bynk-lang/github-hooks', 4, 2, 'CI', 'ci.yml', 'main', 's', 'push', 'in_progress', 'failure', '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', '2026-11-10T00:10:00.000Z', '2026-11-10T00:20:00.000Z')
+				""",
+				params: [],
+			},
+			SqlStatement {
+				sql: """
+					INSERT INTO releases (repo, tag, release_id, name, draft, prerelease, created_at, published_at, deleted_at, author_is_bot) VALUES
+					  ('bynk-lang/github-hooks', 'v1.0.0', 1, NULL, 0, 0, '2026-11-09T00:00:00.000Z', '2026-11-09T00:00:00.000Z', NULL, 0),
+					  ('bynk-lang/github-hooks', 'v1.1.0', 2, NULL, 0, 0, '2026-11-16T00:00:00.000Z', '2026-11-16T00:00:00.000Z', NULL, 0),
+					  ('bynk-lang/github-hooks', 'v0.9.0', 3, NULL, 0, 0, '2026-11-08T23:59:59.000Z', '2026-11-08T23:59:59.000Z', NULL, 0),
+					  ('bynk-lang/github-hooks', 'v1.0.1', 4, NULL, 0, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', '2026-11-11T00:00:00.000Z', 0),
+					  ('bynk-lang/github-hooks', 'v1.0.2', 5, NULL, 1, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', NULL, 0)
+				""",
+				params: [],
+			},
+		]
+	)
+}
+
+case "the week runs from Monday 00:00 up to the next, for every figure, and counts only finished runs and published releases" {
+	let seeded <- Deliveries.batch(edgesOfTheWeek())
+	expect seeded is Ok(_)
+	let m <- weekMaterial("bynk-lang/github-hooks", weekBefore(Instant.fromEpochMillis(MONDAY)))
+	expect m.map(
+		(x) => x.repos
+	) == Ok([
+		RepoWeek {
+			repo: "bynk-lang/github-hooks",
+			merged: 1,
+			median_merge_hours: Some(2),
+			issues_opened: 1,
+			issues_closed: 1,
+			runs: 1,
+			failed_runs: 1,
+			releases: 1,
+		},
+	])
+	expect m.map((x) => x.pulls.map((p) => p.title)) == Ok(["At the start"])
+	expect m.map((x) => x.releases.map((r) => r.tag)) == Ok(["v1.0.0"])
+}
+
+case "a summary goes to each repository an installation delivers for, as its latest installation" {
+	let seeded <- Deliveries.batch([
+		SqlStatement {
+			sql: """
+				INSERT INTO deliveries (id, event, repo, installation, size, received_at) VALUES
+				  ('d-1', 'push', 'bynk-lang/bynk', 42, 1, '2026-11-14T00:00:00.000Z'),
+				  ('d-2', 'push', 'bynk-lang/bynk', 7, 1, '2026-11-13T00:00:00.000Z'),
+				  ('d-3', 'ping', 'bynk-lang/bynk', NULL, 1, '2026-11-15T00:00:00.000Z'),
+				  ('d-4', 'push', 'bynk-lang/other', 99, 1, '2026-11-15T12:00:00.000Z'),
+				  ('d-5', 'installation', NULL, 5, 1, '2026-11-15T13:00:00.000Z'),
+				  ('d-6', 'ping', 'bynk-lang/uninstalled', NULL, 1, '2026-11-15T14:00:00.000Z')
+			""",
+			params: [],
+		},
+	])
+	expect seeded is Ok(_)
+	let text <- Deliveries.all(SUMMARY_HOSTS_SQL, [])
+	expect text
+		.mapErr((e) => sqlError(e))
+		.andThen(
+			(t) => Json.decodeSql[List[SummaryHost]](t).mapErr((e) => jsonError(e))
+		) == Ok([
+		SummaryHost {
+			repo: "bynk-lang/bynk",
+			installation: 42,
+		},
+		SummaryHost {
+			repo: "bynk-lang/other",
+			installation: 99,
+		},
+	])
+}
+
+case "another repository's summary, or another kind for the same week, doesn't stop this one" {
+	stub GitHubHttp.get(_, _) returns each [summaryOff(), summaryOn()]
+	stub AnthropicHttp.post(_, _, _) returns replying(WRITTEN)
+	let seeded <- Deliveries.batch(
+		busyWeek().append(
+			SqlStatement {
+				sql: """
+					INSERT INTO proposals (repo, kind, target, title, payload, reason, proposed_at, expires_at, status) VALUES
+					  ('bynk-lang/bynk', 'discussion', 20261109, 't', '{}', 'r', '2026-11-16T00:00:00.000Z', '2026-11-30T00:00:00.000Z', 'pending'),
+					  ('bynk-lang/github-hooks', 'labels', 20261109, 't', '{}', 'r', '2026-11-16T00:00:00.000Z', '2026-11-30T00:00:00.000Z', 'pending')
+				""",
+				params: [],
+			}
+		)
+	)
+	expect seeded is Ok(_)
+	let ran <- runWeeklySummaries(Instant.fromEpochMillis(MONDAY))
+	expect ran == Ok(())
+	expect Logger.info called with msg == "weekly summary for 9 November 2026: proposed 1, already proposed 0, quiet 0, off 1, not written 0"
+	let expires <- Deliveries.first(
+		"SELECT expires_at FROM proposals WHERE repo = 'bynk-lang/github-hooks' AND kind = 'discussion'",
+		[]
+	)
+	expect expires == Ok(Some("{\"expires_at\":\"2026-11-30T07:43:00.000Z\"}"))
 }
