@@ -6,6 +6,9 @@
 // delivered without one.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+
 stub Clock.now() returns Instant.fromEpochMillis(1793864580000)
 
 stub AppAuth.token(_) returns Ok("ghs_test")

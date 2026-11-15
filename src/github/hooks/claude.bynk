@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk { Method, Request, Response, Fetch, Logger, Clock, Secrets }
+consumes bynk.cloudflare { SqlValue }
+
 // The Claude capability (#88, step 1): one Messages API call at a time, for a
 // feature of #69, claimed against a daily cap first and recorded after. Raw
 // HTTP through `AnthropicHttp`, so the suites stub it at the wire, as they do

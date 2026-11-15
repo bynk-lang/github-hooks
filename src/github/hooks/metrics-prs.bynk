@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // How many open pull requests `/metrics/prs/open` lists at most.
 const MAX_OPEN_PULLS: Int = 500
 

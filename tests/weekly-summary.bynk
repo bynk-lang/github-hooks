@@ -6,6 +6,9 @@
 // `bynk-lang/hidden` is public but excluded from the dashboard.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+
 env {
 	ANTHROPIC_API_KEY = "test-anthropic-key"
 	DASHBOARD_EXCLUDE = "bynk-lang/hidden"

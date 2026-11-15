@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // How many of a workflow's latest completed attempts `/metrics/ci/history` lists.
 const RECENT_RUNS: Int = 20
 

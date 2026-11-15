@@ -4,6 +4,9 @@
 // (v0.510.2 and v0.508.4, one short page) and the comparison between them.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlReadError, SqlStatement }
+consumes bynk { Response }
+
 env {
 	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
 }

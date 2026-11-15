@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 --- A row of `runner_windows`: one window's figures, each list as JSON text.
 type RunnerWindow = {
 	computed_at: String,

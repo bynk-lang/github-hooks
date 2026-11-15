@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlError, SqlRun, SqlStatement, SqlValue }
+consumes bynk { Logger }
+
 // Records a pull request from a delivery (#26). Every `pull_request`
 // delivery carries the whole PR, so any of them refreshes its row (see
 // `savePull` for the ordering rules); the moments the row can't hold go to

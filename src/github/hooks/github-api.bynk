@@ -1,5 +1,7 @@
 context github.hooks
 
+consumes bynk { Response }
+
 ---
 The GitHub REST calls the service makes, each as the App's installation.
 ---

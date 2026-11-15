@@ -2,6 +2,8 @@
 // to be retried by a redelivery once the key is set.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+
 stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
 stub AppAuth.token(_) returns Ok("ghs_test")

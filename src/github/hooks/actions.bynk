@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger }
+
 // `POST /maintainers/actions/rerun`'s work, for `login`.
 fn rerunFailedJobs(login: String, r: RerunRequest) -> Effect[HttpResult[RerunDone]] given Deliveries, Logger, Clock, ActionLimit, AppAuth, GitHubHttp {
 	let allowed <- ActionLimit.allow("action:\(login.toLower())")

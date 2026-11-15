@@ -1,5 +1,7 @@
 context github.hooks
 
+consumes bynk { Clock }
+
 // The board is a route parameter (`?board=ci`) rather than written in: the
 // upgrade's Durable Object is resolved from the route, and a literal or
 // `const` key there routes to the wrong instance or doesn't compile

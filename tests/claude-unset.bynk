@@ -1,6 +1,8 @@
 // #88, step 1: without `ANTHROPIC_API_KEY`, no call is claimed, sent or recorded.
 suite github.hooks
 
+consumes bynk { Clock }
+
 stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
 type Count = {

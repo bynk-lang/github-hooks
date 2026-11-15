@@ -7,6 +7,9 @@
 // commit's SHA and first line).
 suite github.hooks
 
+consumes bynk.cloudflare { SqlReadError, SqlStatement, SqlValue }
+consumes bynk { Response }
+
 ---
 One `group_concat` of the rows a case reads, as `rows`; `None` when
 there are none.

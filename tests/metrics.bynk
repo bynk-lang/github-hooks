@@ -4,6 +4,9 @@
 // window opens at 2026-10-29T12:00:00Z.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlStatement }
+consumes bynk { Response, Clock }
+
 env {
 	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
 }

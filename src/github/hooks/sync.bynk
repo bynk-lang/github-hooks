@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 ---
 The open-PR sync, daily (#26): for each public repository, every pull request
 GitHub lists as open is saved (filling in those opened before the service saw

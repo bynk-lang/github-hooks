@@ -5,6 +5,9 @@
 // the webhook delivers them (the bodies cut short); each case varies them.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+consumes bynk.cloudflare { SqlValue }
+
 fixture closedIssue = "fixtures/github/issues.closed.json"
 
 fixture commented = "fixtures/github/issue_comment.created.json"

@@ -6,6 +6,8 @@
 // bodies cut short); each case varies them to the state it needs.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlReadError }
+
 fixture mergedPull = "fixtures/github/pull_request.closed.json"
 
 fixture review = "fixtures/github/pull_request_review.submitted.json"

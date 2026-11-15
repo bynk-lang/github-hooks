@@ -5,6 +5,9 @@
 // and whose labels are bug, enhancement, documentation and question.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+
 env {
 	ANTHROPIC_API_KEY = "test-anthropic-key"
 }
