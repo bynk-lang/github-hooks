@@ -59,8 +59,8 @@ A key the App **doesn't know** is ignored, and Mine lists it, as it's most
 often a misspelling that leaves a feature at its default (`after_day: 5`
 leaves `after_days` at `3`). The App finds these by reading the file's text:
 keys at the top level, and keys directly inside `triage`, `nudges`,
-`release_notes` and `weekly_summary` written one to a line. Keys inside a section written in flow
-style (`triage: {enabled: true}`) aren't checked.
+`release_notes` and `weekly_summary` written one to a line. Keys inside a
+section written in flow style (`triage: {enabled: true}`) aren't checked.
 
 ## Where it's read from, and when
 

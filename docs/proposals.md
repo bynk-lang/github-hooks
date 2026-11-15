@@ -78,9 +78,11 @@ When a feature is on, one Messages API request carries:
 - **The material to work on**, as the user turn: for triage, the issue's
   title and body; for release notes, the shipped pull requests' titles,
   authors and labels; for the weekly summary, the week's figures and the
-  titles of what was merged and released. This is anyone's text, and may try to give instructions.
-  It goes in the user turn as a quoted string, never the system prompt. The
-  instructions say it is data to classify, not instructions to follow.
+  titles of what was merged and released (the figures are the App's own;
+  the titles are anyone's). This text is anyone's, and may try to give
+  instructions. It goes in the user turn as a quoted string, never the
+  system prompt. The instructions say it is data to classify, not
+  instructions to follow.
 - **The schema the reply must match.** For triage, the label field is a list
   chosen from the allowed labels, so Claude can't invent one.
 
