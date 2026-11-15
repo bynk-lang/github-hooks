@@ -492,7 +492,9 @@ fn edgesOfTheWeek() -> List[SqlStatement] {
 					  ('bynk-lang/github-hooks', 'v1.1.0', 2, NULL, 0, 0, '2026-11-16T00:00:00.000Z', '2026-11-16T00:00:00.000Z', NULL, 0),
 					  ('bynk-lang/github-hooks', 'v0.9.0', 3, NULL, 0, 0, '2026-11-08T23:59:59.000Z', '2026-11-08T23:59:59.000Z', NULL, 0),
 					  ('bynk-lang/github-hooks', 'v1.0.1', 4, NULL, 0, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', '2026-11-11T00:00:00.000Z', 0),
-					  ('bynk-lang/github-hooks', 'v1.0.2', 5, NULL, 1, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', NULL, 0)
+					  ('bynk-lang/github-hooks', 'v1.0.2', 5, NULL, 1, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', NULL, 0),
+					  ('bynk-lang/secret', 'v2.0.0', 6, NULL, 0, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', NULL, 0),
+					  ('other-org/thing', 'v3.0.0', 7, NULL, 0, 0, '2026-11-10T00:00:00.000Z', '2026-11-10T00:00:00.000Z', NULL, 0)
 				""",
 				params: [],
 			},
@@ -579,4 +581,76 @@ case "another repository's summary, or another kind for the same week, doesn't s
 		[]
 	)
 	expect expires == Ok(Some("{\"expires_at\":\"2026-11-30T07:43:00.000Z\"}"))
+}
+
+--- `n` characters of `c`.
+fn chars(c: String, n: Int) -> String {
+	if n <= 0 { "" } else { c.concat(chars(c, n - 1)) }
+}
+
+--- `n` merged pull requests, as the material holds them.
+fn pulls(n: Int) -> List[MergedPull] {
+	let none: List[MergedPull] = []
+	if n <= 0 {
+		none
+	} else {
+		pulls(n - 1).append(MergedPull {
+			repo: "bynk-lang/bynk",
+			number: n,
+			title: "Change",
+			author: "alice",
+		})
+	}
+}
+
+--- One repository's week with these figures, and nothing else.
+fn weekOf(merged: Int, opened: Int, closed: Int, releases: Int) -> WeekMaterial {
+	let none: List[WeekRelease] = []
+	WeekMaterial {
+		repos: [
+			RepoWeek {
+				repo: "bynk-lang/bynk",
+				merged: merged,
+				median_merge_hours: None,
+				issues_opened: opened,
+				issues_closed: closed,
+				runs: 3,
+				failed_runs: 0,
+				releases: releases,
+			},
+		],
+		pulls: [],
+		releases: none,
+	}
+}
+
+case "any merge, issue opened or closed, or release makes a week active on its own" {
+	expect active(weekOf(1, 0, 0, 0))
+	expect active(weekOf(0, 1, 0, 0))
+	expect active(weekOf(0, 0, 1, 0))
+	expect active(weekOf(0, 0, 0, 1))
+	expect !active(weekOf(0, 0, 0, 0))
+}
+
+case "past 100 pull requests, the first 100 are sent and the rest counted" {
+	let m = WeekMaterial {
+		...weekOf(101, 0, 0, 0),
+		pulls: pulls(101),
+	}
+	let user = summaryUser(weekBefore(Instant.fromEpochMillis(MONDAY)), m)
+	expect user.contains("\"pull_requests_not_shown\":1")
+	expect user.contains("\"number\":100,")
+	expect !user.contains("\"number\":101,")
+}
+
+case "a paragraph is cut at 800 characters, and a week without releases has no releases heading" {
+	let at = chars("a", 800)
+	let over = chars("b", 801)
+	let body = renderSummary(SummaryAnswer { paragraphs: [at, over] }, weekOf(1, 0, 0, 0))
+	expect body.startsWith(at
+		.concat("\n\n")
+		.concat(chars("b", 800))
+		.concat("…\n\n## The week in figures"))
+	expect !body.contains("## Releases")
+	expect body.endsWith("|\n\n".concat(FOOTER))
 }
