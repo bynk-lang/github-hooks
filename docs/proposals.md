@@ -312,7 +312,9 @@ release_notes:
 ```
 
 It also needs the App's **Contents: Read and write** permission, to write a
-release's description ([github-app.md](github-app.md#4-permissions-and-events)).
+release's description. That permission reaches much further, to code,
+branches and tags, so read what it allows in
+[github-app.md](github-app.md#4-permissions-and-events) first.
 Without it, notes are still proposed, but approving them fails with GitHub's
 `403`, and Mine names the permission.
 
@@ -365,7 +367,7 @@ Builds are faster, and a crash on Windows is fixed.
 
 - Fix a crash on Windows (#31) by @alice
 
-**Full Changelog**: https://github.com/bynk-lang/secret/compare/v0.4.0...v0.5.0
+**Full Changelog**: https://github.com/bynk-lang/bynk/compare/v0.4.0...v0.5.0
 ```
 
 - The summary comes first, cut at 800 characters. Each heading follows in
@@ -463,9 +465,13 @@ cron does the pruning.
 3. **The App's permissions.** The App needs **Contents: Read-only** for the
    settings file, **Issues: Read and write** to apply labels, and **Pull
    requests: Read and write** to comment on a pull request. Release notes
-   raise Contents to **Read and write**, to write a release's description
-   ([github-app.md](github-app.md#4-permissions-and-events)). A later
-   feature that needs more says so in its own section.
+   raise Contents to **Read and write**, to write a release's description.
+   That permission also lets the App push code, branches and tags on every
+   repository it's installed on, though its code only writes release
+   descriptions, so read
+   [github-app.md](github-app.md#4-permissions-and-events) before an
+   organisation owner grants it. A later feature that needs more says so in
+   its own section.
 4. **Each repository opts in** with `.github/bynk-hooks.yml` on its default
    branch ([settings.md](settings.md)). Its maintainers merge that like any
    other change.

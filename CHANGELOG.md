@@ -37,8 +37,11 @@ All notable changes to github-hooks. The format follows
 
 - **The App needs Contents: Read and write** for release notes, to write a
   release's description ([github-app.md](docs/github-app.md#4-permissions-and-events)).
-  An organisation owner approves the change on the installation. Without
-  it, approving release notes fails with a `403` that names the permission.
+  An organisation owner approves the change on the installation. It reaches
+  much further, to code, branches and tags on every installed repository,
+  though the App only writes release descriptions; github-app.md says what
+  to weigh before granting it. Without it, approving release notes fails
+  with a `403` that names the permission.
 - A refused approval names the permission its kind needs.
 - Ready for Bynk v0.603.10 (#114): the pinned `wrangler` moves from 4.160.0
   to 4.162.0, the minimum this Bynk release's `bynk deploy` accepts, and the

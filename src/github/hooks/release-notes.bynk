@@ -352,7 +352,8 @@ the notes, by construction:
 - Markdown's inline punctuation is backslash-escaped (`MARKDOWN_PUNCTUATION`),
   so it makes no link, image, HTML, emphasis, code, table or reference
   (`org/repo#1`, `#1`);
-- a leading `-`, `+`, `=` or `1.` or `1)` is escaped too, so it can't start a
+- a leading `-`, `+` or `=`, or the `.` or `)` after a leading number, is
+  escaped too, so it can't start a
   list or underline a heading: `#` and `>`, the other block starts, are
   escaped everywhere;
 - an `@` is followed by a zero-width space, so it can't mention anyone.
@@ -365,14 +366,22 @@ fn plainText(s: String) -> String {
 	let escaped = MARKDOWN_PUNCTUATION
 		.fold(line, (acc, c) => acc.replace(c, "\\\(c)"))
 		.replace("@", "@\u{200B}")
-	if escaped.startsWith("-")
-		|| escaped.startsWith("+")
-		|| escaped.startsWith("=")
-		|| escaped.matchesRegex("^[0-9]+[.)].*") {
+	if escaped.startsWith("-") || escaped.startsWith("+") || escaped.startsWith("=") {
 		"\\\(escaped)"
+	} else if escaped.matchesRegex("^[0-9]+[.)].*") {
+		// A backslash escapes only punctuation, so it goes before the `.` or `)`
+		// that ends the leading number: `1\. Fix`, not `\1. Fix`.
+		let at = listMarkerAt(escaped)
+		"\(escaped.slice(0, at))\\\(escaped.slice(at, escaped.length()))"
 	} else {
 		escaped
 	}
+}
+
+--- Where the `.` or `)` that ends a leading number is, in text that starts with one.
+fn listMarkerAt(s: String) -> Int {
+	let at = [s.indexOf("."), s.indexOf(")")].filter((i) => i.isSome()).map((i) => i.getOrElse(0))
+	at.fold(s.length(), (least, i) => if i < least { i } else { least })
 }
 
 --- Markdown's inline punctuation, the backslash first so the others' escapes aren't escaped again.
