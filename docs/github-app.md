@@ -125,6 +125,16 @@ reaches code, not only issues and comments. Weigh that before granting it:
   repository the installation covers, so keep that list to the repositories
   you want the App on at all.
 
+The weekly summary ([proposals.md](proposals.md#the-weekly-summary)) needs
+**Discussions: Read and write**, to start a discussion when a maintainer
+approves a summary (GraphQL's `createDiscussion`). It doesn't need the
+`discussion` event, so leave that unticked. Without the permission, GitHub
+refuses the post, and the dashboard names the permission. It reaches only
+Discussions, but all of them: it also lets the App edit, delete, lock and
+comment on discussions on every installed repository. The App only reads a
+repository's categories, and starts the one discussion a maintainer
+approved.
+
 Maintainers' actions ([maintainers.md](maintainers.md#actions)) need
 **Actions** raised to **Read and write**, to re-run failed jobs. Without it
 GitHub refuses each re-run with a `403`, which the dashboard reports.

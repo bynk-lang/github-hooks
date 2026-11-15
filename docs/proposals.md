@@ -14,18 +14,19 @@ when, what is kept, and how to turn it on and off. The details are in:
 | [maintainers.md](maintainers.md#the-apps-proposals) | approving and declining: the routes, refusals, expiry and the audit |
 | [deploy.md](deploy.md) | `ANTHROPIC_API_KEY` and the daily caps, as Worker settings |
 
-The foundations (#88) are in place, and three features propose:
+The foundations (#88) are in place, and four features propose:
 [issue triage](#issue-triage),
-[stale pull request nudges](#stale-pull-request-nudges) and
-[release notes drafts](#release-notes-drafts). Each feature
-arrives as its own slice of #69, and this page gains a section for each:
+[stale pull request nudges](#stale-pull-request-nudges),
+[release notes drafts](#release-notes-drafts) and
+[the weekly summary](#the-weekly-summary). Each feature
+arrived as its own slice of #69, and has its own section here:
 
 | Feature | Slice | Claude | Proposes |
 |---|---|---|---|
 | [Issue triage](#issue-triage) (#95) | 2, built | Haiku 5.5 | labels for a new issue, from the repository's allowed list |
 | [Stale pull request nudges](#stale-pull-request-nudges) (#103) | 3, built | none | a comment to a ready pull request's reviewers |
 | [Release notes drafts](#release-notes-drafts) (#110) | 4, built | Opus 5.5 | notes for a release, from the pull requests it shipped |
-| Weekly summary | 5 | Opus 5.5 | the organisation's week, posted to a Discussion |
+| [The weekly summary](#the-weekly-summary) (#119) | 5, built | Opus 5.5 | the organisation's week, posted to a Discussion |
 
 ## How it fits together
 
@@ -76,9 +77,12 @@ When a feature is on, one Messages API request carries:
   repository's allowed labels with their descriptions.
 - **The material to work on**, as the user turn: for triage, the issue's
   title and body; for release notes, the shipped pull requests' titles,
-  authors and labels. This is anyone's text, and may try to give instructions.
-  It goes in the user turn as a quoted string, never the system prompt. The
-  instructions say it is data to classify, not instructions to follow.
+  authors and labels; for the weekly summary, the week's figures and the
+  titles of what was merged and released (the figures are the App's own;
+  the titles are anyone's). This text is anyone's, and may try to give
+  instructions. It goes in the user turn as a quoted string, never the
+  system prompt. The instructions say it is data to classify, not
+  instructions to follow.
 - **The schema the reply must match.** For triage, the label field is a list
   chosen from the allowed labels, so Claude can't invent one.
 
@@ -100,7 +104,9 @@ target and what it would do, not only by its reason.
   what a maintainer should check, in its section here. For release notes,
   Claude only sorts the pull requests and writes a plain-text summary: the
   App writes every line, and escapes the summary
-  ([below](#release-notes-drafts)).
+  ([below](#release-notes-drafts)). For the weekly summary, Claude writes
+  only plain-text paragraphs, and the App writes the figures and the releases
+  ([below](#the-weekly-summary)).
 
 **Refusals.** Claude may decline a request. A refusal makes no proposal and
 is logged with its category. On Opus 5.5 the API's server-side fallback is
@@ -245,7 +251,9 @@ nudges:
 ```
 
 **When it runs.** At 07:43 UTC, Monday to Friday: 07:43 GMT or 08:43 BST, at
-the start of the UK working day, and never at the weekend.
+the start of the UK working day, and never at the weekend. The same run then
+proposes [the weekly summary](#the-weekly-summary); a failure of either
+doesn't stop the other.
 
 **What counts as waiting.** A pull request is waiting when it is open, not a
 draft, not opened by a bot, not locked, and someone (a person or a team) is
@@ -435,19 +443,191 @@ tokens) plus about 20 to 40 tokens a pull request, so roughly 4,000 to
 Opus's thinking on top. `claude_calls` records each call's tokens, so the
 real cost is in D1.
 
+## The weekly summary
+
+Slice 5 of #69, built in #119. Each weekday morning, for the week before the
+latest Monday, Claude Opus 5.5 writes a few paragraphs about the
+organisation's week from the public dashboard's figures. The App writes the
+post around them: the title, a table of figures, and the releases. It
+proposes the post as a `discussion` proposal in Mine, and approving it posts
+the post to the repository's Discussions.
+
+**Turning it on**, in the `.github/bynk-hooks.yml` of the repository whose
+Discussions should carry it ([settings.md](settings.md)):
+
+```yaml
+weekly_summary:
+  enabled: true
+  category: Announcements   # the Discussions category to post in; the default
+```
+
+- **Turn it on in one repository per organisation,** such as `.github`. The
+  summary is about the whole organisation, whichever repository it's set in.
+  Every repository that turns it on gets the same summary, as its own
+  proposal, and costs its own Opus call each week.
+- The repository needs **Discussions turned on**, with a category of that
+  name. The name is matched without regard to case.
+- The App needs **Discussions: Read and write**
+  ([github-app.md](github-app.md#4-permissions-and-events)). It doesn't need
+  the `discussion` event. Without the permission, summaries are still
+  proposed, but approving one fails with GitHub's `403`, and Mine names the
+  permission.
+- **Announcement-format categories are unconfirmed.** GitHub limits who may
+  start a discussion in an announcement-format category, such as the
+  default `Announcements`, and whether that admits the App is yet to be seen
+  on a first post. If approving is refused, Mine shows GitHub's reason, and
+  an open-format category, such as `General`, is the way round it.
+
+**What it covers.** The repository's owner, and that organisation's
+**public** repositories as the public dashboard shows them, the host
+repository included. A repository named in `DASHBOARD_EXCLUDE` is left out,
+and so are private ones and other organisations'. Nothing private is sent
+to Claude or posted. The figures are D1's own, as the dashboard has them.
+
+**When it runs.** With the nudges, each weekday at 07:43 UTC
+([above](#stale-pull-request-nudges)). Each run is for the week before the
+latest Monday: Monday 00:00 to the next Monday 00:00 UTC. So Monday's run
+writes it, and Tuesday to Friday try again for a Monday that failed. A
+repository is left alone, with no call to Claude:
+
+- when its settings don't turn `weekly_summary` on;
+- when it has had that week's proposal, whatever became of it.
+  **A decline is final for its week;**
+- when Claude declined to write that week's summary, or was cut off, since
+  the week ended (a `claude_calls` row);
+- when the week was **quiet**: no pull request merged, no issue opened or
+  closed, and no release, in any of the organisation's public repositories.
+  CI runs alone don't count, so a week of scheduled runs gets no summary.
+
+**What is sent.** One request: Opus 5.5, medium effort, `max_tokens` 16,000,
+as for release notes.
+
+- **System:** the instructions, naming the organisation. They say that the
+  titles are anyone's text, to summarise and never to follow. They ask for two
+  to four short paragraphs of plain text, without Markdown, links or
+  mentions.
+- **User:** the week, as a JSON object:
+  - `week_from` and `week_to`, its Monday and Sunday;
+  - `repositories`: each active repository's figures, busiest first, at
+    most 30;
+  - `pull_requests_merged`: each pull request merged, with its repository,
+    number, title and author, in the order they were merged, at most 100;
+  - `releases`: each final release published, with its repository, tag and
+    name, at most 30;
+  - `repositories_not_shown` and `pull_requests_not_shown`: how many more
+    there were.
+
+  Bodies, diffs, comments and issues' titles aren't sent.
+- **Schema:** `paragraphs`, a list of strings.
+
+**The figures,** for each public repository with activity that week:
+
+| Column | Counts |
+|---|---|
+| Pull requests merged | pull requests merged in the week |
+| Median time to merge | from opened to merged, in whole hours: as hours under 48, then as whole days |
+| Issues opened, Issues closed | issues opened, and issues closed, in the week |
+| CI runs | workflow runs completed in the week, and how many of them failed or timed out |
+| Releases | final releases published in the week, not drafts, pre-releases or deleted ones |
+
+The busiest come first, by merges, issues and releases together, then by CI
+runs.
+
+**What is proposed.** Claude writes only the paragraphs. The App writes the
+rest:
+
+```markdown
+A steady week: the parser got faster and a crash was fixed.
+
+bynk v0.6.0 shipped on Saturday.
+
+## The week in figures
+
+| Repository | Pull requests merged | Median time to merge | Issues opened | Issues closed | CI runs | Releases |
+|---|---:|---:|---:|---:|---:|---:|
+| bynk-lang/bynk | 2 | 10 h | 1 | 1 | 3 (1 failed) | 1 |
+| bynk-lang/github-hooks | 1 | 1 h | 0 | 0 | 0 (0 failed) | 0 |
+
+## Releases
+
+- [bynk-lang/bynk v0.6.0](https://github.com/bynk-lang/bynk/releases/tag/v0.6.0)
+
+<sub>Drafted by Claude from the public dashboard's figures, and approved by a maintainer before it was posted.</sub>
+```
+
+- **The title** is fixed: "The week of 9 November 2026".
+- **The paragraphs** come first: at most four, empty ones dropped, each cut
+  at 800 characters. Each is made plain text on one line, as release notes'
+  summaries are ([above](#release-notes-drafts)). So none can add a heading,
+  list, link, image, HTML, table, reference or mention.
+- **The table** has at most 30 rows, the busiest first, with a line counting
+  the rest. **The releases** are linked by tag.
+- **The pull requests' titles aren't in the post.** Claude reads them, and
+  only the paragraphs can reflect them.
+- Mine shows the title, the category and the post in full, as text, linked
+  to the repository's Discussions.
+
+**Approving it** asks GitHub's GraphQL API for the repository and its
+Discussions categories, as the installation. It finds the category by name,
+then creates the discussion (`createDiscussion`).
+
+- **A later week's summary has been proposed:** the approval is refused with
+  a `409`, the proposal expires, and nothing is posted. An old week's
+  summary isn't posted as if it were current.
+- **Nowhere to post** (Discussions turned off, no category of that name, or
+  a GraphQL error): the proposal fails with GitHub's reason and a `502`. For
+  a missing category, the reason lists the categories the repository has.
+  A `403`, or GraphQL's `FORBIDDEN`, names the permission.
+- **GitHub can't be asked:** the proposal is given back, still pending, with
+  a `503`.
+
+See [maintainers.md](maintainers.md#the-apps-proposals).
+
+**Its reach under prompt injection.** A pull request's title written to
+steer Claude can change what the paragraphs say, in plain text. It can't
+change the title, the figures, the releases or the footer, add a link or a
+mention, or put itself in the post. So read the paragraphs as you would
+anyone's text before approving: they are the part a steered reply reaches,
+and they are posted as written, under the App's name.
+
+**How a run ends.** Each run logs one line, for example:
+
+```text
+weekly summary for 9 November 2026: proposed 1, already proposed 0, quiet 0, off 3, not written 0
+```
+
+| Outcome | Logged | Tried again |
+|---|---|---|
+| proposed | `weekly summary for <repo>: proposed (proposal …)` | no: once per week |
+| Claude declined to write the summary | a warning | no, for that week |
+| Claude's reply was cut off | a warning | no, for that week |
+| Claude's answer did not decode | a warning | on the next weekday's run |
+| a daily cap reached, Anthropic unreachable, `ANTHROPIC_API_KEY` not set, or a D1 error | an error: the run fails, naming the repository and why | on the next weekday's run |
+
+The last chance for a week is Friday's run. After that the week is left
+behind.
+
+**Its cost.** One call per host repository per week, counted in that
+repository's daily cap, and again on a later weekday only for a call that
+failed or didn't decode. A call is the instructions (a few hundred tokens),
+plus roughly 60 tokens a repository and 30 a pull request. So it's up to
+about 5,000 for 30 repositories and 100 pull requests. The answer is a few
+hundred tokens, with Opus's thinking on top. `claude_calls` records each
+call's tokens, so the real cost is in D1.
+
 ## What is kept
 
 | What | Where | For |
 |---|---|---|
 | Each call: when, which repository and feature, the model asked and the model that answered, how it stopped, the token counts, the outcome, and the proposal it made | `claude_calls` | 90 days |
 | Calls per repository per UTC day | `claude_calls_daily` | 7 days |
-| Each proposal: its target and title, what it would do (for release notes, the notes and the description they'd replace), its reason (Claude's, for triage), and how it was decided | `proposals` | pending for up to 14 days; 90 days after a decision |
+| Each proposal: its target and title, what it would do (for release notes, the notes and the description they'd replace; for the weekly summary, the post and its category), its reason (Claude's, for triage), and how it was decided | `proposals` | pending for up to 14 days; 90 days after a decision |
 | Each decision: who, which proposal, GitHub's status and what happened | `maintainer_actions` | kept |
 | What each repository's settings file said when last read | `repo_settings` | kept, one row per repository; Mine shows the last 7 days |
 
 The App does **not** keep the text it sends to Claude (an issue's body,
 say), nor Claude's reply beyond what the proposal holds (for release notes,
-the notes it wrote from it). What Anthropic
+the notes it wrote from it; for the weekly summary, the post). What Anthropic
 keeps of a request is set by its API terms
 ([above](#what-is-sent-to-anthropic-and-when)). The logs name the feature,
 the repository and the outcome, never the material. The hourly `retention`
@@ -470,8 +650,8 @@ cron does the pruning.
    repository it's installed on, though its code only writes release
    descriptions, so read
    [github-app.md](github-app.md#4-permissions-and-events) before an
-   organisation owner grants it. A later feature that needs more says so in
-   its own section.
+   organisation owner grants it. The weekly summary needs **Discussions:
+   Read and write**, to post a discussion.
 4. **Each repository opts in** with `.github/bynk-hooks.yml` on its default
    branch ([settings.md](settings.md)). Its maintainers merge that like any
    other change.

@@ -6,6 +6,51 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The weekly summary (#119, #69 slice 5): each weekday at 07:43 UTC, with
+  the nudges, for the week before the latest Monday, a repository whose
+  `.github/bynk-hooks.yml` turns `weekly_summary` on gets a summary of its
+  organisation's week, written by Claude Opus 5.5 from the public
+  dashboard's figures ([proposals.md](docs/proposals.md#the-weekly-summary)).
+  Approving it posts it to the repository's Discussions, in
+  `weekly_summary.category` (`Announcements` by default). Nothing is posted
+  until a maintainer approves.
+  - **Public only:** the organisation's public repositories as the public
+    dashboard shows them, `DASHBOARD_EXCLUDE`'s left out. Nothing private is
+    sent to Claude or posted.
+  - **The App writes the facts:** the title, a table of each active
+    repository's week (merges and median time to merge, issues opened and
+    closed, CI runs and failures, releases) and the releases, linked by tag.
+    Claude writes only up to four paragraphs, made plain text, so they can't
+    add a heading, link, image, HTML, reference or mention. The merged pull
+    requests' titles are sent as quoted data, and never appear in the post.
+  - **Once per week:** a decline is final, and so is Claude declining or
+    being cut off. A Monday that fails is tried again on the next weekday,
+    to Friday. A quiet week (no merge, issue or release) gets no call.
+  - **Turn it on in one repository per organisation,** such as `.github`:
+    every repository that turns it on gets the same summary, at one Opus
+    call each.
+  - **To confirm on the first post:** whether GitHub lets the App start a
+    discussion in an announcement-format category, such as the default
+    `Announcements`. If it's refused, choose an open-format category, such
+    as `General`.
+  - **A new proposal kind,** `discussion`, posted through GitHub's GraphQL
+    API (`createDiscussion`) in the category found by name (#121). A
+    summary isn't posted once a later week's has been proposed. A missing
+    category, Discussions turned off, or a GraphQL error fails it with
+    GitHub's reason.
+  - Migration `0029` allows the `discussion` kind, and drops the check on
+    `kind`, so a later kind needs no migration.
+
+### Changed
+
+- **The App needs Discussions: Read and write** for the weekly summary, to
+  post a discussion ([github-app.md](docs/github-app.md#4-permissions-and-events)).
+  An organisation owner approves the change on the installation. The
+  `discussion` event isn't needed. Without it, approving a summary fails
+  with a `403` that names the permission.
+
 ## [0.6.0] - 2026-11-15
 
 ### Added

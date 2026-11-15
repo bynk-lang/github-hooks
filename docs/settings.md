@@ -17,6 +17,9 @@ nudges:
   after_days: 5
 release_notes:
   enabled: true
+weekly_summary:          # in one repository per organisation, such as .github
+  enabled: true
+  category: Announcements
 ```
 
 | Key | Default | Meaning |
@@ -26,6 +29,8 @@ release_notes:
 | `nudges.enabled` | `false` | propose a nudge for a ready pull request waiting on review ([nudges](proposals.md#stale-pull-request-nudges), #103) |
 | `nudges.after_days` | `3` | how many whole 24-hour periods, weekends included, a pull request waits on review before a nudge: 1 to 30 |
 | `release_notes.enabled` | `false` | draft notes for each final release whose description is empty or GitHub's generated list ([release notes](proposals.md#release-notes-drafts), #110); approving them needs **Contents: Read and write** |
+| `weekly_summary.enabled` | `false` | propose a summary of the organisation's week, posted to this repository's Discussions ([the weekly summary](proposals.md#the-weekly-summary), #119); every repository that turns it on gets the same summary, so turn it on in one; approving needs **Discussions: Read and write** |
+| `weekly_summary.category` | `Announcements` | the Discussions category to post in, by name, matched without regard to case; the repository must have it |
 
 Any section or key left out takes its default.
 
@@ -53,9 +58,9 @@ RefinementViolation at $.nudges.after_days: …
 A key the App **doesn't know** is ignored, and Mine lists it, as it's most
 often a misspelling that leaves a feature at its default (`after_day: 5`
 leaves `after_days` at `3`). The App finds these by reading the file's text:
-keys at the top level, and keys directly inside `triage`, `nudges` and
-`release_notes` written one to a line. Keys inside a section written in flow
-style (`triage: {enabled: true}`) aren't checked.
+keys at the top level, and keys directly inside `triage`, `nudges`,
+`release_notes` and `weekly_summary` written one to a line. Keys inside a
+section written in flow style (`triage: {enabled: true}`) aren't checked.
 
 ## Where it's read from, and when
 
