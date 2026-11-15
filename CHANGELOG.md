@@ -6,6 +6,8 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
 ### Added
 
 - The weekly summary (#119, #69 slice 5): each weekday at 07:43 UTC, with
@@ -50,9 +52,10 @@ All notable changes to github-hooks. The format follows
   An organisation owner approves the change on the installation. The
   `discussion` event isn't needed. Without it, approving a summary fails
   with a `403` that names the permission.
-- **Bynk v0.614.0.** `BYNK_VERSION` moves from v0.606.0, and every file now
-  has its own `consumes` for the names it uses from other units, as v0.614.0's
-  per-file `consumes` asks (bynk-lang/bynk#3536). Added with
+- Built with Bynk v0.606.0 (#120), after the Bynk canary passed with it.
+- **Bynk v0.614.0** (#126). `BYNK_VERSION` moves from v0.606.0, and every
+  file now has its own `consumes` for the names it uses from other units, as
+  v0.614.0's per-file `consumes` asks (bynk-lang/bynk#3536). Added with
   `bynk check --fix`; no behaviour changes, and `bynk check` has no warnings.
 
 ## [0.6.0] - 2026-11-15
@@ -844,7 +847,8 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/bynk-lang/github-hooks/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bynk-lang/github-hooks/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/bynk-lang/github-hooks/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/bynk-lang/github-hooks/compare/v0.3.0...v0.4.0
