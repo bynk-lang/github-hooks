@@ -177,6 +177,7 @@ fn stillApplies(
 ) -> Effect[Result[Option[String], String]] given Deliveries, AppAuth, GitHubHttp {
 	let applies: Option[String] = None
 	let true = p.kind != "release_notes" else { releaseStillEmpty(p, installation) }
+	let true = p.kind != "discussion" else { stillLatestWeek(p) }
 	let true = p.kind == "comment" else { Effect.pure(Ok(applies)) }
 	let Ok(c) = Json.decode[CommentPayload](p.payload) else { Effect.pure(Ok(applies)) }
 	let Some(since) = c.wait_since else { Effect.pure(Ok(applies)) }
@@ -190,6 +191,26 @@ fn stillApplies(
 		} else {
 			Effect.pure(Ok(Some("is no longer waiting since then: its wait has started again")))
 		},
+	}
+}
+
+---
+Whether a week's summary still applies: no later week's has been proposed
+for its repository, whatever became of that one. A summary approved after
+its successor would be posted out of order, as if it were current (#121's
+review). A D1 error is `Err`.
+---
+fn stillLatestWeek(p: ClaimedProposal) -> Effect[Result[Option[String], String]] given Deliveries {
+	let applies: Option[String] = None
+	let Ok(later) <- Deliveries.first(
+		"SELECT id FROM proposals WHERE repo = ?1 AND kind = 'discussion' AND target > ?2 LIMIT 1",
+		[Text(p.repo), Integer(p.target)]
+	) else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	match later {
+		Some(_) => Effect.pure(Ok(Some("is no longer the latest week's summary: a later week's has been proposed"))),
+		None => Effect.pure(Ok(applies)),
 	}
 }
 

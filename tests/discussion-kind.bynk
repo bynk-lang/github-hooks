@@ -286,17 +286,67 @@ case "declining a discussion posts nothing" {
 	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("declined"))
 }
 
-case "the rebuilt table takes discussions, and still refuses a kind it doesn't know" {
-	let ok <- Deliveries.run(
-		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/github-hooks', 'discussion', 20261102, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+case "the table takes any kind, and approving one the App doesn't know fails, asking nothing of GitHub" {
+	stub GitHubHttp.post(_, _, _) returns place(true)
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let poke <- Deliveries.run(
+		"INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES (9, 'bynk-lang/github-hooks', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
 		[]
 	)
-	expect ok is Ok(_)
-	let bad <- Deliveries.run(
-		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/github-hooks', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
+	expect poke is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 9 }
+	) by Maintainer("accuser")
+	expect r == ServerError(
+		"proposal 9 could not be read: the App doesn't know how to act on a poke proposal"
+	)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[PostSettled]("FROM proposals WHERE id = 9", [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("failed"))
+}
+
+case "a week's summary isn't posted once a later week's has been proposed" {
+	stub GitHubHttp.post(_, _, _) returns each [place(true), posted()]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let later <- Deliveries.run(
+		"INSERT INTO proposals (repo, kind, target, title, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/github-hooks', 'discussion', 20261102, 'The week of 2 November 2026', '{}', 'r', '2026-11-09T07:43:00.000Z', '2026-11-23T07:43:00.000Z', 'declined')",
 		[]
 	)
-	expect bad is Err(_)
+	expect later is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r == Conflict(
+		"proposal 1 is no longer the latest week's summary: a later week's has been proposed, so nothing was posted"
+	)
+	expect GitHubHttp.post never called
+	let row <- Deliveries.firstAs[PostSettled](SETTLED, [])
+	expect row.map((x) => x.map((s) => s.status)) == Ok(Some("expired"))
+}
+
+case "another repository's later week, or an earlier one here, doesn't make a summary stale" {
+	stub GitHubHttp.post(_, _, _) returns each [place(true), posted()]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let others <- Deliveries.run(
+		"""
+		INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES
+		  ('bynk-lang/bynk', 'discussion', 20261102, '{}', 'r', '2026-11-09T07:43:00.000Z', '2026-11-23T07:43:00.000Z', 'pending'),
+		  ('bynk-lang/github-hooks', 'discussion', 20261019, '{}', 'r', '2026-10-26T07:43:00.000Z', '2026-11-09T07:43:00.000Z', 'approved'),
+		  ('bynk-lang/github-hooks', 'release_notes', 20261102, '{}', 'r', '2026-11-09T07:43:00.000Z', '2026-11-23T07:43:00.000Z', 'pending')
+		""",
+		[]
+	)
+	expect others is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
 }
 
 case "weekly_summary decodes, with its category defaulting to Announcements" {

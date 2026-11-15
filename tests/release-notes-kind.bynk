@@ -310,17 +310,12 @@ case "which descriptions are still unwritten at approval" {
 	expect !stillUnwritten(Some("Hand-written."), Some(GENERATED))
 }
 
-case "the rebuilt table takes release notes, and still refuses a kind it doesn't know" {
+case "the rebuilt table takes release notes" {
 	let ok <- Deliveries.run(
 		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'release_notes', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
 		[]
 	)
 	expect ok is Ok(_)
-	let bad <- Deliveries.run(
-		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
-		[]
-	)
-	expect bad is Err(_)
 }
 
 --- PR #25 at `updated`, labelled `labels` (as JSON objects), after `action`.
