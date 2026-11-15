@@ -17,16 +17,16 @@ waiting since a different time, is expired first, so it can't be approved
 after its reason has gone. Only repositories whose
 `.github/bynk-hooks.yml` turns `nudges` on are nudged, read as the
 installation that last delivered for them. `at` is the scheduled time, so a
-run measures the wait to when it was due, not when it ran. On Mondays the
-same run then proposes the weekly summary (`runWeeklySummaries`).
+run measures the wait to when it was due, not when it ran. The same run then
+proposes the weekly summary (`runWeeklySummaries`), for the week before the
+latest Monday, so a Monday that fails is tried again the next weekday.
 ---
 service nudges from cron {
 	on schedule("43 7 * * 1-5") (at: Int) -> Effect[Result[(), String]] given Deliveries, Logger, Tokens, Clock, Secrets, AppAuth, GitHubHttp, AnthropicHttp, LiveFeed {
 		let now = Instant.fromEpochMillis(at)
 		let nudged <- runNudges(now)
-		// On Mondays, the weekly summary (#119) runs after the nudges, on its own:
-		// a failure of either doesn't stop the other.
-		let true = isMonday(now) else { Effect.pure(nudged) }
+		// The weekly summary (#119) runs after the nudges, on its own: a failure
+		// of either doesn't stop the other.
 		let summarised <- runWeeklySummaries(now)
 		let failures = [failureOf(nudged), failureOf(summarised).map((b) => "weekly summary: \(b)")]
 			.filter((f) => f.isSome())

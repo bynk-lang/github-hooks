@@ -8,13 +8,16 @@ context github.hooks
 // proposes it as a `discussion` in that repository. Nothing is posted until a
 // maintainer approves it in Mine.
 //
-// It runs from the nudges' schedule (07:43 UTC, Monday to Friday) on Mondays
-// only, so it needs no cron of its own. The week is the previous Monday 00:00
-// to this Monday 00:00 UTC. Only public repositories the public dashboard
+// It runs from the nudges' schedule (07:43 UTC, Monday to Friday), so it needs
+// no cron of its own. Each run is for the week before the latest Monday, from
+// its Monday 00:00 to the latest Monday 00:00 UTC, so a Monday that fails is
+// tried again on Tuesday, and so on to Friday; a week that has its proposal
+// is skipped with one read. Only public repositories the public dashboard
 // shows are summarised (`DASHBOARD_EXCLUDE`'s left out), the target's own
 // organisation's, so nothing private is sent to Claude or posted. A quiet week
 // gets no call and no proposal; a target repository gets one per week, and a
-// decline is final for that week.
+// decline is final for that week, as is Claude declining to write it or being
+// cut off.
 
 --- What a run did, for its log line.
 type SummaryTally = {
@@ -22,7 +25,11 @@ type SummaryTally = {
 	already: Int,
 	quiet: Int,
 	off: Int,
-	--- Claude declined, was cut off, or answered off the schema: logged, and not retried, as triage's are.
+	---
+	Claude declined, was cut off, or answered off the schema: logged. A
+	decline or a reply cut off isn't asked again that week; an answer off the
+	schema is, on the next weekday's run.
+	---
 	unwritten: Int,
 	failed: List[String],
 }
@@ -30,23 +37,19 @@ type SummaryTally = {
 --- A day in milliseconds.
 const DAY_MS: Int = 86400000
 
---- Whether `now` falls on a Monday, in UTC.
-fn isMonday(now: Instant) -> Bool {
-	(now.toEpochMillis().div(DAY_MS) + 4).mod(7) == 1
-}
-
---- The week before `now`'s day: its Monday 00:00 and the next Monday 00:00, UTC, for a run on a Monday.
+--- The week before the latest Monday: its Monday 00:00 to the next Monday 00:00, UTC.
 type SummaryWeek = {
 	since: Instant,
 	until: Instant,
 }
 
 fn weekBefore(now: Instant) -> SummaryWeek {
-	let ms = now.toEpochMillis()
-	let today = ms - ms.mod(DAY_MS)
+	// Epoch day 0 was a Thursday, so a day `d` is `(d + 3) mod 7` days after Monday.
+	let days = now.toEpochMillis().div(DAY_MS)
+	let monday = (days - (days + 3).mod(7)) * DAY_MS
 	SummaryWeek {
-		since: Instant.fromEpochMillis(today - 7 * DAY_MS),
-		until: Instant.fromEpochMillis(today),
+		since: Instant.fromEpochMillis(monday - 7 * DAY_MS),
+		until: Instant.fromEpochMillis(monday),
 	}
 }
 
@@ -101,9 +104,9 @@ ORDER BY d.repo
 """
 
 ---
-One run, at `now`, a Monday: each repository that turns the summary on gets
-its organisation's previous week, unless it has that week's already or the
-week was quiet.
+One run, at `now`, any weekday: each repository that turns the summary on gets
+its organisation's week before the latest Monday, unless it has that week's
+already, Claude declined it or was cut off, or the week was quiet.
 ---
 fn runWeeklySummaries(now: Instant) -> Effect[Result[(), String]] given Deliveries, Logger, Clock, Secrets, Tokens, AppAuth, GitHubHttp, AnthropicHttp, LiveFeed {
 	let Ok(text) <- Deliveries.all(SUMMARY_HOSTS_SQL, []) else match {
@@ -156,6 +159,16 @@ fn summarise(t: SummaryTally, h: SummaryHost, week: SummaryWeek) -> Effect[Summa
 		Err(e) => Effect.pure(failed("could not look for this week's summary: \(sqlError(e))")),
 	}
 	let None = earlier else { Effect.pure(SummaryTally { ...t, already: t.already + 1 }) }
+	// Claude declined it, or was cut off, since the week ended: not asked again for that week.
+	let Ok(declined) <- Deliveries.first(
+		"SELECT id FROM claude_calls WHERE repo = ?1 AND feature = 'weekly_summary' AND outcome IN ('refused', 'truncated') AND at >= ?2 LIMIT 1",
+		[Text(h.repo), Text(week.until.toIso())]
+	) else match {
+		Err(e) => Effect.pure(failed(
+			"could not look for this week's declined summary: \(sqlError(e))"
+		)),
+	}
+	let None = declined else { Effect.pure(SummaryTally { ...t, unwritten: t.unwritten + 1 }) }
 	let Ok(material) <- weekMaterial(h.repo, week) else match {
 		Err(why) => Effect.pure(failed(why)),
 	}
