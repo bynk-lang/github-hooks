@@ -4,6 +4,9 @@
 // installation 42 delivered for `bynk-lang/secret`.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlError, SqlStatement, SqlValue }
+consumes bynk { Response, Clock }
+
 stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
 stub AppAuth.token(_) returns Ok("ghs_test")

@@ -6,6 +6,9 @@
 // the routes do; GitHub's API is stubbed at the wire.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlStatement }
+consumes bynk { Response, Clock }
+
 env {
 	APP_CLIENT_ID = "Iv23liTestClient"
 	APP_CLIENT_SECRET = "test-client-secret"

@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger }
+
 ---
 How long a repository's settings file is kept in `Tokens` once read: a day.
 A push to the default branch that touches the file drops it at once, so this

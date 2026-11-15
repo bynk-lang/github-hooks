@@ -1,5 +1,7 @@
 suite github.hooks
 
+consumes bynk.cloudflare { SqlError }
+
 case "the root is the CI health page, loading its own stylesheet and script" {
 	let r <- api.GET("/") by Visitor
 	let Raw(body, contentType) = r else {

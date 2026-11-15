@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+consumes bynk { Logger }
+
 ---
 Retention, hourly: deletes `workflow_run` progress (`requested`,
 `in_progress`) older than 7 days and every delivery older than 90 days, at

@@ -3,6 +3,8 @@
 // The caps are 2 a repository and 3 a day here, so both can be reached.
 suite github.hooks
 
+consumes bynk { Response, Clock }
+
 env {
 	ANTHROPIC_API_KEY = "test-anthropic-key"
 	CLAUDE_DAILY_CAP_REPO = "2"

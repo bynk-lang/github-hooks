@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // The App's proposals (#88, step 2): what a feature of #69 would do, recorded
 // and waiting on a maintainer, who approves or declines it in Mine. Nothing
 // is posted to GitHub until a maintainer approves. Four kinds: `labels`

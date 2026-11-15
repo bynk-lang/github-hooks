@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+consumes bynk { Clock, Logger }
+
 // Records an issue from an `issues` or `issue_comment` delivery (#48). Both
 // carry the whole issue, so either refreshes its row and labels (see
 // `issueStatements` for the ordering rules). A comment by someone other than

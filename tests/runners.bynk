@@ -6,6 +6,9 @@
 // the 30-day one at 2026-10-06T12:00:00Z.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlStatement }
+consumes bynk { Clock }
+
 env {
 	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
 }

@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk { Method, Request, Response, Fetch, Secrets, Clock }
+consumes bynk.crypto { Signature, Crypto }
+
 ---
 Signing a maintainer in with GitHub (#53), through the GitHub App's user
 authorisation. `exchange` trades the code the page received for a user access

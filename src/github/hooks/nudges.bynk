@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 ---
 Stale pull request nudges (#69, slice 3; #103), weekday mornings at 07:43
 UTC (07:43 GMT, 08:43 BST). A ready pull request whose wait for review has

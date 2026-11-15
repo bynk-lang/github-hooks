@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlError, SqlStatement, SqlValue }
+consumes bynk { Logger }
+
 ---
 The runner-wait figures, hourly (#42): each repository's waits by runner,
 longest waits and slowest jobs over the 7, 30 and 90-day windows, computed

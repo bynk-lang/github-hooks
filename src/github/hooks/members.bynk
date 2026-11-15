@@ -1,5 +1,9 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk.crypto { Digest, Crypto }
+consumes bynk { Clock }
+
 // Whether `login` belongs to `org`, from an answer GitHub gave in the last
 // `MEMBER_RECHECK`, or else from GitHub (and then kept).
 fn orgMember(

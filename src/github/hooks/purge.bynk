@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // Purges the edge cache of the metrics routes a kind of change affects
 // (#62), if its slot may purge now: at most once per its gap, claimed in D1
 // so every isolate shares the count. `true` when Cloudflare accepted the

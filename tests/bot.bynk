@@ -10,6 +10,9 @@
 // double, and Fetch is stubbed: first the token exchange, then the comment.
 suite github.hooks
 
+consumes bynk { Response, Fetch }
+consumes bynk.crypto { Signature, Crypto }
+
 env {
 	ACTION_REPOS = "bynk-lang/github-hooks-sandbox"
 	APP_CLIENT_ID = "Iv1.testclient"

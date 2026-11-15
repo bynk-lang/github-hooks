@@ -6,6 +6,9 @@
 // writes `Option` tagged (bynk-lang/bynk#2991).
 suite github.hooks
 
+consumes bynk.cloudflare { SqlReadError, SqlStatement, SqlValue }
+consumes bynk { Response }
+
 env {
 	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
 }

@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 ---
 Issue triage (#69, slice 2; #95): when an issue is opened in a repository
 whose `.github/bynk-hooks.yml` turns `triage` on, Claude Haiku 5.5 suggests

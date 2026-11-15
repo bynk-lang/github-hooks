@@ -8,6 +8,9 @@
 // case below sends GitHub's own JSON to pin the wire format.
 suite github.hooks
 
+consumes bynk { Response }
+consumes bynk.cloudflare { SqlStatement, SqlValue }
+
 env {
 	DASHBOARD_EXCLUDE = "bynk-lang/sandbox"
 }

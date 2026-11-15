@@ -1,5 +1,8 @@
 context github.hooks
 
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Clock, Logger, Secrets }
+
 // The weekly summary (#69, slice 5; #119): each Monday morning, for each
 // repository whose `.github/bynk-hooks.yml` turns `weekly_summary` on, Claude
 // Opus 5.5 writes a few paragraphs about its organisation's previous week, from

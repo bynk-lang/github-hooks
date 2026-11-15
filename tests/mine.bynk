@@ -4,6 +4,9 @@
 // membership answer), in public and private repositories alike.
 suite github.hooks
 
+consumes bynk.cloudflare { SqlStatement }
+consumes bynk { Response, Clock }
+
 stub Clock.now() returns Instant.fromEpochMillis(1793880000000)
 
 ---
