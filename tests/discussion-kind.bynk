@@ -366,3 +366,33 @@ case "weekly_summary decodes, with its category defaulting to Announcements" {
 		"weekly_summary:\n  enabled: true\n  catgory: Weekly\n"
 	) is Decoded(_, ["weekly_summary.catgory"])
 }
+
+case "an empty errors list is no error, for the lookup or the post" {
+	stub GitHubHttp.post(_, _, _) returns each [answer(200, "{\"data\": {\"repository\": {\"id\": \"R_hooks\", \"hasDiscussionsEnabled\": true, \"discussionCategories\": {\"nodes\": [{\"id\": \"DIC_ann\", \"name\": \"Announcements\"}]}}}, \"errors\": []}"), answer(200, "{\"data\": {\"createDiscussion\": {\"discussion\": {\"url\": \"u\"}}}, \"errors\": []}")]
+	let seeded <- Deliveries.batch(seedPost("Announcements"))
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 1 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+	expect GitHubHttp.post called 2 times
+}
+
+case "a REST answer isn't read for GraphQL's errors" {
+	stub GitHubHttp.post(_, _, _) returns answer(201, "{\"id\": 77, \"errors\": [{\"message\": \"not GraphQL\"}]}")
+	let seeded <- Deliveries.batch(
+		seedPost("Announcements").append(
+			SqlStatement {
+				sql: "INSERT INTO proposals (id, repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES (8, 'bynk-lang/github-hooks', 'comment', 40, '{\"body\":\"Hi\"}', 'r', '2026-11-05T07:43:00.000Z', '2026-11-19T07:43:00.000Z', 'pending')",
+				params: [],
+			}
+		)
+	)
+	expect seeded is Ok(_)
+	let r <- api.POST(
+		"/maintainers/proposals/approve",
+		ProposalDecision { id: 8 }
+	) by Maintainer("accuser")
+	expect r is Ok(_)
+}
