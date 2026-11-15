@@ -605,8 +605,8 @@ case "anyone's text is plain text on one line: no block, link, image, HTML, refe
 	expect plainText("> quoted") == "\\> quoted"
 	expect plainText("- item") == "\\- item"
 	expect plainText("+ item") == "\\+ item"
-	expect plainText("12. item") == "\\12. item"
-	expect plainText("3) item") == "\\3) item"
+	expect plainText("12. item") == "12\\. item"
+	expect plainText("3) item") == "3\\) item"
 	expect plainText("=== ") == "\\==="
 	expect plainText("| a | b |") == "\\| a \\| b \\|"
 	expect plainText("See [docs](https://evil.example)") == "See \\[docs\\](https://evil.example)"
@@ -621,6 +621,7 @@ case "anyone's text is plain text on one line: no block, link, image, HTML, refe
 	expect plainText("a \\ b") == "a \\\\ b"
 	expect plainText("Thanks @alice") == "Thanks @\u{200B}alice"
 	expect plainText("  two\n\nlines\t ") == "two lines"
+	expect plainText("1.5 is faster (see 2.0)") == "1\\.5 is faster (see 2.0)"
 	// Ordinary text is left as it is.
 	expect plainText(
 		"Builds are faster, and v1.2 works on Windows."

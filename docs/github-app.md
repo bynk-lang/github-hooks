@@ -102,6 +102,29 @@ push that changes the file is what tells the App to read it again. Without
 the permission, every phase 5 feature stays off, and the dashboard's Mine
 names the permission.
 
+Release notes drafts ([proposals.md](proposals.md#release-notes-drafts))
+need **Contents** raised to **Read and write**, to write a release's
+description when a maintainer approves its notes
+(`PATCH /repos/{repo}/releases/{id}`). Without it GitHub refuses the write
+with a `403`, which the dashboard reports, naming the permission; nothing
+else changes. Read and write also covers the settings file's read.
+
+**Contents: Read and write reaches much further than release notes.** GitHub
+has no narrower permission for releases, so on every repository the App is
+installed on, it also lets the App push commits, create and delete branches
+and tags (where branch protection doesn't stop it), edit any file through
+the contents API, and create, edit or delete releases and their assets. The
+App's code uses it for one call only: `PATCH` of a release's `body`, when a
+maintainer approves its notes. But anyone holding the App's private key (a
+Worker secret, `APP_PRIVATE_KEY`) can do all of it, so a leak of that key
+reaches code, not only issues and comments. Weigh that before granting it:
+
+- grant it only if release notes are wanted, and keep `APP_PRIVATE_KEY`
+  where only the deploy can read it;
+- or install the App on fewer repositories: the permission applies to every
+  repository the installation covers, so keep that list to the repositories
+  you want the App on at all.
+
 Maintainers' actions ([maintainers.md](maintainers.md#actions)) need
 **Actions** raised to **Read and write**, to re-run failed jobs. Without it
 GitHub refuses each re-run with a `403`, which the dashboard reports.
