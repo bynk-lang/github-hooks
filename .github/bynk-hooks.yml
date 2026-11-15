@@ -18,3 +18,10 @@ triage:
 nudges:
   enabled: true
   after_days: 3
+
+# Release notes drafts (#110, docs/proposals.md#release-notes-drafts): when a
+# final release is published with an empty description, or only GitHub's
+# generated list, Claude Opus 5.5 sorts the pull requests it shipped and
+# writes a summary, and a maintainer approves or declines the notes in Mine.
+release_notes:
+  enabled: true
