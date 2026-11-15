@@ -1,0 +1,196 @@
+context github.hooks
+
+// The `discussion` kind of proposal (#119, #69 slice 5): a post to a
+// repository's Discussions, which approving creates through GitHub's GraphQL
+// API. Discussions have no REST route for creating one, so approving first
+// looks up the repository and its categories, then runs `createDiscussion`
+// with the category found by name.
+
+--- GitHub's GraphQL endpoint.
+const GRAPHQL_URL: String = "https://api.github.com/graphql"
+
+---
+The `discussion` kind's payload: the week it's for (its Monday,
+`YYYY-MM-DD`), the category to post in, by name, and the post.
+---
+type DiscussionPayload = {
+	week: String,
+	category: String,
+	title: String,
+	body: String,
+}
+
+--- A GraphQL request: the query or mutation, and its variables.
+type GraphQLRequest[V] = {
+	query: String,
+	variables: V,
+}
+
+type PlaceVariables = {
+	owner: String,
+	name: String,
+}
+
+type PostVariables = {
+	repository: String,
+	category: String,
+	title: String,
+	body: String,
+}
+
+--- The repository and its Discussions categories.
+const PLACE_QUERY: String = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id hasDiscussionsEnabled discussionCategories(first: 100) { nodes { id name } } } }"
+
+--- Creates the post, answering its address.
+const POST_MUTATION: String = "mutation($repository: ID!, $category: ID!, $title: String!, $body: String!) { createDiscussion(input: {repositoryId: $repository, categoryId: $category, title: $title, body: $body}) { discussion { url } } }"
+
+--- A GraphQL error, as GitHub answers it: `type` is `FORBIDDEN` for a missing permission.
+type GraphQLError = {
+	message: String,
+	type: Option[String] = None,
+}
+
+type GraphQLErrors = {
+	errors: Option[List[GraphQLError]] = None,
+}
+
+type PlaceAnswer = {
+	data: Option[PlaceData] = None,
+	errors: Option[List[GraphQLError]] = None,
+}
+
+type PlaceData = {
+	repository: Option[PlaceRepository] = None,
+}
+
+type PlaceRepository = {
+	id: String,
+	hasDiscussionsEnabled: Bool,
+	discussionCategories: CategoryPage,
+}
+
+type CategoryPage = {
+	nodes: List[DiscussionCategory],
+}
+
+type DiscussionCategory = {
+	id: String,
+	name: String,
+}
+
+---
+Why a `discussion` proposal couldn't be made ready to post:
+- `Undecodable`: its payload doesn't decode, so it never will;
+- `Unplaced`: GitHub answered, and there's nowhere to post it (no such
+  repository, Discussions off, no such category, or a GraphQL error), with
+  whether it was a missing permission;
+- `Unasked`: GitHub couldn't be asked, or answered an error status, so
+  trying again may do better.
+---
+type Unprepared =
+	| Undecodable(why: String)
+	| Unplaced(why: String, forbidden: Bool)
+	| Unasked(why: String)
+
+--- What a `403`, or a GraphQL `FORBIDDEN`, most likely means for a discussion.
+const DISCUSSION_REFUSED: String = "does the App have Discussions: Read and write?"
+
+---
+What approving proposal `p` asks of GitHub, made ready: for a `discussion`,
+the repository and category are looked up first, as the installation, so the
+action is the mutation itself. Every other kind is `actionOf`, as it is.
+---
+fn prepareAction(
+	p: ClaimedProposal,
+	installation: Int
+) -> Effect[Result[ProposalAction, Unprepared]] given AppAuth, GitHubHttp {
+	let true = p.kind == "discussion" else {
+		Effect.pure(actionOf(p.kind, p.payload, p.repo, p.target).mapErr((why) => Undecodable(why)))
+	}
+	let Ok(d) = Json.decode[DiscussionPayload](p.payload) else match {
+		Err(e) => Effect.pure(Err(Undecodable("its payload did not decode: \(jsonError(e))"))),
+	}
+	let parts = p.repo.split("/")
+	let owner = parts.get(0).getOrElse("")
+	let name = parts.get(1).getOrElse("")
+	let lookup = Json.encodePlain(GraphQLRequest {
+		query: PLACE_QUERY,
+		variables: PlaceVariables {
+			owner: owner,
+			name: name,
+		},
+	})
+	let Ok(res) <- asApp(
+		installation,
+		(token) => GitHubHttp.post(token, GRAPHQL_URL, lookup)
+	) else match {
+		Err(why) => Effect.pure(Err(Unasked(why))),
+	}
+	let true = res.status == 200 else {
+		if res.status == 401 || res.status == 403 || res.status == 404 {
+			Effect.pure(Err(Unplaced(refusal(res.status, res.body), res.status == 403)))
+		} else {
+			Effect.pure(Err(Unasked("GitHub answered \(res.status) for \(p.repo)'s Discussions")))
+		}
+	}
+	let Ok(a) = Json.decode[PlaceAnswer](res.body) else {
+		Effect.pure(Err(Unasked("GitHub's answer for \(p.repo)'s Discussions did not decode")))
+	}
+	let None = a.errors.filter((es) => es.count() > 0) else match {
+		Some(es) => Effect.pure(Err(Unplaced(graphqlFailure(es), forbiddenIn(es)))),
+	}
+	let Some(repository) = a.data.andThen((x) => x.repository) else {
+		Effect.pure(Err(Unplaced("GitHub found no repository \(p.repo)", false)))
+	}
+	let true = repository.hasDiscussionsEnabled else {
+		Effect.pure(Err(Unplaced("Discussions are turned off in \(p.repo)", false)))
+	}
+	let categories = repository.discussionCategories.nodes
+	let Some(category) = categories
+		.filter((c) => c.name.toLower() == d.category.trim().toLower())
+		.first() else {
+		let names = joined(categories.map((c) => c.name), ", ")
+		Effect.pure(Err(Unplaced(
+			"\(p.repo) has no Discussions category named \(d.category) (it has: \(if names == "" { "none" } else { names }))",
+			false
+		)))
+	}
+	Effect.pure(Ok(ProposalAction {
+		url: GRAPHQL_URL,
+		body: Json.encodePlain(GraphQLRequest {
+			query: POST_MUTATION,
+			variables: PostVariables {
+				repository: repository.id,
+				category: category.id,
+				title: d.title,
+				body: d.body,
+			},
+		}),
+		ok: 200,
+		done: "posted the discussion",
+		message: "Posted \(d.title) to \(p.repo)'s Discussions, in \(category.name)",
+		noun: "the discussion",
+		refused: DISCUSSION_REFUSED,
+		graphql: true,
+	}))
+}
+
+--- GraphQL's errors, as one reason.
+fn graphqlFailure(errors: List[GraphQLError]) -> String {
+	"GraphQL: \(joined(errors.map((e) => e.message), "; "))"
+}
+
+fn forbiddenIn(errors: List[GraphQLError]) -> Bool {
+	errors.any((e) => e.type == Some("FORBIDDEN"))
+}
+
+---
+The errors in a GraphQL answer GitHub gave with a `200`, if any: a mutation
+that fails still answers `200`, with `errors` instead of `data`.
+---
+fn graphqlErrors(body: String) -> Option[List[GraphQLError]] {
+	match Json.decode[GraphQLErrors](body) {
+		Ok(e) => e.errors.filter((es) => es.count() > 0),
+		Err(_) => None,
+	}
+}

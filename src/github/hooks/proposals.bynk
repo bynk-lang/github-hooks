@@ -2,9 +2,10 @@ context github.hooks
 
 // The App's proposals (#88, step 2): what a feature of #69 would do, recorded
 // and waiting on a maintainer, who approves or declines it in Mine. Nothing
-// is posted to GitHub until a maintainer approves. Two kinds: `labels`
-// (triage, #69 slice 2), `comment` (stale pull request nudges, slice 3) and
-// `release_notes` (release notes drafts, slice 4).
+// is posted to GitHub until a maintainer approves. Four kinds: `labels`
+// (triage, #69 slice 2), `comment` (stale pull request nudges, slice 3),
+// `release_notes` (release notes drafts, slice 4) and `discussion` (the
+// weekly summary, slice 5).
 
 --- How long a proposal waits for a decision before it expires.
 const PROPOSAL_WAIT: Duration = 14.days
@@ -45,6 +46,8 @@ type ProposalAction = {
 	patch: Bool = false,
 	--- What a `403` most likely means.
 	refused: String = "a missing permission, Issues and Pull requests: Read and write, or a locked conversation",
+	--- A GraphQL request, which fails with `errors` in a `200`.
+	graphql: Bool = false,
 }
 
 ---
@@ -174,6 +177,7 @@ fn stillApplies(
 ) -> Effect[Result[Option[String], String]] given Deliveries, AppAuth, GitHubHttp {
 	let applies: Option[String] = None
 	let true = p.kind != "release_notes" else { releaseStillEmpty(p, installation) }
+	let true = p.kind != "discussion" else { stillLatestWeek(p) }
 	let true = p.kind == "comment" else { Effect.pure(Ok(applies)) }
 	let Ok(c) = Json.decode[CommentPayload](p.payload) else { Effect.pure(Ok(applies)) }
 	let Some(since) = c.wait_since else { Effect.pure(Ok(applies)) }
@@ -187,6 +191,26 @@ fn stillApplies(
 		} else {
 			Effect.pure(Ok(Some("is no longer waiting since then: its wait has started again")))
 		},
+	}
+}
+
+---
+Whether a week's summary still applies: no later week's has been proposed
+for its repository, whatever became of that one. A summary approved after
+its successor would be posted out of order, as if it were current (#121's
+review). A D1 error is `Err`.
+---
+fn stillLatestWeek(p: ClaimedProposal) -> Effect[Result[Option[String], String]] given Deliveries {
+	let applies: Option[String] = None
+	let Ok(later) <- Deliveries.first(
+		"SELECT id FROM proposals WHERE repo = ?1 AND kind = 'discussion' AND target > ?2 LIMIT 1",
+		[Text(p.repo), Integer(p.target)]
+	) else match {
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+	match later {
+		Some(_) => Effect.pure(Ok(Some("is no longer the latest week's summary: a later week's has been proposed"))),
+		None => Effect.pure(Ok(applies)),
 	}
 }
 
@@ -488,11 +512,29 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			Conflict("proposal \(id) \(why), so nothing was posted")
 		},
 	}
-	let Ok(action) = actionOf(p.kind, p.payload, p.repo, p.target) else match {
-		Err(why) => {
+	let Ok(action) <- prepareAction(p, inst) else match {
+		Err(Undecodable(why)) => {
 			let _ <- settle(id, "failed", why)
 			let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
 			ServerError("proposal \(id) could not be read: \(why)")
+		},
+		Err(Unplaced(why, forbidden)) => {
+			let _ <- settle(id, "failed", why)
+			let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, None, why)
+			let _ <- LiveFeed.publishMaintainers(proposalEvent(p.repo, p.target, "failed"))
+			if forbidden {
+				BadGateway("GitHub refused the discussion (\(DISCUSSION_REFUSED)): \(why)")
+			} else {
+				BadGateway("proposal \(id) has nowhere to be posted: \(why)")
+			}
+		},
+		Err(Unasked(why)) => {
+			// GitHub not answering isn't the proposal's fault: give the claim back.
+			let _ <- unclaim(id)
+			let _ <- Logger.error("could not find where to post proposal \(id): \(why)")
+			ServiceUnavailable(
+				"proposal \(id) couldn't be placed, so nothing was posted; try again"
+			)
 		},
 	}
 	let sent <- asApp(inst, (token) => if action.patch {
@@ -500,11 +542,25 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 	} else {
 		GitHubHttp.post(token, action.url, action.body)
 	})
+	// A GraphQL request that fails still answers `200`, with `errors`.
+	let failures: Option[List[GraphQLError]] = match sent {
+		Ok(res) => if action.graphql && res.status == action.ok {
+			graphqlErrors(res.body)
+		} else {
+			None
+		},
+		Err(_) => None,
+	}
 	let answer = match sent {
-		Ok(res) => if res.status == action.ok {
+		Ok(res) => if res.status == action.ok && failures.isNone() {
 			ActionOutcome {
 				status: Some(res.status),
 				outcome: action.done,
+			}
+		} else if res.status == action.ok {
+			ActionOutcome {
+				status: Some(res.status),
+				outcome: graphqlFailure(failures.getOrElse([])),
 			}
 		} else {
 			ActionOutcome {
@@ -517,7 +573,7 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 			outcome: why,
 		},
 	}
-	let applied = answer.status == Some(action.ok)
+	let applied = answer.status == Some(action.ok) && failures.isNone()
 	let status = if applied { "approved" } else { "failed" }
 	let _ <- settle(id, status, answer.outcome)
 	let _ <- auditDecision(login, "approve-proposal", p.repo, id, at, answer.status, answer.outcome)
@@ -528,7 +584,11 @@ fn approveProposal(login: String, id: Int) -> Effect[HttpResult[ProposalDecided]
 	if applied {
 		Ok(ProposalDecided { id: id, status: status, message: action.message })
 	} else {
+		let forbidden = failures.map((es) => forbiddenIn(es)).getOrElse(false)
 		match answer.status {
+			Some(_) if forbidden => BadGateway(
+				"GitHub refused \(action.noun) (\(action.refused)): \(answer.outcome)"
+			),
 			Some(403) => BadGateway(
 				"GitHub refused \(action.noun) (\(action.refused)): \(answer.outcome)"
 			),
@@ -639,10 +699,17 @@ fn pendingProposals(
 		notes: releaseNotesOf(r).map((n) => n.body),
 		release: releaseNotesOf(r).map((n) => n.tag),
 		replaces: releaseNotesOf(r).andThen((n) => n.seen),
+		post: discussionOf(r).map((d) => d.body),
+		category: discussionOf(r).map((d) => d.category),
 		reason: r.reason,
 		proposed_at: r.proposed_at,
 		expires_at: r.expires_at,
 	})))
+}
+
+--- A `discussion` proposal's payload, or `None` for another kind or one that doesn't decode.
+fn discussionOf(r: ProposalRow) -> Option[DiscussionPayload] {
+	if r.kind == "discussion" { Json.decode[DiscussionPayload](r.payload).ok() } else { None }
 }
 
 --- A `release_notes` proposal's payload, or `None` for another kind or one that doesn't decode.

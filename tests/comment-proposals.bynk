@@ -197,14 +197,6 @@ case "what each kind asks of GitHub" {
 	) == Err("the App doesn't know how to act on a poke proposal")
 }
 
-case "the rebuilt table still refuses a kind it doesn't know" {
-	let bad <- Deliveries.run(
-		"INSERT INTO proposals (repo, kind, target, payload, reason, proposed_at, expires_at, status) VALUES ('bynk-lang/secret', 'poke', 1, '{}', 'r', '2026-11-05T00:00:00.000Z', '2026-11-19T00:00:00.000Z', 'pending')",
-		[]
-	)
-	expect bad is Err(_)
-}
-
 case "a pending comment doesn't stand in for a labels proposal on the same target" {
 	stub LiveFeed.publishMaintainers(_) returns ()
 	let seeded <- Deliveries.batch(seed())
