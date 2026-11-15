@@ -25,3 +25,14 @@ nudges:
 # writes a summary, and a maintainer approves or declines the notes in Mine.
 release_notes:
   enabled: true
+
+# The weekly summary (#119, docs/proposals.md#the-weekly-summary): each
+# weekday at 07:43 UTC, for the week before the latest Monday, Claude Opus 5.5
+# writes a few paragraphs on bynk-lang's public week, and the App proposes the
+# post, with a table of figures and the releases, for a maintainer to approve
+# in Mine. It's the organisation's summary, so only this repository turns it
+# on. Approving posts it to this repository's Discussions, in Announcements;
+# if GitHub refuses the App there, this becomes General.
+weekly_summary:
+  enabled: true
+  category: Announcements
