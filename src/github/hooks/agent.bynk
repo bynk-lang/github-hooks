@@ -50,7 +50,11 @@ whose input is its answer. `maxTokens` bounds each reply, thinking included;
 `maxTurns` bounds the requests; `taskBudget`, when set, is an advisory token
 budget for the whole conversation, which Claude paces itself to. It's
 advisory: `maxTurns` times `maxTokens` is what bounds the spend. One below
-`TASK_BUDGET_MIN` isn't sent.
+`TASK_BUDGET_MIN` isn't sent. Past `deadline`, each tool result Claude gets
+says time is up and asks it to finish now, and each request's replies are
+held to `LATE_MAX_TOKENS`; `DEADLINE_GRACE` after it, no further request is
+made. So the last request starts by `deadline + DEADLINE_GRACE` and is a
+short one.
 ---
 type AgentAsk = {
 	feature: String,
@@ -60,6 +64,7 @@ type AgentAsk = {
 	maxTokens: Int,
 	maxTurns: Int,
 	taskBudget: Option[Int] = None,
+	deadline: Option[Instant] = None,
 	system: String,
 	user: String,
 	tools: List[AgentTool],
@@ -148,6 +153,19 @@ type AgentToolResultBlock = {
 	is_error: Bool,
 }
 
+--- How long past its deadline a conversation may go on, for Claude to finish.
+const DEADLINE_GRACE: Duration = 2.minutes
+
+---
+The most a reply may use once the deadline has passed: enough to call the
+finishing tool, and short enough that the last request ends soon. It's a
+top-level field, so it leaves the cached prefix alone.
+---
+const LATE_MAX_TOKENS: Int = 4000
+
+--- What Claude is told with each tool result once the deadline has passed.
+const TIME_UP: String = "Time is up for this task: finish now with what you have, by calling the finishing tool."
+
 --- The model every conversation asks.
 const AGENT_MODEL: String = "claude-opus-5-5"
 
@@ -197,9 +215,15 @@ fn agentTurn[I: Codable](
 		Effect.pure(agentEnded(Unfinished("it used all \(a.maxTurns) turns"), turns))
 	}
 	let now <- Clock.now()
+	let overdue = a.deadline.filter(
+		(d) => now.toEpochMillis() > (d + DEADLINE_GRACE).toEpochMillis()
+	)
+	let None = overdue else { Effect.pure(agentEnded(Unfinished("it ran out of time"), turns)) }
 	let at = now.toIso()
 	let made = turns + 1
-	let sent <- AnthropicHttp.post(apiKey, agentBody(a, messages), Some(agentBetas(a)))
+	let late = a.deadline.filter((d) => now.toEpochMillis() >= d.toEpochMillis()).isSome()
+	let budget = if late { a.maxTokens.min(LATE_MAX_TOKENS) } else { a.maxTokens }
+	let sent <- AnthropicHttp.post(apiKey, agentBody(a, messages, budget), Some(agentBetas(a)))
 	let Ok(res) = sent else match {
 		Err(why) => {
 			let _ <- Logger.warn("\(a.feature) for \(a.repo): \(why)")
@@ -293,7 +317,9 @@ fn agentTurn[I: Codable](
 	}
 	let none: List[AgentToolResultBlock] = []
 	let results <- calls.foldEff(none, (done, c) => runTool(a, run, done, c))
-	let answer = Json.encodePlain(AgentToolResults { role: "user", content: results })
+	let after <- Clock.now()
+	let late = a.deadline.filter((d) => after.toEpochMillis() >= d.toEpochMillis()).isSome()
+	let answer = toolResultsMessage(results, late)
 	agentTurn(a, apiKey, run, messages.concat([assistant, answer]), made, reminded)
 }
 
@@ -305,6 +331,25 @@ fn agentEnded[I: Codable](end: AgentEnd, turns: Int) -> AgentRun[I] {
 		answer: none,
 		turns: turns,
 	}
+}
+
+---
+The user turn that answers a turn's tool calls: their results, and once the
+deadline has passed, a note after them saying time is up.
+---
+fn toolResultsMessage(results: List[AgentToolResultBlock], late: Bool) -> String {
+	let blocks = results.map((r) => Json.encodePlain(r))
+	let all = if late {
+		blocks.append(Json.encodePlain(AgentTextBlock { type: "text", text: TIME_UP }))
+	} else {
+		blocks
+	}
+	"{\"role\":\"user\",\"content\":[\(joined(all, ","))]}"
+}
+
+type AgentTextBlock = {
+	type: String,
+	text: String,
 }
 
 --- Runs one tool call, adding its result to `done`. Input that didn't decode is an error result.
@@ -381,13 +426,13 @@ A conversation's request body. The system prompt and the tools are the
 stable prefix, and the request asks for automatic caching too, so each turn
 reads the conversation so far from the cache and pays for its new part.
 ---
-fn agentBody(a: AgentAsk, messages: List[String]) -> String {
+fn agentBody(a: AgentAsk, messages: List[String], maxTokens: Int) -> String {
 	let tools = joined(a.tools.map((t) => toolJson(t)), ",")
 	let budget = match sentBudget(a) {
 		Some(n) => ",\"task_budget\":{\"type\":\"tokens\",\"total\":\(n)}",
 		None => "",
 	}
-	"{\"model\":\(Json.encodePlain(AGENT_MODEL)),\"max_tokens\":\(a.maxTokens),\"cache_control\":{\"type\":\"ephemeral\"},\"system\":[{\"type\":\"text\",\"text\":\(Json.encodePlain(a.system)),\"cache_control\":{\"type\":\"ephemeral\"}}],\"tools\":[\(tools)],\"messages\":[\(joined(messages, ","))],\"output_config\":{\"effort\":\(Json.encodePlain(effortName(a.effort)))\(budget)},\"fallbacks\":\"default\"}"
+	"{\"model\":\(Json.encodePlain(AGENT_MODEL)),\"max_tokens\":\(maxTokens),\"cache_control\":{\"type\":\"ephemeral\"},\"system\":[{\"type\":\"text\",\"text\":\(Json.encodePlain(a.system)),\"cache_control\":{\"type\":\"ephemeral\"}}],\"tools\":[\(tools)],\"messages\":[\(joined(messages, ","))],\"output_config\":{\"effort\":\(Json.encodePlain(effortName(a.effort)))\(budget)},\"fallbacks\":\"default\"}"
 }
 
 fn toolJson(t: AgentTool) -> String {

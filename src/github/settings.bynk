@@ -40,6 +40,7 @@ type RepoSettings = {
 	review: ReviewSettings = ReviewSettings {
 		enabled: false,
 		guidelines: None,
+		authors: "members",
 	},
 }
 
@@ -74,11 +75,16 @@ type WeeklySummarySettings = {
 ---
 Pull request reviews (#129): Claude Opus 5.5 reviews a pull request each time
 it becomes ready. `guidelines` names a file on the default branch whose text
-is given to Claude as the maintainers' own review notes.
+is given to Claude as the maintainers' own review notes. `authors` is whose
+pull requests are reviewed: `members` (the default: the repository's owners,
+organisation members and collaborators) or `all`. Anything else is
+`members`. Every review spends the daily cap, so `all` lets anyone who can
+open a pull request spend it.
 ---
 type ReviewSettings = {
 	enabled: Bool = false,
 	guidelines: Option[String] = None,
+	authors: String = "members",
 }
 
 --- Where the settings live in a repository.
@@ -126,6 +132,7 @@ fn offSettings() -> RepoSettings {
 		review: ReviewSettings {
 			enabled: false,
 			guidelines: None,
+			authors: "members",
 		},
 	}
 }
@@ -240,6 +247,7 @@ fn knownKey(section: String, key: String) -> Bool {
 		|| (section == "nudges" && key == "after_days")
 		|| (section == "weekly_summary" && key == "category")
 		|| (section == "review" && key == "guidelines")
+		|| (section == "review" && key == "authors")
 }
 
 --- An `Invalid` settings file, for a context (which can't build a commons sum itself).

@@ -11,6 +11,7 @@ include = ["src", "tests"]
 # experimental (still so in the release in `BYNK_VERSION`). The public metrics routes are
 # rate-limited per address with `bynk.cloudflare.RateLimit`, and cached at
 # Cloudflare's edge, purged on each change, with `bynk.cloudflare.EdgeCache`:
-# both also experimental.
+# both also experimental. Pull request reviews are queued with
+# `bynk.cloudflare.Queue`, experimental too.
 [unstable]
-allow = ["bynk.crypto", "bynk.cloudflare.RateLimit", "bynk.cloudflare.RateLimit.allow", "bynk.cloudflare.EdgeCache", "bynk.cloudflare.EdgeCache.purge"]
+allow = ["bynk.crypto", "bynk.cloudflare.RateLimit", "bynk.cloudflare.RateLimit.allow", "bynk.cloudflare.EdgeCache", "bynk.cloudflare.EdgeCache.purge", "bynk.cloudflare.Queue"]

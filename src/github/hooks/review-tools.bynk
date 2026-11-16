@@ -295,7 +295,9 @@ fn fileWindow(
 		}
 	}
 	let lines = text.split("\n")
-	let count = if text.endsWith("\n") { lines.length() - 1 } else { lines.length() }
+	let count = if text == "" {
+		0
+	} else if text.endsWith("\n") { lines.length() - 1 } else { lines.length() }
 	let true = count > 0 else { ToolResult { content: "\(path) is empty.", isError: false } }
 	let first = fromLine.getOrElse(1).max(1)
 	let true = first <= count else {
@@ -304,8 +306,13 @@ fn fileWindow(
 			isError: true,
 		}
 	}
-	let last = toLine.getOrElse(first + READ_LINES - 1).min(first + READ_LINES - 1).min(count)
-	let shown = lines.skip(first - 1).take(last.max(first) - first + 1)
+	// A window that ends before it starts shows its first line.
+	let last = toLine
+		.getOrElse(first + READ_LINES - 1)
+		.min(first + READ_LINES - 1)
+		.min(count)
+		.max(first)
+	let shown = lines.skip(first - 1).take(last - first + 1)
 	let numbered = joined(
 		shown.fold(ShownLines { at: first, lines: [] }, (s, l) => ShownLines {
 			at: s.at + 1,
@@ -315,7 +322,7 @@ fn fileWindow(
 	)
 	let more = if last < count { "\n(lines \(last + 1) to \(count) not shown)" } else { "" }
 	ToolResult {
-		content: "\(path), lines \(first) to \(last.max(first)) of \(count):\n\(numbered)\(more)",
+		content: "\(path), lines \(first) to \(last) of \(count):\n\(numbered)\(more)",
 		isError: false,
 	}
 }

@@ -67,6 +67,10 @@ type PullPayload = {
 	locked: Option[Bool] = None,
 	--- Its labels (#110), as every delivery and REST read lists them.
 	labels: Option[List[PullLabel]] = None,
+	--- Its description, which a review (#129) gives Claude as material.
+	body: Option[String] = None,
+	--- Its author's association with the repository (#129), which says whose pull requests are reviewed.
+	author_association: Option[String] = None,
 }
 
 --- A label as a pull request lists it.

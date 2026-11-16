@@ -40,6 +40,11 @@ concurrency:
   group: ${{ github.event_name == 'pull_request' && format('deploy-plan-{0}', github.ref) || 'deploy-production' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# tsc, which Bynk runs over the generated Worker and tests, needs more than
+# Node's default heap (about 2 GB on a 16 GB runner) for this project (#129).
+env:
+  NODE_OPTIONS: --max-old-space-size=4096
+
 jobs:
   plan:
     name: Plan (dry run)

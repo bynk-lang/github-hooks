@@ -91,6 +91,25 @@ case "a file is read at the head, numbered, a window at a time" {
 		content: "f.txt has only 3 lines.",
 		isError: true,
 	}
+	// The last line can be read, a window that ends before it starts shows its first line, and a file
+	// without a newline at its end, or with nothing in it, is counted right.
+	expect fileWindow("f.txt", THREE_LINES, Some(3), None).content == "f.txt, lines 3 to 3 of 3:\n    3  line3"
+	expect fileWindow("f.txt", THREE_LINES, Some(2), Some(1)).content == "f.txt, lines 2 to 2 of 3:\n    2  line2\n(lines 3 to 3 not shown)"
+	expect fileWindow(
+		"g.txt",
+		"{\"type\":\"file\",\"encoding\":\"base64\",\"size\":3,\"content\":\"YQpi\"}",
+		None,
+		None
+	).content == "g.txt, lines 1 to 2 of 2:\n    1  a\n    2  b"
+	expect fileWindow(
+		"e.txt",
+		"{\"type\":\"file\",\"encoding\":\"base64\",\"size\":0,\"content\":\"\"}",
+		None,
+		None
+	) == ToolResult {
+		content: "e.txt is empty.",
+		isError: false,
+	}
 	expect fileWindow("src", "[{\"name\":\"a.ts\",\"type\":\"file\",\"size\":1}]", None, None).content == "src is a directory: use list_directory."
 	expect fileWindow(
 		"big.bin",

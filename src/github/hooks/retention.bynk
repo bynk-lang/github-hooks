@@ -94,6 +94,23 @@ service retention from cron {
 		) else match {
 			Err(e) => retentionFailed("reviews", e),
 		}
+		// A review whose consumer stopped after claiming it (the 15-minute limit, an
+		// eviction, a deploy) is left `running`, and one whose retries ran out is
+		// left `queued`: neither will end by itself, so they're ended here.
+		let Ok(stuck) <- Deliveries.run(
+			"""
+			UPDATE reviews SET status = 'failed', finished_at = ?1,
+			  detail = CASE status WHEN 'running' THEN 'the reviewer stopped before it finished' ELSE 'it was never run' END
+			WHERE (status = 'running' AND started_at < ?2) OR (status = 'queued' AND requested_at < ?3)
+			""",
+			[
+				Text(Instant.fromEpochMillis(at).toIso()),
+				Text((Instant.fromEpochMillis(at) - 20.minutes).toIso()),
+				Text((Instant.fromEpochMillis(at) - 1.days).toIso()),
+			]
+		) else match {
+			Err(e) => retentionFailed("stuck reviews", e),
+		}
 		let Ok(reviewClaims) <- Deliveries.run(
 			"DELETE FROM claude_reviews_daily WHERE day < ?1",
 			[Text((Instant.fromEpochMillis(at) - 7.days).toIso().slice(0, 10))]
@@ -129,7 +146,7 @@ service retention from cron {
 				Err(why)
 			},
 		}
-		let removed = progress.changes + expired.changes + acted.changes + settled.changes + calls.changes + claims.changes + reviewed.changes + reviewClaims.changes + lapsed.changes + decided.changes + jobs.pruned
+		let removed = progress.changes + expired.changes + acted.changes + settled.changes + calls.changes + claims.changes + reviewed.changes + reviewClaims.changes + stuck.changes + lapsed.changes + decided.changes + jobs.pruned
 		let true = removed > 0 else { Ok(()) }
 		let more = progress.changes == RETENTION_BATCH
 			|| expired.changes == RETENTION_BATCH
@@ -152,8 +169,8 @@ service retention from cron {
 		} else {
 			""
 		}
-		let reviewsGone = if reviewed.changes + reviewClaims.changes > 0 {
-			", \(reviewed.changes) reviews and \(reviewClaims.changes) days of review claims"
+		let reviewsGone = if reviewed.changes + reviewClaims.changes + stuck.changes > 0 {
+			", \(reviewed.changes) reviews and \(reviewClaims.changes) days of review claims, \(stuck.changes) stuck reviews ended"
 		} else {
 			""
 		}
