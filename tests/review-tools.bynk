@@ -188,3 +188,26 @@ case "review settings: off by default, and guidelines named by path" {
 		"review:\n  enabled: true\n  guidelines: x.md\n  guideline: y.md\n"
 	) == ["review.guideline"]
 }
+
+case "a pattern can't make the matcher backtrack: stars are placed once, and ** is capped" {
+	let long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	expect !wildcardMatch("*a*a*a*a*a*a*a*a*a*a*a*a*b", long)
+	expect wildcardMatch("*a*a*a*a*a*a*a*a*a*a*a*a*", long)
+	expect wildcardMatch("a*b?d*", "axxbcdeee")
+	expect !wildcardMatch("a*b?d*e", "axxbcdeee!")
+	expect wildcardMatch("**", "anything")
+	expect wildcardMatch("ab*ab", "abab")
+	expect !wildcardMatch("ab*ab", "aba")
+	let t = GitTree {
+		truncated: false,
+		tree: [TreeEntry { path: "a/b/c.ts", type: "blob" }],
+	}
+	expect foundFiles(
+		t,
+		"**/**/**/*.ts"
+	) == ToolResult {
+		content: "A pattern may have at most 2 ** parts.",
+		isError: true,
+	}
+	expect foundFiles(t, "**/b/**/*.ts").content == "a/b/c.ts"
+}

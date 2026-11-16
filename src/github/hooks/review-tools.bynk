@@ -402,6 +402,12 @@ fn findFiles(p: ReviewPlace, pattern: String) -> Effect[ToolResult] given AppAut
 }
 
 fn foundFiles(t: GitTree, pattern: String) -> ToolResult {
+	let true = pattern.split("/").filter((p) => p == "**").length() <= MAX_DOUBLE_STARS else {
+		ToolResult {
+			content: "A pattern may have at most \(MAX_DOUBLE_STARS) ** parts.",
+			isError: true,
+		}
+	}
 	let found = t.tree
 		.filter((e) => e.type == "blob" && globMatches(pattern.trim(), e.path))
 		.map((e) => e.path)
@@ -433,6 +439,11 @@ fn foundFiles(t: GitTree, pattern: String) -> ToolResult {
 Whether `path` matches the glob `pattern`: `*` and `?` match within one
 segment, `**` any number of whole segments. A pattern with no `/` is matched
 against the file's name alone, in any directory.
+
+Neither part backtracks without bound: within a segment, the pieces between
+`*`s are each found at their earliest place, in order (`piecesMatch`), which
+is what a `*` allows; and `findFiles` refuses a pattern with more than
+`MAX_DOUBLE_STARS` `**`s, the only part that tries several splits.
 ---
 fn globMatches(pattern: String, path: String) -> Bool {
 	let true = pattern != "" else { false }
@@ -441,9 +452,12 @@ fn globMatches(pattern: String, path: String) -> Bool {
 	} else {
 		let parts = path.split("/")
 		let name = parts.get(parts.length() - 1).getOrElse(path)
-		charsMatch(pattern.chars(), name.chars())
+		wildcardMatch(pattern, name)
 	}
 }
+
+--- The most `**`s a `find_files` pattern may have.
+const MAX_DOUBLE_STARS: Int = 2
 
 fn segmentsMatch(pattern: List[String], path: List[String]) -> Bool {
 	match pattern.first() {
@@ -452,18 +466,57 @@ fn segmentsMatch(pattern: List[String], path: List[String]) -> Bool {
 			|| (path.length() > 0 && segmentsMatch(pattern, path.skip(1))),
 		Some(p) => match path.first() {
 			None => false,
-			Some(s) => charsMatch(p.chars(), s.chars())
-				&& segmentsMatch(pattern.skip(1), path.skip(1)),
+			Some(s) => wildcardMatch(p, s) && segmentsMatch(pattern.skip(1), path.skip(1)),
 		},
 	}
 }
 
-fn charsMatch(pattern: List[String], name: List[String]) -> Bool {
-	match pattern.first() {
-		None => name.length() == 0,
-		Some("*") => charsMatch(pattern.skip(1), name)
-			|| (name.length() > 0 && charsMatch(pattern, name.skip(1))),
-		Some("?") => name.length() > 0 && charsMatch(pattern.skip(1), name.skip(1)),
-		Some(c) => name.first() == Some(c) && charsMatch(pattern.skip(1), name.skip(1)),
+---
+Whether one segment `name` matches `pattern`, whose `*` matches any run of
+characters and `?` any one. The pattern is split at its `*`s: the first piece
+must start the name, the last must end it, and each piece between is found
+at its earliest place after the one before. Taking the earliest place is
+never wrong for `*`, so nothing is tried twice.
+---
+fn wildcardMatch(pattern: String, name: String) -> Bool {
+	let s = name.chars()
+	let pieces = pattern.split("*").map((x) => x.chars())
+	let n = s.length()
+	let Some(head) = pieces.first() else { false }
+	let true = pieces.length() > 1 else { n == head.length() && pieceAt(head, s, 0) }
+	let tail = pieces.get(pieces.length() - 1).getOrElse([])
+	let true = n >= head.length() + tail.length() else { false }
+	let true = pieceAt(head, s, 0) && pieceAt(tail, s, n - tail.length()) else { false }
+	let middle = pieces.skip(1).take(pieces.length() - 2)
+	piecesFit(middle, s, head.length(), n - tail.length())
+}
+
+--- Whether each of `pieces`, in order, is found from `at`, each after the one before, ending by `limit`.
+fn piecesFit(pieces: List[List[String]], s: List[String], at: Int, limit: Int) -> Bool {
+	match pieces.first() {
+		None => true,
+		Some(piece) => match findPiece(piece, s, at, limit) {
+			Some(j) => piecesFit(pieces.skip(1), s, j + piece.length(), limit),
+			None => false,
+		},
 	}
+}
+
+--- Whether `piece` (with `?` for any character) is at `at` in `s`.
+fn pieceAt(piece: List[String], s: List[String], at: Int) -> Bool {
+	piece.length() + at <= s.length() && charsAt(piece, s, at)
+}
+
+fn charsAt(piece: List[String], s: List[String], at: Int) -> Bool {
+	match piece.first() {
+		None => true,
+		Some(c) => (c == "?" || s.get(at) == Some(c)) && charsAt(piece.skip(1), s, at + 1),
+	}
+}
+
+--- The earliest place from `at` where `piece` is, ending by `limit`.
+fn findPiece(piece: List[String], s: List[String], at: Int, limit: Int) -> Option[Int] {
+	if at + piece.length() > limit {
+		None
+	} else if pieceAt(piece, s, at) { Some(at) } else { findPiece(piece, s, at + 1, limit) }
 }

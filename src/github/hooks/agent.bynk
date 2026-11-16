@@ -23,6 +23,13 @@ consumes bynk { Logger, Clock, Secrets }
 const TASK_BUDGET_BETA: String = "task-budgets-2026-03-13"
 
 ---
+The smallest task budget the API accepts. A smaller one is refused with a
+`400`, which would end every conversation on its first request, so it's
+left out instead (`sentBudget`).
+---
+const TASK_BUDGET_MIN: Int = 20000
+
+---
 A tool Claude may call. `schema` is its input's JSON schema, as JSON text
 written in code, never built from input. `strict` asks the API to keep the
 arguments to the schema exactly; the schema must then list every property as
@@ -41,7 +48,9 @@ One conversation a feature asks for. `system` is the feature's instructions;
 in the user turn. `finish` names the tool that ends the conversation, and
 whose input is its answer. `maxTokens` bounds each reply, thinking included;
 `maxTurns` bounds the requests; `taskBudget`, when set, is an advisory token
-budget for the whole conversation, which Claude paces itself to.
+budget for the whole conversation, which Claude paces itself to. It's
+advisory: `maxTurns` times `maxTokens` is what bounds the spend. One below
+`TASK_BUDGET_MIN` isn't sent.
 ---
 type AgentAsk = {
 	feature: String,
@@ -157,6 +166,16 @@ fn converse[I: Codable](
 		)
 		Effect.pure(agentEnded(AgentUnconfigured, 0))
 	}
+	let _ <- match a.taskBudget {
+		Some(n) => if n < TASK_BUDGET_MIN {
+			Logger.warn(
+				"\(a.feature) for \(a.repo): a task budget of \(n) is below the API's minimum of \(TASK_BUDGET_MIN), so none is sent"
+			)
+		} else {
+			Effect.pure(())
+		},
+		None => Effect.pure(()),
+	}
 	let opening = Json.encodePlain(AgentUserText { role: "user", content: a.user })
 	agentTurn(a, apiKey, run, [opening], 0, false)
 }
@@ -263,20 +282,14 @@ fn agentTurn[I: Codable](
 		})
 		agentTurn(a, apiKey, run, messages.concat([assistant, nudge]), made, true)
 	}
+	// A finishing call whose input didn't decode isn't one: it gets an error
+	// result below, like any other call, and Claude can try again.
 	let finishing = calls
-		.filter((c) => c.name == a.finish)
-		.map((c) => c.input)
-		.filter((i) => i.isSome())
+		.filter((c) => c.name == a.finish && c.input.isSome())
 		.first()
+		.andThen((c) => c.input)
 	let None = finishing else match {
-		Some(Some(input)) => Effect.pure(AgentRun {
-			end: Finished,
-			answer: Some(input),
-			turns: made,
-		}),
-		Some(None) => {
-			Effect.pure(agentEnded(Unfinished("the finishing call had no input"), made))
-		},
+		Some(input) => Effect.pure(AgentRun { end: Finished, answer: Some(input), turns: made }),
 	}
 	let none: List[AgentToolResultBlock] = []
 	let results <- calls.foldEff(none, (done, c) => runTool(a, run, done, c))
@@ -351,8 +364,13 @@ fn failedCall(status: Option[Int], why: String) -> CallRecord {
 	}
 }
 
+--- The task budget the request carries: `a.taskBudget`, unless it's below the API's minimum.
+fn sentBudget(a: AgentAsk) -> Option[Int] {
+	a.taskBudget.filter((n) => n >= TASK_BUDGET_MIN)
+}
+
 fn agentBetas(a: AgentAsk) -> String {
-	match a.taskBudget {
+	match sentBudget(a) {
 		Some(_) => "\(FALLBACK_BETA),\(TASK_BUDGET_BETA)",
 		None => FALLBACK_BETA,
 	}
@@ -365,7 +383,7 @@ reads the conversation so far from the cache and pays for its new part.
 ---
 fn agentBody(a: AgentAsk, messages: List[String]) -> String {
 	let tools = joined(a.tools.map((t) => toolJson(t)), ",")
-	let budget = match a.taskBudget {
+	let budget = match sentBudget(a) {
 		Some(n) => ",\"task_budget\":{\"type\":\"tokens\",\"total\":\(n)}",
 		None => "",
 	}
@@ -383,36 +401,43 @@ type JsonScan = {
 	depth: Int,
 	inString: Bool,
 	escaped: Bool,
+	--- Where the string being read began, and the last string read in the top-level object.
+	stringStart: Int,
+	lastString: String,
+	--- Whether the top-level object's `content` key has just been read, so the next value is its.
+	wantValue: Bool,
+	valueStart: Option[Int],
 	end: Option[Int],
 }
 
 ---
-The reply's `content` array, exactly as the response's text has it. The
-first `"content":` in a Messages API response is the top-level one: only
-`id`, `type`, `role` and `model` come before it, and a quote inside any
-string is escaped. From there the array is read to its matching `]`, with
-strings skipped, so a bracket in text or code doesn't end it.
+The reply's `content` array, exactly as the response's text has it: the
+value of the top-level object's `content` key, found at depth 1 whatever
+order the keys come in. Strings are skipped, so a bracket or a key in text
+or code doesn't count, and nothing deeper is taken for the top-level key.
+`None` when there's no such key, or its value isn't an array.
 ---
 fn rawContent(body: String) -> Option[String] {
-	let key = "\"content\":"
-	let Some(k) = body.indexOf(key) else { None }
-	let rest = body.slice(k + key.length(), body.length())
-	let Some(open) = rest.indexOf("[") else { None }
-	let true = rest.slice(0, open).trim() == "" else { None }
-	let tail = rest.slice(open, rest.length())
 	let start = JsonScan {
 		at: 0,
 		depth: 0,
 		inString: false,
 		escaped: false,
+		stringStart: 0,
+		lastString: "",
+		wantValue: false,
+		valueStart: None,
 		end: None,
 	}
-	let scanned = tail.chars().fold(start, (s, c) => scanStep(s, c))
-	scanned.end.map((e) => tail.slice(0, e))
+	let scanned = body.chars().fold(start, (s, c) => scanStep(body, s, c))
+	match scanned.valueStart {
+		Some(first) => scanned.end.map((e) => body.slice(first, e)),
+		None => None,
+	}
 }
 
 --- One character of the scan; `at` counts UTF-16 code units, as `slice` does.
-fn scanStep(s: JsonScan, c: String) -> JsonScan {
+fn scanStep(body: String, s: JsonScan, c: String) -> JsonScan {
 	let next = s.at + c.length()
 	if s.end.isSome() {
 		s
@@ -430,10 +455,16 @@ fn scanStep(s: JsonScan, c: String) -> JsonScan {
 				escaped: true,
 			}
 		} else if c == "\"" {
+			let finished = if s.depth == 1 {
+				body.slice(s.stringStart + 1, s.at)
+			} else {
+				s.lastString
+			}
 			JsonScan {
 				...s,
 				at: next,
 				inString: false,
+				lastString: finished,
 			}
 		} else {
 			JsonScan {
@@ -442,32 +473,44 @@ fn scanStep(s: JsonScan, c: String) -> JsonScan {
 			}
 		}
 	} else if c == "\"" {
+		// A string where `content`'s value belongs: it isn't an array.
 		JsonScan {
 			...s,
 			at: next,
 			inString: true,
+			stringStart: s.at,
+			wantValue: false,
+		}
+	} else if c == ":" && s.depth == 1 {
+		JsonScan {
+			...s,
+			at: next,
+			wantValue: s.lastString == "content",
 		}
 	} else if c == "[" || c == "{" {
+		let opens = s.depth == 1 && s.wantValue && c == "["
 		JsonScan {
 			...s,
 			at: next,
 			depth: s.depth + 1,
+			wantValue: false,
+			valueStart: if opens { Some(s.at) } else { s.valueStart },
 		}
 	} else if c == "]" || c == "}" {
 		let depth = s.depth - 1
-		if depth == 0 {
-			JsonScan {
-				...s,
-				at: next,
-				depth: depth,
-				end: Some(next),
-			}
-		} else {
-			JsonScan {
-				...s,
-				at: next,
-				depth: depth,
-			}
+		let closes = depth == 1 && c == "]" && s.valueStart.isSome()
+		JsonScan {
+			...s,
+			at: next,
+			depth: depth,
+			end: if closes { Some(next) } else { s.end },
+		}
+	} else if s.depth == 1 && s.wantValue && c.trim() != "" {
+		// Any other value (a number, `null`, `true`) isn't an array either.
+		JsonScan {
+			...s,
+			at: next,
+			wantValue: false,
 		}
 	} else {
 		JsonScan {

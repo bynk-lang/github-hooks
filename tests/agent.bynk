@@ -171,3 +171,33 @@ case "the reply's content is cut from its text: brackets and quotes in strings, 
 	expect rawContent("{\"content\":[{\"type\":\"text\"}") == None
 	expect rawContent("{\"model\":\"x\"}") == None
 }
+
+case "the content array is the top-level key's, whatever order the keys come in" {
+	expect rawContent(
+		"{\"container\":{\"content\":[\"not this\"]},\"text\":\"\\\"content\\\":[\",\"content\":[{\"type\":\"text\",\"text\":\"this\"}],\"stop_reason\":\"end_turn\"}"
+	) == Some("[{\"type\":\"text\",\"text\":\"this\"}]")
+	expect rawContent("{\"content\":null,\"x\":{\"content\":[1]}}") == None
+	expect rawContent("[{\"content\":[1]}]") == None
+}
+
+case "a task budget below the API's minimum isn't sent, and says so" {
+	stub AnthropicHttp.post(_, _, _) returns replying(FINISH_CALL, "tool_use")
+	let r <- converse[DemoInput](
+		AgentAsk {
+			...ask(10),
+			taskBudget: Some(5000),
+		},
+		(c) => Effect.pure(reading(c))
+	)
+	expect r.end == Finished
+	expect AnthropicHttp.post called with beta == Some("server-side-fallback-2026-07-01") && !body.contains("task_budget")
+	expect Logger.warn called with msg == "review for bynk-lang/vscode: a task budget of 5000 is below the API's minimum of 20000, so none is sent"
+}
+
+case "a finishing call whose input doesn't decode gets an error result, and Claude can finish again" {
+	stub AnthropicHttp.post(_, _, _) returns each [replying("[{\"type\":\"tool_use\",\"id\":\"tu_3\",\"name\":\"finish\",\"input\":{\"answer\":7}}]", "tool_use"), replying(FINISH_CALL, "tool_use")]
+	let r <- converse[DemoInput](ask(10), (c) => Effect.pure(reading(c)))
+	expect r.end == Finished
+	expect r.turns == 2
+	expect AnthropicHttp.post called with body.contains("{\"type\":\"tool_result\",\"tool_use_id\":\"tu_3\",\"content\":\"The arguments to finish didn't match its schema.\",\"is_error\":true}")
+}
