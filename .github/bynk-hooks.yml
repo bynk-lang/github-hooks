@@ -37,7 +37,13 @@ weekly_summary:
   enabled: true
   category: Announcements
 
+# Pull request reviews (#129, docs/reviews.md): when a pull request by a
+# member becomes ready for review, Claude Opus 5.5 reviews it with read-only
+# tools, and the App posts the review at once as inline threads, with no
+# approval in Mine. A later review resolves the App's own threads the change
+# has addressed, but never a blocking one. The guidelines are the maintainers'
+# notes for this repository.
 review:
   enabled: true
-  # guidelines: .github/review-guidelines.md   # optional: your own review notes for Claude, read from the default branch, up to 20,000 characters
-  authors: members                           # the default; "all" also reviews outside contributors' pull requests
+  guidelines: .github/review-guidelines.md
+  authors: members
