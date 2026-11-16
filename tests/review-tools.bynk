@@ -189,12 +189,9 @@ case "reviews are claimed against their own caps, per repository and in total" {
 	expect calls == Ok("[{\"n\":0}]")
 }
 
-case "the caps come from their settings, or default to 10 a repository and 40 in total" {
+case "review settings: off by default, and guidelines named by path; the caps default to 10 a repository and 40 in total" {
 	let caps <- reviewCaps()
 	expect caps == ReviewCaps { repo: 10, total: 40 }
-}
-
-case "review settings: off by default, and guidelines named by path" {
 	let on = settingsOf(readSettings(
 		"review:\n  enabled: true\n  guidelines: .github/review-guidelines.md\n"
 	))
