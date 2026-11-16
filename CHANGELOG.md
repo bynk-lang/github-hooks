@@ -6,6 +6,8 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-16
+
 ### Fixed
 
 - The docs no longer say pull request reviews need no new permission (#129).
@@ -908,7 +910,8 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/bynk-lang/github-hooks/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bynk-lang/github-hooks/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bynk-lang/github-hooks/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/bynk-lang/github-hooks/compare/v0.5.0...v0.6.0
