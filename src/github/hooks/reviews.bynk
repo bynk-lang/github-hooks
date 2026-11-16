@@ -1,0 +1,71 @@
+context github.hooks
+
+consumes bynk.cloudflare { SqlValue }
+consumes bynk { Secrets }
+
+// Pull request reviews (#129): Claude Opus 5.5 reviews a pull request each
+// time it becomes ready, in a repository whose `.github/bynk-hooks.yml` turns
+// `review` on, and the App posts the review. Step 1 lays the groundwork: the
+// settings, the `reviews` table, these caps, the tools in `review-tools.bynk`
+// and the conversation in `agent.bynk`. The trigger, the queue and posting
+// arrive in step 2.
+
+--- The daily caps on reviews when `CLAUDE_REVIEW_DAILY_CAP_REPO` and `CLAUDE_REVIEW_DAILY_CAP_TOTAL` aren't set.
+const REVIEW_CAP_REPO: Int = 10
+
+const REVIEW_CAP_TOTAL: Int = 40
+
+--- The day's caps on reviews, per repository and in total, from their settings.
+type ReviewCaps = {
+	repo: Int,
+	total: Int,
+}
+
+fn reviewCaps() -> Effect[ReviewCaps] given Secrets {
+	let repoSet <- Secrets.get("CLAUDE_REVIEW_DAILY_CAP_REPO")
+	let totalSet <- Secrets.get("CLAUDE_REVIEW_DAILY_CAP_TOTAL")
+	Effect.pure(ReviewCaps {
+		repo: capOf(repoSet, REVIEW_CAP_REPO),
+		total: capOf(totalSet, REVIEW_CAP_TOTAL),
+	})
+}
+
+---
+Claims one review for `repo` on `day`, if neither the repository's cap nor
+the day's total across repositories is reached: one statement, so two
+reviews at once can't both take the last one. `true` when it was claimed. A
+review makes many requests to Claude, so reviews have caps of their own
+rather than spending the per-call caps the other features share.
+---
+fn claimReview(
+	repo: String,
+	day: String,
+	caps: ReviewCaps
+) -> Effect[Result[Bool, String]] given Deliveries {
+	let claimed <- Deliveries.first(
+		"""
+		INSERT INTO claude_reviews_daily (repo, day, reviews)
+		SELECT ?1, ?2, 1
+		WHERE ?3 > 0
+		  AND (SELECT coalesce(sum(reviews), 0) FROM claude_reviews_daily WHERE day = ?2) < ?4
+		ON CONFLICT (repo, day) DO UPDATE SET reviews = claude_reviews_daily.reviews + 1
+		WHERE claude_reviews_daily.reviews < ?3
+		RETURNING reviews
+		""",
+		[Text(repo), Text(day), Integer(caps.repo), Integer(caps.total)]
+	)
+	match claimed {
+		Ok(Some(_)) => Effect.pure(Ok(true)),
+		Ok(None) => Effect.pure(Ok(false)),
+		Err(e) => Effect.pure(Err(sqlError(e))),
+	}
+}
+
+--- Gives back a review's claim when it never reached Claude, so it doesn't count against the caps.
+fn releaseReview(repo: String, day: String) -> Effect[()] given Deliveries {
+	let _ <- Deliveries.run(
+		"UPDATE claude_reviews_daily SET reviews = reviews - 1 WHERE repo = ?1 AND day = ?2 AND reviews > 0",
+		[Text(repo), Text(day)]
+	)
+	Effect.pure(())
+}

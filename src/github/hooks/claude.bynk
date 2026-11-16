@@ -482,20 +482,36 @@ fn recordClaudeCall(
 	at: String,
 	r: CallRecord
 ) -> Effect[Option[Int]] given Deliveries, Logger {
+	recordCall(a.feature, a.repo, modelId(a.model), None, at, r)
+}
+
+---
+Records one request to Claude in `claude_calls`, for `feature` in `repo`, and
+for a review's request, its `review`. Answers the row's id; a failure to
+record is logged, not fatal.
+---
+fn recordCall(
+	feature: String,
+	repo: String,
+	model: String,
+	review: Option[Int],
+	at: String,
+	r: CallRecord
+) -> Effect[Option[Int]] given Deliveries, Logger {
 	let u = r.usage
 	let row <- Deliveries.first(
 		"""
 		INSERT INTO claude_calls (at, repo, feature, model, served_model, outcome, status, stop_reason,
 		                          refusal_category, detail, input_tokens, output_tokens,
-		                          cache_creation_input_tokens, cache_read_input_tokens, fell_back)
-		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+		                          cache_creation_input_tokens, cache_read_input_tokens, fell_back, review)
+		VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
 		RETURNING id
 		""",
 		[
 			Text(at),
-			Text(a.repo),
-			Text(a.feature),
-			Text(modelId(a.model)),
+			Text(repo),
+			Text(feature),
+			Text(model),
 			text(r.served),
 			Text(r.outcome),
 			integer(r.status),
@@ -507,6 +523,7 @@ fn recordClaudeCall(
 			integer(u.andThen((x) => x.cacheWrite)),
 			integer(u.andThen((x) => x.cacheRead)),
 			integer(u.map((x) => if x.fellBack { 1 } else { 0 })),
+			integer(review),
 		]
 	)
 	match row {
@@ -517,7 +534,7 @@ fn recordClaudeCall(
 		Ok(None) => Effect.pure(None),
 		Err(e) => {
 			let _ <- Logger.error(
-				"could not record a Claude call for \(a.feature) in \(a.repo): \(sqlError(e))"
+				"could not record a Claude call for \(feature) in \(repo): \(sqlError(e))"
 			)
 			Effect.pure(None)
 		},

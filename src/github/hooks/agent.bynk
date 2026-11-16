@@ -1,0 +1,521 @@
+context github.hooks
+
+consumes bynk { Logger, Clock, Secrets }
+
+// A conversation with Claude that uses tools (#129, step 1): the Claude
+// capability's single call (`askClaude`) grown into a loop, for the review
+// agent. Claude Opus 5.5 is given the feature's instructions, the material,
+// and tools that the Worker runs; each turn's tool calls are run in order,
+// their results sent back, and the loop goes on until Claude calls the
+// feature's finishing tool, or stops, or runs out of turns.
+//
+// Claude's replies are sent back exactly as they came: each assistant turn is
+// the reply's own `content` array, cut from the response's text, never
+// decoded and re-encoded. Opus 5.5 checks that an earlier turn is unchanged
+// before it reads that turn's thinking again, and a re-encoded turn could
+// differ from what it wrote.
+//
+// A conversation isn't claimed against the per-call caps: the feature claims
+// its own (a review claims one review). Each request is recorded in
+// `claude_calls`, with the feature's review when it has one.
+
+--- Opus 5.5's advisory budget across a conversation needs this beta.
+const TASK_BUDGET_BETA: String = "task-budgets-2026-03-13"
+
+---
+The smallest task budget the API accepts. A smaller one is refused with a
+`400`, which would end every conversation on its first request, so it's
+left out instead (`sentBudget`).
+---
+const TASK_BUDGET_MIN: Int = 20000
+
+---
+A tool Claude may call. `schema` is its input's JSON schema, as JSON text
+written in code, never built from input. `strict` asks the API to keep the
+arguments to the schema exactly; the schema must then list every property as
+`required` and set `additionalProperties: false`.
+---
+type AgentTool = {
+	name: String,
+	description: String,
+	schema: String,
+	strict: Bool = false,
+}
+
+---
+One conversation a feature asks for. `system` is the feature's instructions;
+`user` is the material to start from, which may be anyone's text, so it goes
+in the user turn. `finish` names the tool that ends the conversation, and
+whose input is its answer. `maxTokens` bounds each reply, thinking included;
+`maxTurns` bounds the requests; `taskBudget`, when set, is an advisory token
+budget for the whole conversation, which Claude paces itself to. It's
+advisory: `maxTurns` times `maxTokens` is what bounds the spend. One below
+`TASK_BUDGET_MIN` isn't sent.
+---
+type AgentAsk = {
+	feature: String,
+	repo: String,
+	review: Option[Int] = None,
+	effort: ClaudeEffort,
+	maxTokens: Int,
+	maxTurns: Int,
+	taskBudget: Option[Int] = None,
+	system: String,
+	user: String,
+	tools: List[AgentTool],
+	finish: String,
+}
+
+---
+A tool call Claude made: `input` is `None` when its arguments didn't decode
+as the feature's input type.
+---
+type ToolCall[I] = {
+	id: String,
+	name: String,
+	input: Option[I],
+}
+
+--- What running a tool gave back: its text, and whether it's an error.
+type ToolResult = {
+	content: String,
+	isError: Bool,
+}
+
+---
+How a conversation ended: `Finished`, with the finishing tool's input beside
+it in `AgentRun`, or `Unfinished` with why (Claude stopped twice without
+finishing, or ran out of turns), a refusal, a reply cut off at its
+`max_tokens`, Anthropic unreachable or answering an error, or no
+`ANTHROPIC_API_KEY`.
+---
+type AgentEnd =
+	| Finished
+	| Unfinished(reason: String)
+	| AgentRefused(category: Option[String])
+	| AgentTruncated
+	| AgentUnavailable(reason: String)
+	| AgentUnconfigured
+
+--- A conversation's end, the finishing tool's input when it finished, and how many requests it made.
+type AgentRun[I] = {
+	end: AgentEnd,
+	answer: Option[I],
+	turns: Int,
+}
+
+--- The parts of a reply the loop reads before it decodes any tool's input.
+type AgentReply = {
+	model: String,
+	stop_reason: Option[String],
+	stop_details: Option[StopDetails],
+	content: List[AgentBlockHead],
+	usage: ReplyUsage,
+}
+
+type AgentBlockHead = {
+	type: String,
+	id: Option[String],
+	name: Option[String],
+}
+
+--- A reply's blocks with each tool call's input decoded as the feature's type.
+type AgentBlocks[I] = {
+	content: List[AgentBlock[I]],
+}
+
+type AgentBlock[I] = {
+	type: String,
+	id: Option[String],
+	name: Option[String],
+	input: Option[I],
+}
+
+type AgentUserText = {
+	role: String,
+	content: String,
+}
+
+type AgentToolResults = {
+	role: String,
+	content: List[AgentToolResultBlock],
+}
+
+type AgentToolResultBlock = {
+	type: String,
+	tool_use_id: String,
+	content: String,
+	is_error: Bool,
+}
+
+--- The model every conversation asks.
+const AGENT_MODEL: String = "claude-opus-5-5"
+
+---
+Has a conversation with Claude for `a.feature` in `a.repo`, running each tool
+call with `run`. Without `ANTHROPIC_API_KEY`, nothing is sent.
+---
+fn converse[I: Codable](
+	a: AgentAsk,
+	run: ToolCall[I] -> Effect[ToolResult]
+) -> Effect[AgentRun[I]] given Deliveries, Logger, Clock, Secrets, AnthropicHttp {
+	let keySet <- Secrets.get("ANTHROPIC_API_KEY")
+	let Some(apiKey) = present(keySet) else {
+		let _ <- Logger.warn(
+			"\(a.feature) for \(a.repo) asked Claude, but ANTHROPIC_API_KEY is not set"
+		)
+		Effect.pure(agentEnded(AgentUnconfigured, 0))
+	}
+	let _ <- match a.taskBudget {
+		Some(n) => if n < TASK_BUDGET_MIN {
+			Logger.warn(
+				"\(a.feature) for \(a.repo): a task budget of \(n) is below the API's minimum of \(TASK_BUDGET_MIN), so none is sent"
+			)
+		} else {
+			Effect.pure(())
+		},
+		None => Effect.pure(()),
+	}
+	let opening = Json.encodePlain(AgentUserText { role: "user", content: a.user })
+	agentTurn(a, apiKey, run, [opening], 0, false)
+}
+
+---
+One request of the conversation `messages` (each a message's JSON text),
+then the next, until it ends. `reminded` is whether Claude has already been
+told once to finish with `a.finish`.
+---
+fn agentTurn[I: Codable](
+	a: AgentAsk,
+	apiKey: String,
+	run: ToolCall[I] -> Effect[ToolResult],
+	messages: List[String],
+	turns: Int,
+	reminded: Bool
+) -> Effect[AgentRun[I]] given Deliveries, Logger, Clock, Secrets, AnthropicHttp {
+	let true = turns < a.maxTurns else {
+		Effect.pure(agentEnded(Unfinished("it used all \(a.maxTurns) turns"), turns))
+	}
+	let now <- Clock.now()
+	let at = now.toIso()
+	let made = turns + 1
+	let sent <- AnthropicHttp.post(apiKey, agentBody(a, messages), Some(agentBetas(a)))
+	let Ok(res) = sent else match {
+		Err(why) => {
+			let _ <- Logger.warn("\(a.feature) for \(a.repo): \(why)")
+			let _ <- recordCall(a.feature, a.repo, AGENT_MODEL, a.review, at, failedCall(None, why))
+			Effect.pure(agentEnded(AgentUnavailable(why), made))
+		},
+	}
+	let true = res.status == 200 else {
+		let reason = match Json.decode[AnthropicError](res.body) {
+			Ok(e) => "\(e.error.type): \(e.error.message)",
+			Err(_) => "no error body",
+		}
+		let why = "Anthropic answered \(res.status) (\(reason))"
+		let _ <- Logger.warn("\(a.feature) for \(a.repo): \(why)")
+		let _ <- recordCall(
+			a.feature,
+			a.repo,
+			AGENT_MODEL,
+			a.review,
+			at,
+			failedCall(Some(res.status), why)
+		)
+		Effect.pure(agentEnded(AgentUnavailable(why), made))
+	}
+	let Ok(reply) = Json.decode[AgentReply](res.body) else match {
+		Err(e) => {
+			let why = "the reply did not decode: \(jsonError(e))"
+			let _ <- Logger.error("\(a.feature) for \(a.repo): \(why)")
+			let _ <- recordCall(
+				a.feature,
+				a.repo,
+				AGENT_MODEL,
+				a.review,
+				at,
+				failedCall(Some(200), why)
+			)
+			Effect.pure(agentEnded(AgentUnavailable(why), made))
+		},
+	}
+	let category = reply.stop_details.andThen((d) => d.category)
+	let outcome = match reply.stop_reason {
+		Some("refusal") => "refused",
+		Some("max_tokens") => "truncated",
+		Some("model_context_window_exceeded") => "truncated",
+		_ => "answered",
+	}
+	let _ <- recordCall(a.feature, a.repo, AGENT_MODEL, a.review, at, CallRecord {
+		outcome: outcome,
+		served: Some(reply.model),
+		status: Some(res.status),
+		stopReason: reply.stop_reason,
+		category: category,
+		detail: None,
+		usage: Some(tokensOf(reply.usage)),
+	})
+	let true = outcome != "refused" else {
+		let _ <- Logger.warn(
+			"Claude declined \(a.feature) for \(a.repo) (\(category.getOrElse("no category")))"
+		)
+		Effect.pure(agentEnded(AgentRefused(category), made))
+	}
+	let true = outcome != "truncated" else {
+		let _ <- Logger.warn("Claude's reply for \(a.feature) in \(a.repo) was cut off")
+		Effect.pure(agentEnded(AgentTruncated, made))
+	}
+	let Some(content) = rawContent(res.body) else {
+		let why = "the reply's content could not be read"
+		let _ <- Logger.error("\(a.feature) for \(a.repo): \(why)")
+		Effect.pure(agentEnded(AgentUnavailable(why), made))
+	}
+	let assistant = "{\"role\":\"assistant\",\"content\":\(content)}"
+	let calls: List[ToolCall[I]] = toolCalls(res.body, reply)
+	let true = calls.length() > 0 else {
+		let true = !reminded else {
+			Effect.pure(agentEnded(Unfinished("Claude stopped without calling \(a.finish)"), made))
+		}
+		let nudge = Json.encodePlain(AgentUserText {
+			role: "user",
+			content: "Finish by calling the \(a.finish) tool.",
+		})
+		agentTurn(a, apiKey, run, messages.concat([assistant, nudge]), made, true)
+	}
+	// A finishing call whose input didn't decode isn't one: it gets an error
+	// result below, like any other call, and Claude can try again.
+	let finishing = calls
+		.filter((c) => c.name == a.finish && c.input.isSome())
+		.first()
+		.andThen((c) => c.input)
+	let None = finishing else match {
+		Some(input) => Effect.pure(AgentRun { end: Finished, answer: Some(input), turns: made }),
+	}
+	let none: List[AgentToolResultBlock] = []
+	let results <- calls.foldEff(none, (done, c) => runTool(a, run, done, c))
+	let answer = Json.encodePlain(AgentToolResults { role: "user", content: results })
+	agentTurn(a, apiKey, run, messages.concat([assistant, answer]), made, reminded)
+}
+
+--- A run that ended without a finishing input.
+fn agentEnded[I: Codable](end: AgentEnd, turns: Int) -> AgentRun[I] {
+	let none: Option[I] = None
+	AgentRun {
+		end: end,
+		answer: none,
+		turns: turns,
+	}
+}
+
+--- Runs one tool call, adding its result to `done`. Input that didn't decode is an error result.
+fn runTool[I: Codable](
+	a: AgentAsk,
+	run: ToolCall[I] -> Effect[ToolResult],
+	done: List[AgentToolResultBlock],
+	c: ToolCall[I]
+) -> Effect[List[AgentToolResultBlock]] {
+	let result <- match c.input {
+		Some(_) => run(c),
+		None => Effect.pure(ToolResult {
+			content: "The arguments to \(c.name) didn't match its schema.",
+			isError: true,
+		}),
+	}
+	Effect.pure(done.append(AgentToolResultBlock {
+		type: "tool_result",
+		tool_use_id: c.id,
+		content: result.content,
+		is_error: result.isError,
+	}))
+}
+
+---
+The reply's tool calls, in order, with each one's input decoded as `I`. If
+any input doesn't decode, every call is kept with no input, so each gets an
+error result rather than the reply failing.
+---
+fn toolCalls[I: Codable](body: String, reply: AgentReply) -> List[ToolCall[I]] {
+	match Json.decode[AgentBlocks[I]](body) {
+		Ok(b) => b.content.filter((x) => x.type == "tool_use").map((x) => ToolCall {
+			id: x.id.getOrElse(""),
+			name: x.name.getOrElse(""),
+			input: x.input,
+		}),
+		Err(_) => reply.content.filter((x) => x.type == "tool_use").map((x) => {
+			let none: Option[I] = None
+			ToolCall {
+				id: x.id.getOrElse(""),
+				name: x.name.getOrElse(""),
+				input: none,
+			}
+		}),
+	}
+}
+
+fn failedCall(status: Option[Int], why: String) -> CallRecord {
+	CallRecord {
+		outcome: "failed",
+		served: None,
+		status: status,
+		stopReason: None,
+		category: None,
+		detail: Some(why),
+		usage: None,
+	}
+}
+
+--- The task budget the request carries: `a.taskBudget`, unless it's below the API's minimum.
+fn sentBudget(a: AgentAsk) -> Option[Int] {
+	a.taskBudget.filter((n) => n >= TASK_BUDGET_MIN)
+}
+
+fn agentBetas(a: AgentAsk) -> String {
+	match sentBudget(a) {
+		Some(_) => "\(FALLBACK_BETA),\(TASK_BUDGET_BETA)",
+		None => FALLBACK_BETA,
+	}
+}
+
+---
+A conversation's request body. The system prompt and the tools are the
+stable prefix, and the request asks for automatic caching too, so each turn
+reads the conversation so far from the cache and pays for its new part.
+---
+fn agentBody(a: AgentAsk, messages: List[String]) -> String {
+	let tools = joined(a.tools.map((t) => toolJson(t)), ",")
+	let budget = match sentBudget(a) {
+		Some(n) => ",\"task_budget\":{\"type\":\"tokens\",\"total\":\(n)}",
+		None => "",
+	}
+	"{\"model\":\(Json.encodePlain(AGENT_MODEL)),\"max_tokens\":\(a.maxTokens),\"cache_control\":{\"type\":\"ephemeral\"},\"system\":[{\"type\":\"text\",\"text\":\(Json.encodePlain(a.system)),\"cache_control\":{\"type\":\"ephemeral\"}}],\"tools\":[\(tools)],\"messages\":[\(joined(messages, ","))],\"output_config\":{\"effort\":\(Json.encodePlain(effortName(a.effort)))\(budget)},\"fallbacks\":\"default\"}"
+}
+
+fn toolJson(t: AgentTool) -> String {
+	let strict = if t.strict { ",\"strict\":true" } else { "" }
+	"{\"name\":\(Json.encodePlain(t.name)),\"description\":\(Json.encodePlain(t.description)),\"input_schema\":\(t.schema)\(strict)}"
+}
+
+--- Where a scan of JSON text has got to.
+type JsonScan = {
+	at: Int,
+	depth: Int,
+	inString: Bool,
+	escaped: Bool,
+	--- Where the string being read began, and the last string read in the top-level object.
+	stringStart: Int,
+	lastString: String,
+	--- Whether the top-level object's `content` key has just been read, so the next value is its.
+	wantValue: Bool,
+	valueStart: Option[Int],
+	end: Option[Int],
+}
+
+---
+The reply's `content` array, exactly as the response's text has it: the
+value of the top-level object's `content` key, found at depth 1 whatever
+order the keys come in. Strings are skipped, so a bracket or a key in text
+or code doesn't count, and nothing deeper is taken for the top-level key.
+`None` when there's no such key, or its value isn't an array.
+---
+fn rawContent(body: String) -> Option[String] {
+	let start = JsonScan {
+		at: 0,
+		depth: 0,
+		inString: false,
+		escaped: false,
+		stringStart: 0,
+		lastString: "",
+		wantValue: false,
+		valueStart: None,
+		end: None,
+	}
+	let scanned = body.chars().fold(start, (s, c) => scanStep(body, s, c))
+	match scanned.valueStart {
+		Some(first) => scanned.end.map((e) => body.slice(first, e)),
+		None => None,
+	}
+}
+
+--- One character of the scan; `at` counts UTF-16 code units, as `slice` does.
+fn scanStep(body: String, s: JsonScan, c: String) -> JsonScan {
+	let next = s.at + c.length()
+	if s.end.isSome() {
+		s
+	} else if s.inString {
+		if s.escaped {
+			JsonScan {
+				...s,
+				at: next,
+				escaped: false,
+			}
+		} else if c == "\\" {
+			JsonScan {
+				...s,
+				at: next,
+				escaped: true,
+			}
+		} else if c == "\"" {
+			let finished = if s.depth == 1 {
+				body.slice(s.stringStart + 1, s.at)
+			} else {
+				s.lastString
+			}
+			JsonScan {
+				...s,
+				at: next,
+				inString: false,
+				lastString: finished,
+			}
+		} else {
+			JsonScan {
+				...s,
+				at: next,
+			}
+		}
+	} else if c == "\"" {
+		// A string where `content`'s value belongs: it isn't an array.
+		JsonScan {
+			...s,
+			at: next,
+			inString: true,
+			stringStart: s.at,
+			wantValue: false,
+		}
+	} else if c == ":" && s.depth == 1 {
+		JsonScan {
+			...s,
+			at: next,
+			wantValue: s.lastString == "content",
+		}
+	} else if c == "[" || c == "{" {
+		let opens = s.depth == 1 && s.wantValue && c == "["
+		JsonScan {
+			...s,
+			at: next,
+			depth: s.depth + 1,
+			wantValue: false,
+			valueStart: if opens { Some(s.at) } else { s.valueStart },
+		}
+	} else if c == "]" || c == "}" {
+		let depth = s.depth - 1
+		let closes = depth == 1 && c == "]" && s.valueStart.isSome()
+		JsonScan {
+			...s,
+			at: next,
+			depth: depth,
+			end: if closes { Some(next) } else { s.end },
+		}
+	} else if s.depth == 1 && s.wantValue && c.trim() != "" {
+		// Any other value (a number, `null`, `true`) isn't an array either.
+		JsonScan {
+			...s,
+			at: next,
+			wantValue: false,
+		}
+	} else {
+		JsonScan {
+			...s,
+			at: next,
+		}
+	}
+}
