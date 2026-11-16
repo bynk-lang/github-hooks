@@ -6,6 +6,55 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Pull request reviews (#129): when a pull request becomes ready
+  (`ready_for_review`, or opened not as a draft), in a repository whose
+  `.github/bynk-hooks.yml` turns `review` on, Claude Opus 5.5 reviews it,
+  and the App posts the review at once, as a comment
+  ([reviews.md](docs/reviews.md)). It never approves, requests changes or
+  blocks a merge.
+  - **An agent with read-only tools** (#130): Opus 5.5 lists the changed
+    files, reads numbered diffs, reads any file at the head, lists
+    directories and finds files by glob, through tools the Worker runs
+    against GitHub as the installation. It finishes with `submit_review`.
+    Its turns are sent back exactly as they came, as preserved thinking
+    needs.
+  - **Queued, not in the webhook** (#131): the delivery records the review
+    and queues it on `github-hooks-reviews`. The consumer claims it once,
+    skips a pull request that's closed, a draft again or a bot's, and puts
+    a short note on one past 100 files or 5,000 lines. Claude has 7 minutes,
+    then shorter replies, and no request after 9, inside the queue's 15.
+  - **Posting:** findings on lines the diff shows go inline, with their
+    severity and any suggestion; the rest go in the review's body. If the
+    head moves meanwhile, the review is still posted, saying so.
+  - **Made safe:** nobody approves a review first, so outside code its text
+    mentions no one, has no HTML or images, and links nothing.
+  - **The follow-up** (#132): a later review shows Claude the App's own open,
+    unanswered threads, and follows up those the change has addressed, on
+    files changed since. A blocking thread is answered and left for a
+    maintainer; the App never resolves one.
+  - **Settings:** `review.enabled`, `review.guidelines` (the repository's
+    own review notes) and `review.authors` (`members` by default, or `all`).
+  - **Caps of its own:** `CLAUDE_REVIEW_DAILY_CAP_REPO` (10) and
+    `CLAUDE_REVIEW_DAILY_CAP_TOTAL` (40) reviews a day, apart from the
+    per-call caps. Each request is recorded in `claude_calls` with its
+    review.
+  - Migration `0030`: the `reviews` table, the daily review claims, and
+    `claude_calls.review`. Retention prunes them, and ends a review left
+    `running` or `queued` too long.
+
+### Changed
+
+- **The deploy's `CLOUDFLARE_API_TOKEN` needs Queues edit,** for
+  `bynk deploy` to create the review queue
+  ([deploy.md](docs/deploy.md#the-review-queue)).
+- The workflows give Node a 4 GB heap: `tsc` needs more than its default for
+  this project ([deploy.md](docs/deploy.md#nodes-heap)). Bynk's generated
+  test runner stops type-checking at 500 cases in a suite
+  (bynk-lang/bynk#3639), so this suite stays at 499.
+- `bynk.toml` allows the experimental `bynk.cloudflare.Queue`.
+
 ## [0.7.0] - 2026-11-15
 
 ### Added

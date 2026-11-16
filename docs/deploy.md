@@ -37,7 +37,7 @@ Set these under *Settings → Environments → production → Environment secret
 
 | Name | Needed |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | always: a token that can edit the account's Workers, D1 and KV |
+| `CLOUDFLARE_API_TOKEN` | always: a token that can edit the account's Workers, D1, KV and Queues ([below](#the-review-queue)) |
 | `CLOUDFLARE_ACCOUNT_ID` | always |
 | `APP_WEBHOOK_SECRET` | the Worker's: see [github-app.md](github-app.md) step 2 |
 | `API_TOKEN_SECRET` | the Worker's: signs [read API](read-api.md) tokens |
@@ -51,6 +51,8 @@ Set these under *Settings → Environments → production → Environment secret
 | `ANTHROPIC_API_KEY` | optional: the Claude API key for #69's features. Without it no feature calls Claude. Give the key a spend limit in the Anthropic Console too |
 | `CLAUDE_DAILY_CAP_REPO` | optional: Claude calls a repository may make in a UTC day (default 50; 0 stops them) |
 | `CLAUDE_DAILY_CAP_TOTAL` | optional: Claude calls across every repository in a UTC day (default 200) |
+| `CLAUDE_REVIEW_DAILY_CAP_REPO` | optional: pull request [reviews](reviews.md) a repository may have in a UTC day (default 10; 0 stops them) |
+| `CLAUDE_REVIEW_DAILY_CAP_TOTAL` | optional: reviews across every repository in a UTC day (default 40) |
 
 Enter each value exactly as it is in `.secrets.env`, on one line, without
 quotes, and delete `.secrets.env` once they're in. Each value becomes one line
@@ -75,6 +77,39 @@ about any of the Worker's names that are.
 *overwrite secrets*. That re-sets every name that has an Actions secret, from
 the environment. Rotating `API_TOKEN_SECRET` or `MAINTAINER_TOKEN_SECRET`
 invalidates every token or session signed with the old value.
+
+## The review queue
+
+[Pull request reviews](reviews.md) wait on a Cloudflare Queue,
+`github-hooks-reviews`, between the webhook and the Worker's consumer.
+`bynk deploy` creates it, before the Worker is pushed, if the account doesn't
+have it, and generates the Worker's producer and consumer bindings, so it
+needs no step by hand. For that, `CLOUDFLARE_API_TOKEN` must be able to edit
+**Queues** as well as Workers, D1 and KV. Without it, the first deploy that
+needs the queue fails before anything is pushed.
+
+A message the consumer can't finish is retried, three times by default, then
+dropped; a review whose message is dropped is ended as `failed` by retention.
+`bynk deploy` sets no dead-letter queue (Bynk leaves that policy to
+Cloudflare); add one in Cloudflare's dashboard if dropped messages should be
+kept, and check after the next deploy that it's still there.
+
+## Node's heap
+
+`tsc`, which Bynk runs over the generated Worker and tests, needs more than
+Node's default heap for this project: about 2.2 GB, where the default on a
+16 GB runner is about 2 GB. So `ci.yml`, `smoke.yml` and `deploy.yml` set
+`NODE_OPTIONS=--max-old-space-size=4096`. Do the same for local checks:
+
+```sh
+export NODE_OPTIONS=--max-old-space-size=4096
+```
+
+The org's reusable canary workflow can't take it from here
+(`bynk-canary.yml` says so), so a canary run may fail on the heap rather
+than on the release. Separately, Bynk's generated test runner stops
+type-checking at 500 cases in one suite (bynk-lang/bynk#3639): this
+project's suite is at 499 until a fix, so new tests go in existing cases.
 
 ## The lock file
 

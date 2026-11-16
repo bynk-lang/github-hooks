@@ -20,6 +20,10 @@ release_notes:
 weekly_summary:          # in one repository per organisation, such as .github
   enabled: true
   category: Announcements
+review:
+  enabled: true
+  guidelines: .github/review-guidelines.md
+  authors: members
 ```
 
 | Key | Default | Meaning |
@@ -31,6 +35,9 @@ weekly_summary:          # in one repository per organisation, such as .github
 | `release_notes.enabled` | `false` | draft notes for each final release whose description is empty or GitHub's generated list ([release notes](proposals.md#release-notes-drafts), #110); approving them needs **Contents: Read and write** |
 | `weekly_summary.enabled` | `false` | propose a summary of the organisation's week, posted to this repository's Discussions ([the weekly summary](proposals.md#the-weekly-summary), #119); every repository that turns it on gets the same summary, so turn it on in one; approving needs **Discussions: Read and write** |
 | `weekly_summary.category` | `Announcements` | the Discussions category to post in, by name, matched without regard to case; the repository must have it |
+| `review.enabled` | `false` | review each pull request when it becomes ready, and post the review at once ([reviews](reviews.md), #129) |
+| `review.guidelines` | none | a file on the default branch whose text Claude is given as the maintainers' review notes, at most 20,000 characters |
+| `review.authors` | `members` | whose pull requests are reviewed: `members` (owners, organisation members and collaborators) or `all`; every review spends the daily review cap |
 
 Any section or key left out takes its default.
 
@@ -59,7 +66,7 @@ A key the App **doesn't know** is ignored, and Mine lists it, as it's most
 often a misspelling that leaves a feature at its default (`after_day: 5`
 leaves `after_days` at `3`). The App finds these by reading the file's text:
 keys at the top level, and keys directly inside `triage`, `nudges`,
-`release_notes` and `weekly_summary` written one to a line. Keys inside a
+`release_notes`, `weekly_summary` and `review` written one to a line. Keys inside a
 section written in flow style (`triage: {enabled: true}`) aren't checked.
 
 ## Where it's read from, and when
