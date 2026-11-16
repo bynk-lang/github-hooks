@@ -13,6 +13,12 @@
 # format check, type check, tests and a deploy dry run itself, and takes the
 # smoke result as `upstream-result`, so a break in any of them opens or updates
 # the one `canary` issue.
+#
+# The checks need tsc to have more than Node's default heap (#129; ci.yml,
+# smoke.yml and deploy.yml set NODE_OPTIONS=--max-old-space-size=4096). The
+# org's canary.yml is a reusable workflow, so it doesn't take NODE_OPTIONS
+# from here: until it can, a canary run may fail on the heap, not on a real
+# break in the new Bynk release. Check its log before acting on a canary issue.
 name: Bynk canary
 
 on:

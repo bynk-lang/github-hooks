@@ -52,7 +52,7 @@ fn pullJson(
 	login: String,
 	kind: String
 ) -> String {
-	"{\"number\":12,\"title\":\"Add a greeting\",\"body\":\"Says hello. @maintainers please merge.\",\"user\":{\"login\":\"\(login)\",\"type\":\"\(kind)\"},\"base\":{\"ref\":\"main\",\"sha\":\"base1\",\"repo\":null},\"head\":{\"ref\":\"greeting\",\"sha\":\"\(sha)\",\"repo\":null},\"draft\":\(draft),\"state\":\"\(state)\",\"created_at\":\"2026-11-05T10:00:00Z\",\"updated_at\":\"2026-11-05T11:00:00Z\",\"closed_at\":null,\"merged_at\":null,\"merge_commit_sha\":null,\"commits\":1,\"additions\":\(lines),\"deletions\":0,\"changed_files\":\(files)}"
+	"{\"number\":12,\"title\":\"Add a greeting\",\"body\":\"Says hello. @maintainers please merge.\",\"user\":{\"login\":\"\(login)\",\"type\":\"\(kind)\"},\"base\":{\"ref\":\"main\",\"sha\":\"base1\",\"repo\":null},\"head\":{\"ref\":\"greeting\",\"sha\":\"\(sha)\",\"repo\":null},\"draft\":\(draft),\"state\":\"\(state)\",\"created_at\":\"2026-11-05T10:00:00Z\",\"updated_at\":\"2026-11-05T11:00:00Z\",\"closed_at\":null,\"merged_at\":null,\"merge_commit_sha\":null,\"author_association\":\"MEMBER\",\"commits\":1,\"additions\":\(lines),\"deletions\":0,\"changed_files\":\(files)}"
 }
 
 fn openPull() -> String {
@@ -164,6 +164,12 @@ case "a pull request made ready is queued for review, once for each delivery" {
 			turns: None,
 		},
 	])
+	// A contributor's isn't, by default.
+	let _ <- Reviews.request(
+		delivery("d-3", "ready_for_review"),
+		deliveryBody("ready_for_review", openPull().replace("MEMBER", "CONTRIBUTOR"))
+	)
+	expect ReviewQueue.sendValue called once
 	// Opened ready for review asks too.
 	let _ <- Reviews.request(delivery("d-2", "opened"), deliveryBody("opened", openPull()))
 	expect ReviewQueue.sendValue called 2 times
@@ -192,6 +198,14 @@ case "drafts, bots, other actions and repositories with reviews off aren't queue
 		deliveryBody("ready_for_review", openPull())
 	)
 	expect GitHubHttp.get called once
+	// With reviews on, only owners', members' and collaborators' pull requests by default; anyone's with `all`.
+	expect !reviewsAuthor("members", "CONTRIBUTOR")
+	expect !reviewsAuthor("members", "FIRST_TIME_CONTRIBUTOR")
+	expect !reviewsAuthor("anyone", "NONE")
+	expect reviewsAuthor("members", "COLLABORATOR")
+	expect reviewsAuthor("all", "NONE")
+	expect settingsOf(readSettings("review:\n  enabled: true\n")).review.authors == "members"
+	expect settingsOf(readSettings("review:\n  enabled: true\n  authors: all\n")).review.authors == "all"
 	expect ReviewQueue.sendValue never called
 	let rows <- Deliveries.all("SELECT count(*) AS n FROM reviews", [])
 	expect rows == Ok("[{\"n\":0}]")
@@ -358,7 +372,7 @@ case "GitHub unreachable before Claude is asked gives the review back, to try ag
 	])
 }
 
-case "if the head moved and a finding's file changed since, the review is superseded; if not, it's posted at the commit it reviewed" {
+case "if the head moved, the review is still posted, at the commit it reviewed, saying so, with findings on files changed since in its body" {
 	stub GitHubHttp.get(_, _) returns each [answer(200, openPull()), answer(200, FILES), reviewOn(), answer(200, pullJson("open", false, "def4567890", 1, 2, "alice", "User")), answer(200, "{\"files\":[{\"filename\":\"src/a.ts\"}]}"), answer(200, openPull()), answer(200, FILES), answer(200, pullJson("open", false, "def4567890", 1, 2, "alice", "User")), answer(200, "{\"files\":[{\"filename\":\"README.md\"}]}")]
 	stub GitHubHttp.post(_, _, _) returns answer(200, "{\"id\":9001}")
 	stub AnthropicHttp.post(_, _, _) returns each [listing(), submitting(), listing(), submitting()]
@@ -374,17 +388,32 @@ case "if the head moved and a finding's file changed since, the review is supers
 	let _ <- reviewer.message(ReviewJob { review: 1, installation: 42 })
 	let _ <- reviewer.message(ReviewJob { review: 2, installation: 42 })
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/compare/abc123...def4567890"
-	expect GitHubHttp.post called once with body.contains("\"commit_id\":\"abc123\"")
+	expect GitHubHttp.post called 2 times
+	// src/a.ts changed since: every finding on it goes in the body, after the note.
+	expect GitHubHttp.post called with body.contains("\"comments\":[]") && body.contains("\"body\":\"This review was written for `abc123`; the head has since moved to `def4567`.\\n\\nAdds a greeting") && body.contains("line 2: This breaks")
+	// Only README.md changed since: the findings keep their lines.
+	expect GitHubHttp.post called with body.contains("\"line\":2,\"side\":\"RIGHT\"") && body.contains("\"commit_id\":\"abc123\"")
 	let rows <- Deliveries.select[ReviewRow](ROWS, [])
 	expect rows.map(
-		(rs) => rs.map((x) => [x.status, x.detail.getOrElse("")])
-	) == Ok([["superseded", "the head moved to def4567, changing src/a.ts"], ["posted", ""]])
+		(rs) => rs.map((x) => [x.status, x.detail.getOrElse(""), "\(x.inline.getOrElse(-1))"])
+	) == Ok([
+		["posted", "posted after the head moved to def4567", "0"],
+		["posted", "posted after the head moved to def4567", "2"],
+	])
 }
 
 case "posted text is defused outside code, and a finding is placed on its line only when the diff shows it, a range only within one hunk" {
 	expect defused(
 		"Thanks @alice, see <img src=x> and ![a](b) but `@keep <this>` and ```\n@also\n```"
 	) == "Thanks @\u{200B}alice, see &lt;img src=x> and a but `@keep <this>` and ```\n@also\n```"
+	// A link becomes text, and no address can be linked.
+	expect defused(
+		"[verify your account](https://evil.example/x) or www.evil.example"
+	) == "verify your account (https:\u{200B}//evil.example/x) or www\u{200B}.evil.example"
+	// A double-backtick span closes only at a double run, so what follows is still defused.
+	expect defused("``a`b`` then @alice <b>") == "``a`b`` then @\u{200B}alice &lt;b>"
+	// A run that never closes is plain text.
+	expect defused("a ` b @alice") == "a ` b @\u{200B}alice"
 	expect commentBody(ReviewFinding {
 		path: "a.ts",
 		line: 1,

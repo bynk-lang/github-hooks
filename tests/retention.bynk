@@ -32,7 +32,18 @@ case "old deliveries and stale workflow-run progress go; the rest stays" {
 	expect Logger.info called once with msg == "retention removed 2 workflow-run progress and job deliveries, 2 deliveries and 0 actions"
 }
 
-case "old actions go, and who was welcomed is kept for good" {
+case "old actions and reviews go, stuck reviews end, and who was welcomed is kept for good" {
+	let _ <- Deliveries.run(
+		"""
+		INSERT INTO reviews (repo, number, head_sha, delivery, requested_at, started_at, status) VALUES
+		  ('bynk-lang/vscode', 1, 'a', 'r-old',     '2026-08-01T00:00:00.000Z', NULL,                       'posted'),
+		  ('bynk-lang/vscode', 2, 'a', 'r-died',    '2026-11-04T23:30:00.000Z', '2026-11-04T23:30:00.000Z', 'running'),
+		  ('bynk-lang/vscode', 3, 'a', 'r-running', '2026-11-04T23:50:00.000Z', '2026-11-04T23:50:00.000Z', 'running'),
+		  ('bynk-lang/vscode', 4, 'a', 'r-lost',    '2026-11-03T00:00:00.000Z', NULL,                       'queued'),
+		  ('bynk-lang/vscode', 5, 'a', 'r-waiting', '2026-11-04T12:00:00.000Z', NULL,                       'queued')
+		""",
+		[]
+	)
 	let _ <- Deliveries.run(
 		"""
 		INSERT INTO actions (delivery, action, status, at) VALUES
@@ -51,7 +62,9 @@ case "old actions go, and who was welcomed is kept for good" {
 	expect actions == Ok("[{\"delivery\":\"d-new\"}]")
 	let welcomed <- Deliveries.all("SELECT login FROM welcomed", [])
 	expect welcomed == Ok("[{\"login\":\"newcomer\"}]")
-	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 1 actions"
+	let reviews <- Deliveries.all("SELECT number, status, detail FROM reviews ORDER BY number", [])
+	expect reviews == Ok("[{\"number\":2,\"status\":\"failed\",\"detail\":\"the reviewer stopped before it finished\"},{\"number\":3,\"status\":\"running\",\"detail\":null},{\"number\":4,\"status\":\"failed\",\"detail\":\"it was never run\"},{\"number\":5,\"status\":\"queued\",\"detail\":null}]")
+	expect Logger.info called once with msg == "retention removed 0 workflow-run progress and job deliveries, 0 deliveries and 1 actions, 1 reviews and 0 days of review claims, 2 stuck reviews ended"
 }
 
 case "a run with nothing to remove logs nothing" {

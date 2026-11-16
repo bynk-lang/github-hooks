@@ -196,6 +196,9 @@ case "the reply's content is the top-level key's array, cut from its text: keys 
 	) == Some("[{\"type\":\"text\",\"text\":\"this\"}]")
 	expect rawContent("{\"content\":null,\"x\":{\"content\":[1]}}") == None
 	expect rawContent("[{\"content\":[1]}]") == None
+	// A later top-level array doesn't extend it, and an object as its value isn't it.
+	expect rawContent("{\"content\":[1],\"other\":[2]}") == Some("[1]")
+	expect rawContent("{\"content\":{\"a\":1},\"b\":[2]}") == None
 }
 
 case "a task budget below the API's minimum isn't sent, and says so" {
@@ -210,6 +213,17 @@ case "a task budget below the API's minimum isn't sent, and says so" {
 	expect r.end == Finished
 	expect AnthropicHttp.post called with beta == Some("server-side-fallback-2026-07-01") && !body.contains("task_budget")
 	expect Logger.warn called with msg == "review for bynk-lang/vscode: a task budget of 5000 is below the API's minimum of 20000, so none is sent"
+	// The minimum itself is sent, without a word.
+	let atMinimum <- converse[DemoInput](
+		AgentAsk {
+			...ask(10),
+			taskBudget: Some(20000),
+		},
+		(c) => Effect.pure(reading(c))
+	)
+	expect atMinimum.end == Finished
+	expect AnthropicHttp.post called with body.contains("\"task_budget\":{\"type\":\"tokens\",\"total\":20000}")
+	expect Logger.warn called once
 }
 
 case "a finishing call whose input doesn't decode gets an error result, and Claude can finish again" {
