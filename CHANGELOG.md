@@ -36,6 +36,8 @@ All notable changes to github-hooks. The format follows
     maintainer; the App never resolves one.
   - **Settings:** `review.enabled`, `review.guidelines` (the repository's
     own review notes) and `review.authors` (`members` by default, or `all`).
+    `members` counts a private organisation member, whom GitHub reports as a
+    contributor, by asking GitHub, as issue response does.
   - **Caps of its own:** `CLAUDE_REVIEW_DAILY_CAP_REPO` (10) and
     `CLAUDE_REVIEW_DAILY_CAP_TOTAL` (40) reviews a day, apart from the
     per-call caps. Each request is recorded in `claude_calls` with its

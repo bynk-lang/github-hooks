@@ -29,7 +29,7 @@ review:
 |---|---|---|
 | `review.enabled` | `false` | review each pull request when it becomes ready |
 | `review.guidelines` | none | a file on the default branch whose text Claude is given as the maintainers' own review notes: house style, what matters here. At most 20,000 characters are read |
-| `review.authors` | `members` | whose pull requests are reviewed: `members`, which is the repository's owners, organisation members and collaborators, or `all`. Anything else counts as `members` |
+| `review.authors` | `members` | whose pull requests are reviewed: `members`, which is the repository's owners, collaborators and organisation members, private members included, or `all`. Anything else counts as `members` |
 
 **`authors` decides who can spend the review cap.** Every review is claimed
 against the daily caps ([below](#its-cost-and-its-caps)). With `all`, anyone
@@ -37,10 +37,19 @@ who can open a pull request, from a fork included, can spend the repository's
 reviews for the day, and part of the total. Keep `members` for a public
 repository unless the cost is welcome.
 
+**Private members count.** GitHub reports an organisation member whose
+membership is private as a `CONTRIBUTOR`, so for an author it doesn't report
+as an owner, member or collaborator, the App asks GitHub whether they belong
+to the organisation, as issue response does
+([github-app.md](github-app.md#4-permissions-and-events)). The answer is kept
+for a day. One GitHub can't give counts as not a member.
+
 The App needs no new permission:
 - **Pull requests: Read and write** posts the review and its threads, and
   resolves threads;
 - **Contents: Read** reads files;
+- **Members: Read-only**, which issue response already uses, says whether an
+  author belongs to the organisation;
 - the `pull_request` event is already subscribed.
 
 The Worker needs `ANTHROPIC_API_KEY`, as Claude's other features do, and the

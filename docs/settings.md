@@ -37,7 +37,7 @@ review:
 | `weekly_summary.category` | `Announcements` | the Discussions category to post in, by name, matched without regard to case; the repository must have it |
 | `review.enabled` | `false` | review each pull request when it becomes ready, and post the review at once ([reviews](reviews.md), #129) |
 | `review.guidelines` | none | a file on the default branch whose text Claude is given as the maintainers' review notes, at most 20,000 characters |
-| `review.authors` | `members` | whose pull requests are reviewed: `members` (owners, organisation members and collaborators) or `all`; every review spends the daily review cap |
+| `review.authors` | `members` | whose pull requests are reviewed: `members` (owners, collaborators and organisation members, private ones included) or `all`; every review spends the daily review cap |
 
 Any section or key left out takes its default.
 

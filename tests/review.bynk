@@ -139,8 +139,8 @@ fn job() -> ReviewJob {
 	}
 }
 
-case "a pull request made ready is queued for review, once for each delivery" {
-	stub GitHubHttp.get(_, _) returns reviewOn()
+case "a pull request made ready is queued for review, once for each delivery, if its author is a member" {
+	stub GitHubHttp.get(_, _) returns each [reviewOn(), answer(404, "{\"message\":\"Not Found\"}"), answer(200, "{\"state\":\"active\"}")]
 	let _ <- Reviews.request(
 		delivery("d-1", "ready_for_review"),
 		deliveryBody("ready_for_review", openPull())
@@ -164,15 +164,27 @@ case "a pull request made ready is queued for review, once for each delivery" {
 			turns: None,
 		},
 	])
-	// A contributor's isn't, by default.
+	// A contributor outside the organisation isn't, by default: GitHub is asked, and says not.
 	let _ <- Reviews.request(
 		delivery("d-3", "ready_for_review"),
 		deliveryBody("ready_for_review", openPull().replace("MEMBER", "CONTRIBUTOR"))
 	)
 	expect ReviewQueue.sendValue called once
+	expect GitHubHttp.get called with url == "https://api.github.com/orgs/bynk-lang/memberships/alice"
+	// One whose membership is private is reported as a CONTRIBUTOR too, and is a member.
+	let _ <- Reviews.request(
+		delivery("d-4", "ready_for_review"),
+		deliveryBody(
+			"ready_for_review",
+			openPull()
+				.replace("MEMBER", "CONTRIBUTOR")
+				.replace("\"login\":\"alice\"", "\"login\":\"bob\"")
+		)
+	)
+	expect ReviewQueue.sendValue called 2 times
 	// Opened ready for review asks too.
 	let _ <- Reviews.request(delivery("d-2", "opened"), deliveryBody("opened", openPull()))
-	expect ReviewQueue.sendValue called 2 times
+	expect ReviewQueue.sendValue called 3 times
 }
 
 case "drafts, bots, other actions and repositories with reviews off aren't queued" {
