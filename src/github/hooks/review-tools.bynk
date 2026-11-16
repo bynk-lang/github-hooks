@@ -1,0 +1,469 @@
+context github.hooks
+
+consumes bynk { Response }
+
+// The review agent's tools (#129, step 1): what Claude may read of a pull
+// request while it reviews it. Each reads one repository at one commit, the
+// head the review started on, through GitHub's REST API as the App's
+// installation, and answers text for Claude to read: numbered lines, so a
+// finding can name the line it's about. None of them writes anything.
+//
+// A path is read as written in the repository, one segment at a time; a
+// segment that's empty, `.` or `..` is refused, so a path can't climb out of
+// the repository's contents into another of GitHub's routes.
+
+--- Where a review reads: the pull request, and the commit it reviews.
+type ReviewPlace = {
+	installation: Int,
+	repo: String,
+	number: Int,
+	head: String,
+}
+
+--- A changed file, as GitHub lists a pull request's files. `patch` is missing for a binary file, or one too large to show.
+type ChangedFile = {
+	filename: String,
+	status: String,
+	additions: Int,
+	deletions: Int,
+	patch: Option[String] = None,
+	previous_filename: Option[String] = None,
+}
+
+--- The most lines one `read_file` answers; Claude asks again for more.
+const READ_LINES: Int = 400
+
+--- The most paths one `find_files` answers.
+const FOUND_PATHS: Int = 200
+
+--- The most changed files read: GitHub's largest page, and more than a review takes.
+const CHANGED_PAGE: Int = 100
+
+--- The tools Claude is offered for a review, before its finishing tool.
+fn readingTools() -> List[AgentTool] {
+	[
+		AgentTool {
+			name: "list_changed_files",
+			description: "List the files this pull request changes: each one's status (A added, M modified, D removed, R renamed, C copied), path, and lines added and removed.",
+			schema: "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}",
+		},
+		AgentTool {
+			name: "read_diff",
+			description: "Read one changed file's diff. Each line shows its line number in the new version (blank for a removed line), then + for an added line, - for a removed one, or a space for context. Findings can only be placed on lines this shows.",
+			schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"The file's path, as list_changed_files gives it.\"}},\"required\":[\"path\"],\"additionalProperties\":false}",
+		},
+		AgentTool {
+			name: "read_file",
+			description: "Read a file at the pull request's head, with line numbers, at most 400 lines at a time. Use from_line and to_line to read further.",
+			schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"from_line\":{\"type\":\"integer\",\"minimum\":1},\"to_line\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"path\"],\"additionalProperties\":false}",
+		},
+		AgentTool {
+			name: "list_directory",
+			description: "List one directory at the pull request's head: its files and subdirectories. Use an empty path for the repository's root.",
+			schema: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}",
+		},
+		AgentTool {
+			name: "find_files",
+			description: "Find files at the pull request's head whose paths match a glob: * and ? match within one directory, ** across any number. A pattern with no / matches a file's name in any directory. At most 200 paths.",
+			schema: "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"}},\"required\":[\"pattern\"],\"additionalProperties\":false}",
+		},
+	]
+}
+
+---
+The pull request's changed files, at most `CHANGED_PAGE` (the review is
+skipped above that). Needs the App's **Pull requests: Read**.
+---
+fn changedFiles(
+	p: ReviewPlace
+) -> Effect[Result[List[ChangedFile], String]] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(p.repo)/pulls/\(p.number)/files?per_page=\(CHANGED_PAGE)"
+	let Ok(res) <- asApp(p.installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(Err(why)),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(Err("GitHub answered \(res.status) for \(p.repo)#\(p.number)'s files: \(refusal(res.status, res.body))"))
+	}
+	match Json.decode[List[ChangedFile]](res.body) {
+		Ok(files) => Effect.pure(Ok(files)),
+		Err(e) => Effect.pure(Err("\(p.repo)#\(p.number)'s files did not decode: \(jsonError(e))")),
+	}
+}
+
+--- `list_changed_files`: one line a file.
+fn changedList(files: List[ChangedFile]) -> String {
+	let true = files.length() > 0 else { "This pull request changes no files." }
+	joined(
+		files.map((f) => {
+			let path = match f.previous_filename {
+				Some(old) => "\(old) -> \(f.filename)",
+				None => f.filename,
+			}
+			"\(statusLetter(f.status)) \(path) (+\(f.additions) -\(f.deletions))"
+		}),
+		"\n"
+	)
+}
+
+fn statusLetter(status: String) -> String {
+	match status {
+		"added" => "A",
+		"removed" => "D",
+		"renamed" => "R",
+		"copied" => "C",
+		"modified" => "M",
+		"changed" => "M",
+		_ => "?",
+	}
+}
+
+--- `read_diff`: the file's patch with each line's number in the new version.
+fn diffOf(files: List[ChangedFile], path: String) -> ToolResult {
+	let Some(f) = files.filter((x) => x.filename == path).first() else {
+		ToolResult {
+			content: "\(path) isn't one of the files this pull request changes.",
+			isError: true,
+		}
+	}
+	let Some(patch) = f.patch else {
+		ToolResult {
+			content: "\(path) has no diff to show: it's binary, or too large for GitHub to show.",
+			isError: false,
+		}
+	}
+	ToolResult {
+		content: numberedPatch(patch),
+		isError: false,
+	}
+}
+
+--- Where numbering a patch has got to: the next line's number in the new version, and the lines so far.
+type PatchNumbering = {
+	next: Int,
+	lines: List[String],
+}
+
+---
+A unified diff with each line's number in the new version: a hunk's header
+(`@@ -a,b +c,d @@`) sets it to `c`; a context or added line takes the next
+number, and a removed line takes none.
+---
+fn numberedPatch(patch: String) -> String {
+	let start = PatchNumbering {
+		next: 0,
+		lines: [],
+	}
+	let done = patch.split("\n").fold(start, (n, line) => numberLine(n, line))
+	joined(done.lines, "\n")
+}
+
+fn numberLine(n: PatchNumbering, line: String) -> PatchNumbering {
+	if line.startsWith("@@") {
+		PatchNumbering {
+			next: hunkStart(line),
+			lines: n.lines.append(line),
+		}
+	} else if line.startsWith("-") {
+		PatchNumbering {
+			...n,
+			lines: n.lines.append("      \(line)"),
+		}
+	} else if line.startsWith("\\") {
+		PatchNumbering {
+			...n,
+			lines: n.lines.append("      \(line)"),
+		}
+	} else {
+		PatchNumbering {
+			next: n.next + 1,
+			lines: n.lines.append("\(padded(n.next)) \(line)"),
+		}
+	}
+}
+
+--- The new version's first line number in a hunk's header, `@@ -a,b +c,d @@`.
+fn hunkStart(header: String) -> Int {
+	match header.findRegex(r"\+(\d+)") {
+		Some(groups) => groups.get(1).andThen((g) => g).andThen((d) => Int.parse(d)).getOrElse(1),
+		None => 1,
+	}
+}
+
+--- A line number, right-aligned in five places.
+fn padded(n: Int) -> String {
+	let s = "\(n)"
+	let pad = if s.length() < 5 { "     ".slice(0, 5 - s.length()) } else { "" }
+	pad.concat(s)
+}
+
+--- A path's segments, each percent-encoded for a URL, or why it can't be read.
+fn pathSegments(path: String) -> Result[String, String] {
+	let trimmed = path.trim()
+	let true = trimmed != "" else { Ok("") }
+	let segments = trimmed.split("/")
+	let true = !segments.any((s) => s == "" || s == "." || s == "..") else {
+		Err("\(path) isn't a path in the repository: no empty, . or .. parts.")
+	}
+	Ok(joined(segments.map((s) => s.percentEncode()), "/"))
+}
+
+--- The contents API's answer for one file.
+type FileContents = {
+	type: String,
+	encoding: Option[String] = None,
+	content: Option[String] = None,
+	size: Int,
+}
+
+--- One entry of a directory, as the contents API lists it.
+type DirEntry = {
+	name: String,
+	type: String,
+	size: Int,
+}
+
+--- `read_file`: the file at the head, numbered, from `fromLine` to `toLine` (at most `READ_LINES`).
+fn readFile(
+	p: ReviewPlace,
+	path: String,
+	fromLine: Option[Int],
+	toLine: Option[Int]
+) -> Effect[ToolResult] given AppAuth, GitHubHttp {
+	let Ok(at) = pathSegments(path) else match {
+		Err(why) => Effect.pure(ToolResult { content: why, isError: true }),
+	}
+	let url = "https://api.github.com/repos/\(p.repo)/contents/\(at)?ref=\(p.head)"
+	let Ok(res) <- asApp(p.installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(ToolResult {
+			content: "GitHub couldn't be asked for \(path): \(why)",
+			isError: true,
+		}),
+	}
+	let true = res.status != 404 else {
+		Effect.pure(ToolResult {
+			content: "There's no \(path) at the pull request's head.",
+			isError: true,
+		})
+	}
+	let true = res.status == 200 else {
+		Effect.pure(ToolResult {
+			content: "GitHub answered \(res.status) for \(path): \(refusal(res.status, res.body))",
+			isError: true,
+		})
+	}
+	Effect.pure(fileWindow(path, res.body, fromLine, toLine))
+}
+
+---
+A file's lines from `fromLine` to `toLine`, numbered, from the contents API's answer:
+at most `READ_LINES` of them, with a header saying which and of how many.
+---
+fn fileWindow(
+	path: String,
+	body: String,
+	fromLine: Option[Int],
+	toLine: Option[Int]
+) -> ToolResult {
+	let Ok(f) = Json.decode[FileContents](body) else {
+		ToolResult {
+			content: "\(path) is a directory: use list_directory.",
+			isError: true,
+		}
+	}
+	let true = f.type == "file" else {
+		ToolResult {
+			content: "\(path) isn't a file (it's a \(f.type)).",
+			isError: true,
+		}
+	}
+	let Some(encoded) = f.content.filter((_) => f.encoding == Some("base64")) else {
+		ToolResult {
+			content: "\(path) is too large to read (\(f.size) bytes).",
+			isError: true,
+		}
+	}
+	let Some(bytes) = Bytes.fromBase64(encoded.replaceRegex(r"\s", "")) else {
+		ToolResult {
+			content: "GitHub's copy of \(path) isn't base64.",
+			isError: true,
+		}
+	}
+	let Some(text) = bytes.decodeUtf8() else {
+		ToolResult {
+			content: "\(path) isn't UTF-8 text.",
+			isError: true,
+		}
+	}
+	let lines = text.split("\n")
+	let count = if text.endsWith("\n") { lines.length() - 1 } else { lines.length() }
+	let true = count > 0 else { ToolResult { content: "\(path) is empty.", isError: false } }
+	let first = fromLine.getOrElse(1).max(1)
+	let true = first <= count else {
+		ToolResult {
+			content: "\(path) has only \(count) lines.",
+			isError: true,
+		}
+	}
+	let last = toLine.getOrElse(first + READ_LINES - 1).min(first + READ_LINES - 1).min(count)
+	let shown = lines.skip(first - 1).take(last.max(first) - first + 1)
+	let numbered = joined(
+		shown.fold(ShownLines { at: first, lines: [] }, (s, l) => ShownLines {
+			at: s.at + 1,
+			lines: s.lines.append("\(padded(s.at))  \(l)"),
+		}).lines,
+		"\n"
+	)
+	let more = if last < count { "\n(lines \(last + 1) to \(count) not shown)" } else { "" }
+	ToolResult {
+		content: "\(path), lines \(first) to \(last.max(first)) of \(count):\n\(numbered)\(more)",
+		isError: false,
+	}
+}
+
+type ShownLines = {
+	at: Int,
+	lines: List[String],
+}
+
+--- `list_directory`: one directory at the head, subdirectories first, then files with their sizes.
+fn listDirectory(p: ReviewPlace, path: String) -> Effect[ToolResult] given AppAuth, GitHubHttp {
+	let Ok(at) = pathSegments(path) else match {
+		Err(why) => Effect.pure(ToolResult { content: why, isError: true }),
+	}
+	let url = if at == "" {
+		"https://api.github.com/repos/\(p.repo)/contents?ref=\(p.head)"
+	} else {
+		"https://api.github.com/repos/\(p.repo)/contents/\(at)?ref=\(p.head)"
+	}
+	let shown = if at == "" { "the repository's root" } else { path }
+	let Ok(res) <- asApp(p.installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(ToolResult {
+			content: "GitHub couldn't be asked for \(shown): \(why)",
+			isError: true,
+		}),
+	}
+	let true = res.status != 404 else {
+		Effect.pure(ToolResult {
+			content: "There's no \(shown) at the pull request's head.",
+			isError: true,
+		})
+	}
+	let true = res.status == 200 else {
+		Effect.pure(ToolResult {
+			content: "GitHub answered \(res.status) for \(shown): \(refusal(res.status, res.body))",
+			isError: true,
+		})
+	}
+	let Ok(entries) = Json.decode[List[DirEntry]](res.body) else {
+		Effect.pure(ToolResult { content: "\(shown) is a file: use read_file.", isError: true })
+	}
+	let dirs = entries.filter((e) => e.type == "dir").map((e) => "\(e.name)/")
+	let files = entries.filter((e) => e.type != "dir").map((e) => "\(e.name) (\(e.size) bytes)")
+	let listed = dirs.concat(files)
+	Effect.pure(ToolResult {
+		content: if listed.length() == 0 { "\(shown) is empty." } else { joined(listed, "\n") },
+		isError: false,
+	})
+}
+
+--- The git tree at a commit, every path in it.
+type GitTree = {
+	tree: List[TreeEntry],
+	truncated: Bool,
+}
+
+type TreeEntry = {
+	path: String,
+	type: String,
+}
+
+--- `find_files`: the files at the head whose paths match `pattern`.
+fn findFiles(p: ReviewPlace, pattern: String) -> Effect[ToolResult] given AppAuth, GitHubHttp {
+	let url = "https://api.github.com/repos/\(p.repo)/git/trees/\(p.head)?recursive=1"
+	let Ok(res) <- asApp(p.installation, (token) => GitHubHttp.get(token, url)) else match {
+		Err(why) => Effect.pure(ToolResult {
+			content: "GitHub couldn't be asked for the tree: \(why)",
+			isError: true,
+		}),
+	}
+	let true = res.status == 200 else {
+		Effect.pure(ToolResult {
+			content: "GitHub answered \(res.status) for the tree: \(refusal(res.status, res.body))",
+			isError: true,
+		})
+	}
+	let Ok(t) = Json.decode[GitTree](res.body) else match {
+		Err(e) => Effect.pure(ToolResult {
+			content: "The tree did not decode: \(jsonError(e))",
+			isError: true,
+		}),
+	}
+	Effect.pure(foundFiles(t, pattern))
+}
+
+fn foundFiles(t: GitTree, pattern: String) -> ToolResult {
+	let found = t.tree
+		.filter((e) => e.type == "blob" && globMatches(pattern.trim(), e.path))
+		.map((e) => e.path)
+	let shown = found.take(FOUND_PATHS)
+	let more: List[String] = if found.length() > FOUND_PATHS {
+		["(\(found.length() - FOUND_PATHS) more not shown)"]
+	} else {
+		[]
+	}
+	let cut: List[String] = if t.truncated {
+		["(GitHub cut the tree short, so some files may be missing)"]
+	} else {
+		[]
+	}
+	let notes = more.concat(cut)
+	let true = found.length() > 0 else {
+		ToolResult {
+			content: joined(["No files match \(pattern)."].concat(notes), "\n"),
+			isError: false,
+		}
+	}
+	ToolResult {
+		content: joined(shown.concat(notes), "\n"),
+		isError: false,
+	}
+}
+
+---
+Whether `path` matches the glob `pattern`: `*` and `?` match within one
+segment, `**` any number of whole segments. A pattern with no `/` is matched
+against the file's name alone, in any directory.
+---
+fn globMatches(pattern: String, path: String) -> Bool {
+	let true = pattern != "" else { false }
+	if pattern.contains("/") {
+		segmentsMatch(pattern.split("/"), path.split("/"))
+	} else {
+		let parts = path.split("/")
+		let name = parts.get(parts.length() - 1).getOrElse(path)
+		charsMatch(pattern.chars(), name.chars())
+	}
+}
+
+fn segmentsMatch(pattern: List[String], path: List[String]) -> Bool {
+	match pattern.first() {
+		None => path.length() == 0,
+		Some("**") => segmentsMatch(pattern.skip(1), path)
+			|| (path.length() > 0 && segmentsMatch(pattern, path.skip(1))),
+		Some(p) => match path.first() {
+			None => false,
+			Some(s) => charsMatch(p.chars(), s.chars())
+				&& segmentsMatch(pattern.skip(1), path.skip(1)),
+		},
+	}
+}
+
+fn charsMatch(pattern: List[String], name: List[String]) -> Bool {
+	match pattern.first() {
+		None => name.length() == 0,
+		Some("*") => charsMatch(pattern.skip(1), name)
+			|| (name.length() > 0 && charsMatch(pattern, name.skip(1))),
+		Some("?") => name.length() > 0 && charsMatch(pattern.skip(1), name.skip(1)),
+		Some(c) => name.first() == Some(c) && charsMatch(pattern.skip(1), name.skip(1)),
+	}
+}

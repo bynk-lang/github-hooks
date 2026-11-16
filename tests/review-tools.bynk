@@ -1,0 +1,190 @@
+// #129, step 1: the review agent's tools, its caps and its settings, against
+// an in-memory D1 with the migrations applied. GitHub is stubbed at the wire.
+// The review reads `bynk-lang/vscode`'s pull request #12 at commit `abc123`.
+suite github.hooks
+
+consumes bynk { Response }
+consumes bynk.cloudflare { SqlStatement }
+
+stub AppAuth.token(_) returns Ok("ghs_test")
+
+fn answer(status: Int, body: String) -> Result[Response, String] {
+	Ok(Response { status: status, headers: Map.empty(), body: body })
+}
+
+fn place() -> ReviewPlace {
+	ReviewPlace {
+		installation: 42,
+		repo: "bynk-lang/vscode",
+		number: 12,
+		head: "abc123",
+	}
+}
+
+--- `line1`, `line2` and `line3`, each ending a line, base64 as the contents API sends it.
+const THREE_LINES: String = "{\"type\":\"file\",\"encoding\":\"base64\",\"size\":18,\"content\":\"bGluZTEK\\nbGluZTIKbGluZTMK\\n\"}"
+
+const FILES: String = "[{\"filename\":\"src/a.ts\",\"status\":\"modified\",\"additions\":2,\"deletions\":1,\"patch\":\"@@ -1,3 +1,4 @@\\n line1\\n-old\\n+new\\n+added\\n line3\"},{\"filename\":\"src/new.ts\",\"status\":\"renamed\",\"previous_filename\":\"src/old.ts\",\"additions\":0,\"deletions\":0},{\"filename\":\"logo.png\",\"status\":\"added\",\"additions\":0,\"deletions\":0}]"
+
+case "the changed files are listed one to a line, with their status, renames and counts" {
+	stub GitHubHttp.get(_, _) returns answer(200, FILES)
+	let files <- changedFiles(place())
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/pulls/12/files?per_page=100"
+	let Ok(listed) = files else {
+		expect false
+	}
+	expect changedList(
+		listed
+	) == "M src/a.ts (+2 -1)\nR src/old.ts -> src/new.ts (+0 -0)\nA logo.png (+0 -0)"
+	expect changedList([]) == "This pull request changes no files."
+}
+
+case "a diff shows each line's number in the new version, and none for a removed line" {
+	stub GitHubHttp.get(_, _) returns answer(200, FILES)
+	let files <- changedFiles(place())
+	let Ok(listed) = files else {
+		expect false
+	}
+	expect diffOf(
+		listed,
+		"src/a.ts"
+	) == ToolResult {
+		content: "@@ -1,3 +1,4 @@\n    1  line1\n      -old\n    2 +new\n    3 +added\n    4  line3",
+		isError: false,
+	}
+	expect diffOf(listed, "logo.png").content == "logo.png has no diff to show: it's binary, or too large for GitHub to show."
+	expect diffOf(listed, "src/other.ts").isError
+	expect numberedPatch(
+		"@@ -10 +12,2 @@ fn go() {\n+a\n b\n\\ No newline at end of file"
+	) == "@@ -10 +12,2 @@ fn go() {\n   12 +a\n   13  b\n      \\ No newline at end of file"
+	expect hunkStart("@@ -1,2 +100,3 @@") == 100
+}
+
+case "a file is read at the head, numbered, a window at a time" {
+	stub GitHubHttp.get(_, _) returns each [answer(200, THREE_LINES), answer(404, "{\"message\":\"Not Found\"}")]
+	let read <- readFile(place(), "src/a b.ts", None, None)
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/contents/src/a%20b.ts?ref=abc123"
+	expect read == ToolResult {
+		content: "src/a b.ts, lines 1 to 3 of 3:\n    1  line1\n    2  line2\n    3  line3",
+		isError: false,
+	}
+	let missing <- readFile(place(), "nope.ts", None, None)
+	expect missing == ToolResult {
+		content: "There's no nope.ts at the pull request's head.",
+		isError: true,
+	}
+	expect fileWindow(
+		"f.txt",
+		THREE_LINES,
+		Some(2),
+		Some(2)
+	) == ToolResult {
+		content: "f.txt, lines 2 to 2 of 3:\n    2  line2\n(lines 3 to 3 not shown)",
+		isError: false,
+	}
+	expect fileWindow(
+		"f.txt",
+		THREE_LINES,
+		Some(5),
+		None
+	) == ToolResult {
+		content: "f.txt has only 3 lines.",
+		isError: true,
+	}
+	expect fileWindow("src", "[{\"name\":\"a.ts\",\"type\":\"file\",\"size\":1}]", None, None).content == "src is a directory: use list_directory."
+	expect fileWindow(
+		"big.bin",
+		"{\"type\":\"file\",\"encoding\":\"none\",\"size\":2000000,\"content\":\"\"}",
+		None,
+		None
+	).content == "big.bin is too large to read (2000000 bytes)."
+}
+
+case "a path can't climb out of the repository's contents" {
+	let climbing <- readFile(place(), "../../orgs/bynk-lang", None, None)
+	expect climbing.isError
+	expect GitHubHttp.get never called
+	expect pathSegments("src//a.ts") is Err(_)
+	expect pathSegments("./a.ts") is Err(_)
+	expect pathSegments("") == Ok("")
+	expect pathSegments("docs/ä #1.md") == Ok("docs/%C3%A4%20%231.md")
+}
+
+case "a directory lists its subdirectories, then its files with their sizes" {
+	stub GitHubHttp.get(_, _) returns each [answer(200, "[{\"name\":\"a.ts\",\"type\":\"file\",\"size\":120},{\"name\":\"lib\",\"type\":\"dir\",\"size\":0}]"), answer(200, "[]"), answer(200, THREE_LINES)]
+	let root <- listDirectory(place(), "")
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/contents?ref=abc123"
+	expect root == ToolResult { content: "lib/\na.ts (120 bytes)", isError: false }
+	let empty <- listDirectory(place(), "src")
+	expect empty.content == "src is empty."
+	let file <- listDirectory(place(), "README.md")
+	expect file == ToolResult { content: "README.md is a file: use read_file.", isError: true }
+}
+
+case "files are found by glob in the head's tree" {
+	stub GitHubHttp.get(_, _) returns answer(200, "{\"truncated\":false,\"tree\":[{\"path\":\"src\",\"type\":\"tree\"},{\"path\":\"src/a.ts\",\"type\":\"blob\"},{\"path\":\"src/lib/b.ts\",\"type\":\"blob\"},{\"path\":\"README.md\",\"type\":\"blob\"}]}")
+	let found <- findFiles(place(), "*.ts")
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/git/trees/abc123?recursive=1"
+	expect found == ToolResult { content: "src/a.ts\nsrc/lib/b.ts", isError: false }
+	let t = GitTree {
+		truncated: true,
+		tree: [TreeEntry { path: "a.md", type: "blob" }],
+	}
+	expect foundFiles(t, "*.ts").content == "No files match *.ts.\n(GitHub cut the tree short, so some files may be missing)"
+	expect globMatches("src/*.ts", "src/a.ts")
+	expect !globMatches("src/*.ts", "src/lib/b.ts")
+	expect globMatches("src/**/*.ts", "src/lib/deep/b.ts")
+	expect globMatches("src/**/*.ts", "src/a.ts")
+	expect globMatches("**/test?.ts", "a/b/test1.ts")
+	expect !globMatches("**/test?.ts", "a/b/test12.ts")
+	expect globMatches("*", "README.md")
+	expect !globMatches("", "README.md")
+	expect !globMatches("src/*.ts", "lib/a.ts")
+}
+
+case "every reading tool is offered with a schema, and none can write" {
+	let names = readingTools().map((t) => t.name)
+	expect names == ["list_changed_files", "read_diff", "read_file", "list_directory", "find_files"]
+	expect readingTools().all((t) => t.schema.contains("\"additionalProperties\":false"))
+}
+
+case "reviews are claimed against their own caps, per repository and in total" {
+	let two = ReviewCaps {
+		repo: 2,
+		total: 3,
+	}
+	let first <- claimReview("bynk-lang/vscode", "2026-11-16", two)
+	let second <- claimReview("bynk-lang/vscode", "2026-11-16", two)
+	let third <- claimReview("bynk-lang/vscode", "2026-11-16", two)
+	expect [first, second, third] == [Ok(true), Ok(true), Ok(false)]
+	let other <- claimReview("bynk-lang/bynk", "2026-11-16", two)
+	let past <- claimReview("bynk-lang/bynk", "2026-11-16", two)
+	expect [other, past] == [Ok(true), Ok(false)]
+	let _ <- releaseReview("bynk-lang/bynk", "2026-11-16")
+	let again <- claimReview("bynk-lang/bynk", "2026-11-16", two)
+	expect again == Ok(true)
+	let stopped <- claimReview("bynk-lang/new", "2026-11-17", ReviewCaps { repo: 0, total: 3 })
+	expect stopped == Ok(false)
+	// Claims are their own: the per-call caps are untouched.
+	let calls <- Deliveries.all("SELECT count(*) AS n FROM claude_calls_daily", [])
+	expect calls == Ok("[{\"n\":0}]")
+}
+
+case "the caps come from their settings, or default to 10 a repository and 40 in total" {
+	let caps <- reviewCaps()
+	expect caps == ReviewCaps { repo: 10, total: 40 }
+}
+
+case "review settings: off by default, and guidelines named by path" {
+	let on = settingsOf(readSettings(
+		"review:\n  enabled: true\n  guidelines: .github/review-guidelines.md\n"
+	))
+	expect on.review == ReviewSettings {
+		enabled: true,
+		guidelines: Some(".github/review-guidelines.md"),
+	}
+	expect settingsOf(readSettings("triage:\n  enabled: true\n")).review.enabled == false
+	expect unknownKeys(
+		"review:\n  enabled: true\n  guidelines: x.md\n  guideline: y.md\n"
+	) == ["review.guideline"]
+}
