@@ -44,9 +44,17 @@ to the organisation, as issue response does
 ([github-app.md](github-app.md#4-permissions-and-events)). The answer is kept
 for a day. One GitHub can't give counts as not a member.
 
-The App needs no new permission:
+The App needs these permissions
+([github-app.md](github-app.md#4-permissions-and-events)):
 - **Pull requests: Read and write** posts the review and its threads, and
-  resolves threads;
+  replies on and resolves threads. **Check this one:** phase 3's welcome
+  comments through the Issues API, so an App set up before reviews may have
+  Pull requests at **Read-only**. Then each review is written, and paid for,
+  but GitHub refuses to post it: the review ends as `failed`, with
+  `403 Resource not accessible by integration` in its `detail`. Raise the
+  permission on the App's page, and have an organisation owner accept the
+  change on the installation. Then move the pull request back to draft and
+  mark it ready again, for a fresh review;
 - **Contents: Read** reads files;
 - **Members: Read-only**, which issue response already uses, says whether an
   author belongs to the organisation;

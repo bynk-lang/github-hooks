@@ -6,6 +6,14 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The docs no longer say pull request reviews need no new permission (#129).
+  They need **Pull requests: Read and write**, which an App set up for phase 3
+  may not have: without it GitHub refuses each review with `403 Resource not
+  accessible by integration`. `docs/reviews.md` and `docs/github-app.md` now
+  say so, and how to recover.
+
 ## [0.8.0] - 2026-11-16
 
 ### Added
