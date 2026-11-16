@@ -176,6 +176,11 @@ type ReviewVerdict =
 	| ReviewDone
 	| ReviewAgain(reason: String)
 
+--- The latest earlier review posted on the same pull request.
+type EarlierReview = {
+	head_sha: String,
+}
+
 --- A review's row, as the consumer claims it.
 type ClaimedReview = {
 	repo: String,
@@ -273,16 +278,32 @@ fn runReview(job: ReviewJob) -> Effect[ReviewVerdict] given Deliveries, Logger, 
 		Some(path) => readGuidelines(spot, path),
 		None => Effect.pure(noGuidelines),
 	}
-	// A later review of the same pull request follows up its own open threads.
+	// A later review of the same pull request follows up its own open threads,
+	// on the files changed since the latest review that was posted.
 	let earlier <- Deliveries.first(
-		"SELECT id FROM reviews WHERE repo = ?1 AND number = ?2 AND status = 'posted' AND id != ?3 LIMIT 1",
+		"SELECT head_sha FROM reviews WHERE repo = ?1 AND number = ?2 AND status = 'posted' AND id != ?3 ORDER BY id DESC LIMIT 1",
 		[Text(c.repo), Integer(c.number), Integer(job.review)]
 	)
-	let noThreads: List[OpenThread] = []
-	let threads <- match earlier {
-		Ok(Some(_)) => openThreads(spot),
-		_ => Effect.pure(noThreads),
+	let noEarlier: Option[String] = None
+	let before = match earlier {
+		Ok(Some(row)) => Json.decodeSql[EarlierReview](row).ok().map((e) => e.head_sha),
+		_ => noEarlier,
 	}
+	let noThreads: List[OpenThread] = []
+	let threads <- match before {
+		Some(_) => openThreads(spot),
+		None => Effect.pure(noThreads),
+	}
+	let noFiles: Option[List[String]] = Some([])
+	let since <- match before {
+		Some(old) => if threads.length() > 0 {
+			filesBetween(spot, old, head)
+		} else {
+			Effect.pure(noFiles)
+		},
+		None => Effect.pure(noFiles),
+	}
+	let touchedSince = since.getOrElse([])
 	let ask = AgentAsk {
 		feature: "review",
 		repo: c.repo,
@@ -301,7 +322,15 @@ fn runReview(job: ReviewJob) -> Effect[ReviewVerdict] given Deliveries, Logger, 
 	let turns = Some(run.turns)
 	match run.end {
 		Finished => match run.answer {
-			Some(answer) => postReview(job.review, spot, changed, threads, answer, run.turns),
+			Some(answer) => postReview(
+				job.review,
+				spot,
+				changed,
+				threads,
+				touchedSince,
+				answer,
+				run.turns
+			),
 			None => {
 				let _ <- endReview(
 					job.review,
@@ -711,6 +740,7 @@ fn postReview(
 	p: ReviewPlace,
 	changed: List[ChangedFile],
 	threads: List[OpenThread],
+	touchedSince: List[String],
 	answer: ReviewInput,
 	turns: Int
 ) -> Effect[ReviewVerdict] given Deliveries, Logger, Clock, AppAuth, GitHubHttp, GitHubApi {
@@ -772,7 +802,8 @@ fn postReview(
 		Effect.pure(ReviewDone)
 	}
 	let id = Json.decode[PostedReview](answered.body).map((x) => x.id).ok()
-	let resolved <- resolveThreads(p, threads, answer.resolved.getOrElse([]))
+	let followed <- resolveThreads(p, threads, answer.resolved.getOrElse([]), touchedSince)
+	let resolved = followed.resolved
 	let now <- Clock.now()
 	let detail = moved.map((m) => "posted after the head moved to \(m.head.slice(0, 7))")
 	let _ <- Deliveries.run(
@@ -793,7 +824,7 @@ fn postReview(
 		]
 	)
 	let _ <- Logger.info(
-		"review \(review) of \(p.repo)#\(p.number) posted: \(findings.length()) findings, \(posted) on their lines, \(resolved) earlier threads resolved"
+		"review \(review) of \(p.repo)#\(p.number) posted: \(findings.length()) findings, \(posted) on their lines, \(resolved) earlier threads resolved, \(followed.answered) blocking ones answered for a maintainer"
 	)
 	Effect.pure(ReviewDone)
 }
