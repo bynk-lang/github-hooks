@@ -135,14 +135,29 @@ comment on discussions on every installed repository. The App only reads a
 repository's categories, and starts the one discussion a maintainer
 approved.
 
+Pull request reviews ([reviews.md](reviews.md)) need **Pull requests:
+Read and write**, to post a review and its threads
+(`POST /repos/{repo}/pulls/{n}/reviews`), to reply on a thread, and to
+resolve one (GraphQL's `resolveReviewThread`). Step 7 raises it for phase 3,
+but an App whose installation hasn't accepted that change, or that was set up
+without it, still has Pull requests at **Read-only**. Without it, the review is
+written, and paid for, but GitHub refuses to post it with
+`403 Resource not accessible by integration`. The review's row in `reviews`
+ends as `failed`, with that reason in `detail`. Raising the permission asks
+an organisation owner to accept the change on the installation, and until
+they do, the installation keeps the old permission and the `403` continues.
+It reaches every pull request on every installed repository: the App could
+also edit, close and review any of them. The App's code only posts reviews,
+and replies on and resolves its own threads.
+
 Maintainers' actions ([maintainers.md](maintainers.md#actions)) need
 **Actions** raised to **Read and write**, to re-run failed jobs. Without it
 GitHub refuses each re-run with a `403`, which the dashboard reports.
 
-Phase 3 will need some of these raised to **Read and write** (Issues and Pull
-requests, for comments and labels). Changing an App's permissions asks an
-organisation owner to approve the change on the installation; nothing else has
-to move.
+Phase 3 raises **Issues** and **Pull requests** to **Read and write**
+([step 7](#7-let-the-app-act-phase-3)), and reviews rely on Pull requests
+being raised. Changing an App's permissions asks an organisation owner to
+approve the change on the installation; nothing else has to move.
 
 ## 5. Install it
 
