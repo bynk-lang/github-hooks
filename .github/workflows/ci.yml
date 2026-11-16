@@ -16,6 +16,11 @@ concurrency:
 # (bynk-canary.yml) runs the same checks against each new Bynk release, and
 # proposes moving BYNK_VERSION once one passes.
 
+# tsc, which Bynk runs over the generated Worker and tests, needs more than
+# Node's default heap (about 2 GB on a 16 GB runner) for this project (#129).
+env:
+  NODE_OPTIONS: --max-old-space-size=4096
+
 jobs:
   test:
     name: check, format and test

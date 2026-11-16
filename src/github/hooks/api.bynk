@@ -598,10 +598,7 @@ service api from http {
 	// Receive one delivery. GitHub waits at most 10 seconds for a 2xx, so this
 	// records the delivery and answers; work done in response belongs elsewhere.
 	@raw(contentType: "application/json")
-	on POST("/github") (
-		headers: RequestHeaders,
-		body: Bytes
-	) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot, Facts, Triage {
+	on POST("/github") (headers: RequestHeaders, body: Bytes) -> Effect[HttpResult[String]] by GitHub given Deliveries, Logger, Bot, Facts, Triage, Reviews {
 		let Ok(d) = read(
 			headers.get("X-GitHub-Event"),
 			headers.get("X-GitHub-Delivery"),
@@ -642,6 +639,7 @@ service api from http {
 		// worked is not repeated (see `Bot`).
 		do Bot.react(d, body).detach()
 		do Triage.run(d, body).detach()
+		do Reviews.request(d, body).detach()
 		do Facts.extract(d, body, r.changes > 0).detach()
 		if r.changes == 0 {
 			let _ <- Logger.info("redelivery \(d.id) (\(d.event))")

@@ -131,12 +131,33 @@ case "a reply without a tool call is reminded once to finish, then ends unfinish
 	expect AnthropicHttp.post called with body.contains(echoed(TALK).concat(",{\"role\":\"user\",\"content\":\"Finish by calling the finish tool.\"}"))
 }
 
-case "a conversation that runs out of turns ends unfinished, without another request" {
+case "a conversation that runs out of turns, or of time, ends unfinished, without another request" {
 	stub AnthropicHttp.post(_, _, _) returns replying(READ_CALL, "tool_use")
 	let r <- converse[DemoInput](ask(3), (c) => Effect.pure(reading(c)))
 	expect r.end == Unfinished("it used all 3 turns")
 	expect r.turns == 3
 	expect AnthropicHttp.post called 3 times
+	// Past its deadline, each tool result says time is up; past the grace after it, nothing more is asked.
+	let now = Instant.fromEpochMillis(1793880000000)
+	let late <- converse[DemoInput](
+		AgentAsk {
+			...ask(2),
+			deadline: Some(now - 1.minutes),
+		},
+		(c) => Effect.pure(reading(c))
+	)
+	expect late.end == Unfinished("it used all 2 turns")
+	expect AnthropicHttp.post called with body.contains("\"is_error\":false},{\"type\":\"text\",\"text\":\"Time is up for this task: finish now with what you have, by calling the finishing tool.\"}]}")
+	let over <- converse[DemoInput](
+		AgentAsk {
+			...ask(10),
+			deadline: Some(now - 3.minutes),
+		},
+		(c) => Effect.pure(reading(c))
+	)
+	expect over.end == Unfinished("it ran out of time")
+	expect over.turns == 0
+	expect AnthropicHttp.post called 5 times
 }
 
 case "arguments that don't decode get an error result, and the tool isn't run" {
@@ -162,7 +183,7 @@ case "a refusal, a reply cut off and Anthropic unreachable each end the conversa
 	expect outcomes == Ok("[{\"outcome\":\"refused\"},{\"outcome\":\"truncated\"},{\"outcome\":\"failed\"},{\"outcome\":\"failed\"}]")
 }
 
-case "the reply's content is cut from its text: brackets and quotes in strings, and astral characters, don't end it early" {
+case "the reply's content is the top-level key's array, cut from its text: keys in any order, brackets and quotes in strings, and astral characters, don't mislead it" {
 	expect rawContent(
 		"{\"id\":\"m\",\"model\":\"x\",\"content\":[{\"type\":\"text\",\"text\":\"😀 ] } \\\" [ {\"},{\"type\":\"tool_use\",\"input\":{\"a\":[1,{\"b\":\"]\"}]}}],\"stop_reason\":\"end_turn\"}"
 	) == Some("[{\"type\":\"text\",\"text\":\"😀 ] } \\\" [ {\"},{\"type\":\"tool_use\",\"input\":{\"a\":[1,{\"b\":\"]\"}]}}]")
@@ -170,9 +191,6 @@ case "the reply's content is cut from its text: brackets and quotes in strings, 
 	expect rawContent("{\"content\":\"text\"}") == None
 	expect rawContent("{\"content\":[{\"type\":\"text\"}") == None
 	expect rawContent("{\"model\":\"x\"}") == None
-}
-
-case "the content array is the top-level key's, whatever order the keys come in" {
 	expect rawContent(
 		"{\"container\":{\"content\":[\"not this\"]},\"text\":\"\\\"content\\\":[\",\"content\":[{\"type\":\"text\",\"text\":\"this\"}],\"stop_reason\":\"end_turn\"}"
 	) == Some("[{\"type\":\"text\",\"text\":\"this\"}]")
