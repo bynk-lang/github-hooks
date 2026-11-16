@@ -1,5 +1,9 @@
 version = 1
 
+[environments.default]
+queues = ["github-hooks-reviews"]
+reused_queues = ["github-hooks-reviews"]
+
 [environments.default.kv]
 
 [environments.default.kv_instances.github-hooks.KV_TOKENS]
