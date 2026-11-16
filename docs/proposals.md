@@ -6,7 +6,9 @@ A maintainer approves or declines each one in Mine on the dashboard, and
 nothing reaches GitHub until a maintainer approves.
 
 This page is the overview: how the pieces fit, what is sent to Anthropic and
-when, what is kept, and how to turn it on and off. The details are in:
+when, what is kept, and how to turn it on and off. Pull request reviews
+(#129) also use Claude, but post at once, without a proposal: they have their
+own page, [reviews.md](reviews.md). The details are in:
 
 | Page | Covers |
 |---|---|

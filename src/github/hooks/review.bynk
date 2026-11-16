@@ -31,7 +31,7 @@ capability Reviews {
 	fn request(d: Delivery, body: Bytes) -> Effect[()]
 }
 
-provides Reviews = QueuedReviews given Deliveries, Logger, Clock, Tokens, AppAuth, GitHubHttp, ReviewQueue {
+provides Reviews = QueuedReviews given Deliveries, Logger, Clock, Tokens, AppAuth, GitHubHttp, GitHubApi, ReviewQueue {
 	fn request(d: Delivery, body: Bytes) -> Effect[()] {
 		let true = d.event == "pull_request" else { Effect.pure(()) }
 		let Some(p) = readied(d.action, body) else { Effect.pure(()) }
@@ -43,7 +43,8 @@ provides Reviews = QueuedReviews given Deliveries, Logger, Clock, Tokens, AppAut
 		}
 		let settings <- settingsFor(installation, p.repo)
 		let true = settings.review.enabled else { Effect.pure(()) }
-		let true = reviewsAuthor(settings.review.authors, p.association) else {
+		let reviewed <- authorReviewed(settings.review.authors, installation, p)
+		let true = reviewed else {
 			Logger.info(
 				"review of \(p.repo)#\(p.number) skipped: its author (\(p.association)) isn't one whose pull requests are reviewed"
 			)
@@ -95,6 +96,33 @@ repository's owners', organisation members' and collaborators'.
 ---
 fn reviewsAuthor(authors: String, association: String) -> Bool {
 	authors == "all" || isMaintainer(association)
+}
+
+---
+Whether the pull request's author is one whose pull requests are reviewed:
+by their association, and otherwise, for `members`, by asking GitHub whether
+they belong to the repository's organisation (the App's **Members:
+Read-only**, as issue response asks). GitHub reports a member whose
+membership is private as a `CONTRIBUTOR`, so the association alone would
+miss them. An answer is kept for a day; one GitHub can't give counts as
+not a member.
+---
+fn authorReviewed(
+	authors: String,
+	installation: Int,
+	p: Readied
+) -> Effect[Bool] given Deliveries, GitHubApi, Clock, Logger {
+	let true = !reviewsAuthor(authors, p.association) else { Effect.pure(true) }
+	let true = authors != "all" else { Effect.pure(true) }
+	let org = p.repo.split("/").get(0).getOrElse("")
+	let asked <- orgMember(installation, org, p.author)
+	match asked {
+		Ok(member) => Effect.pure(member),
+		Err(why) => {
+			let _ <- Logger.warn("could not tell whether \(p.author) belongs to \(org): \(why)")
+			Effect.pure(false)
+		},
+	}
 }
 
 type ReadiedDelivery = {

@@ -136,6 +136,8 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
           CLAUDE_DAILY_CAP_REPO: ${{ secrets.CLAUDE_DAILY_CAP_REPO != '' }}
           CLAUDE_DAILY_CAP_TOTAL: ${{ secrets.CLAUDE_DAILY_CAP_TOTAL != '' }}
+          CLAUDE_REVIEW_DAILY_CAP_REPO: ${{ secrets.CLAUDE_REVIEW_DAILY_CAP_REPO != '' }}
+          CLAUDE_REVIEW_DAILY_CAP_TOTAL: ${{ secrets.CLAUDE_REVIEW_DAILY_CAP_TOTAL != '' }}
           BUMP_APP_ID: ${{ secrets.BUMP_APP_ID != '' }}
           BUMP_APP_KEY: ${{ secrets.BUMP_APP_KEY != '' }}
           # Each secret is one dotenv line, so a value with a line break would
@@ -153,6 +155,8 @@ jobs:
             ${{ contains(secrets.ANTHROPIC_API_KEY, fromJSON('"\n"')) && 'ANTHROPIC_API_KEY' || '' }}
             ${{ contains(secrets.CLAUDE_DAILY_CAP_REPO, fromJSON('"\n"')) && 'CLAUDE_DAILY_CAP_REPO' || '' }}
             ${{ contains(secrets.CLAUDE_DAILY_CAP_TOTAL, fromJSON('"\n"')) && 'CLAUDE_DAILY_CAP_TOTAL' || '' }}
+            ${{ contains(secrets.CLAUDE_REVIEW_DAILY_CAP_REPO, fromJSON('"\n"')) && 'CLAUDE_REVIEW_DAILY_CAP_REPO' || '' }}
+            ${{ contains(secrets.CLAUDE_REVIEW_DAILY_CAP_TOTAL, fromJSON('"\n"')) && 'CLAUDE_REVIEW_DAILY_CAP_TOTAL' || '' }}
         run: |
           row() { printf '| `%s` | %s | %s |\n' "$1" "$([ "$2" = true ] && echo set || echo missing)" "$3"; }
           {
@@ -174,6 +178,8 @@ jobs:
             row ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" "optional: Claude features (#69); without it none calls Claude"
             row CLAUDE_DAILY_CAP_REPO "$CLAUDE_DAILY_CAP_REPO" "optional: default 50"
             row CLAUDE_DAILY_CAP_TOTAL "$CLAUDE_DAILY_CAP_TOTAL" "optional: default 200"
+            row CLAUDE_REVIEW_DAILY_CAP_REPO "$CLAUDE_REVIEW_DAILY_CAP_REPO" "optional: pull request reviews (#129), default 10"
+            row CLAUDE_REVIEW_DAILY_CAP_TOTAL "$CLAUDE_REVIEW_DAILY_CAP_TOTAL" "optional: pull request reviews (#129), default 40"
             row BUMP_APP_ID "$BUMP_APP_ID" "the lock pull request (an organisation secret)"
             row BUMP_APP_KEY "$BUMP_APP_KEY" "the lock pull request (an organisation secret)"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -233,6 +239,8 @@ jobs:
             ${{ secrets.ANTHROPIC_API_KEY != '' && format('ANTHROPIC_API_KEY={0}', secrets.ANTHROPIC_API_KEY) || '' }}
             ${{ secrets.CLAUDE_DAILY_CAP_REPO != '' && format('CLAUDE_DAILY_CAP_REPO={0}', secrets.CLAUDE_DAILY_CAP_REPO) || '' }}
             ${{ secrets.CLAUDE_DAILY_CAP_TOTAL != '' && format('CLAUDE_DAILY_CAP_TOTAL={0}', secrets.CLAUDE_DAILY_CAP_TOTAL) || '' }}
+            ${{ secrets.CLAUDE_REVIEW_DAILY_CAP_REPO != '' && format('CLAUDE_REVIEW_DAILY_CAP_REPO={0}', secrets.CLAUDE_REVIEW_DAILY_CAP_REPO) || '' }}
+            ${{ secrets.CLAUDE_REVIEW_DAILY_CAP_TOTAL != '' && format('CLAUDE_REVIEW_DAILY_CAP_TOTAL={0}', secrets.CLAUDE_REVIEW_DAILY_CAP_TOTAL) || '' }}
 
       # A tag's deploy can't open the lock pull request (a tag isn't a branch
       # to open one against), and neither can a run without the App's token:
