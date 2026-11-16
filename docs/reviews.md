@@ -47,8 +47,8 @@ for a day. One GitHub can't give counts as not a member.
 The App needs these permissions
 ([github-app.md](github-app.md#4-permissions-and-events)):
 - **Pull requests: Read and write** posts the review and its threads, and
-  replies on and resolves threads. **Check this one:** phase 3's welcome
-  comments through the Issues API, so an App set up before reviews may have
+  replies on and resolves threads. **Check this one:** phase 3's setup
+  raises it, but an installation that never accepted that change still has
   Pull requests at **Read-only**. Then each review is written, and paid for,
   but GitHub refuses to post it: the review ends as `failed`, with
   `403 Resource not accessible by integration` in its `detail`. Raise the
