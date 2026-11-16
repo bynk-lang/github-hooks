@@ -388,7 +388,9 @@ case "if the head moved, the review is still posted, at the commit it reviewed, 
 	let _ <- reviewer.message(ReviewJob { review: 1, installation: 42 })
 	let _ <- reviewer.message(ReviewJob { review: 2, installation: 42 })
 	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/compare/abc123...def4567890"
-	expect GitHubHttp.post called 2 times
+	// Two reviews, and the second, a follow-up of the first, asks for its open threads (none here).
+	expect GitHubHttp.post called 3 times
+	expect GitHubHttp.post called once with url == "https://api.github.com/graphql" && body.contains("reviewThreads")
 	// src/a.ts changed since: every finding on it goes in the body, after the note.
 	expect GitHubHttp.post called with body.contains("\"comments\":[]") && body.contains("\"body\":\"This review was written for `abc123`; the head has since moved to `def4567`.\\n\\nAdds a greeting") && body.contains("line 2: This breaks")
 	// Only README.md changed since: the findings keep their lines.
@@ -463,4 +465,42 @@ case "posted text is defused outside code, and a finding is placed on its line o
 	expect diffLines(
 		"@@ -1 +5,2 @@\n-gone\n+here\n kept"
 	) == [DiffLine { line: 5, hunk: 1 }, DiffLine { line: 6, hunk: 1 }]
+}
+
+case "a later review shows Claude the App's own open, unanswered threads, and follows up those the change has addressed" {
+	stub GitHubHttp.get(_, _) returns each [answer(200, openPull()), answer(200, FILES), reviewOn(), answer(200, "{\"files\":[{\"filename\":\"src/a.ts\"}]}"), answer(200, openPull())]
+	stub GitHubHttp.post(_, _, _) returns each [answer(200, "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"nodes\":[{\"id\":\"PRRT_a\",\"isResolved\":false,\"path\":\"src/a.ts\",\"line\":2,\"opening\":{\"nodes\":[{\"databaseId\":501,\"body\":\"**Should fix:** The old finding.\",\"viewerDidAuthor\":true}]},\"latest\":{\"nodes\":[{\"databaseId\":501,\"body\":\"**Should fix:** The old finding.\",\"viewerDidAuthor\":true}]}},{\"id\":\"PRRT_b\",\"isResolved\":false,\"path\":\"src/a.ts\",\"line\":null,\"opening\":{\"nodes\":[{\"databaseId\":502,\"body\":\"**Nit:** Still open.\",\"viewerDidAuthor\":true}]},\"latest\":{\"nodes\":[{\"databaseId\":502,\"body\":\"**Nit:** Still open.\",\"viewerDidAuthor\":true}]}},{\"id\":\"PRRT_c\",\"isResolved\":false,\"path\":\"src/a.ts\",\"line\":4,\"opening\":{\"nodes\":[{\"databaseId\":503,\"body\":\"Someone else's thread.\",\"viewerDidAuthor\":false}]},\"latest\":{\"nodes\":[{\"databaseId\":503,\"body\":\"Someone else's thread.\",\"viewerDidAuthor\":false}]}},{\"id\":\"PRRT_d\",\"isResolved\":true,\"path\":\"src/a.ts\",\"line\":1,\"opening\":{\"nodes\":[{\"databaseId\":504,\"body\":\"Already resolved.\",\"viewerDidAuthor\":true}]},\"latest\":{\"nodes\":[{\"databaseId\":504,\"body\":\"Already resolved.\",\"viewerDidAuthor\":true}]}},{\"id\":\"PRRT_e\",\"isResolved\":false,\"path\":\"src/a.ts\",\"line\":3,\"opening\":{\"nodes\":[{\"databaseId\":505,\"body\":\"**Blocking:** A blocking finding.\",\"viewerDidAuthor\":true}]},\"latest\":{\"nodes\":[{\"databaseId\":505,\"body\":\"**Blocking:** A blocking finding.\",\"viewerDidAuthor\":true}]}},{\"id\":\"PRRT_f\",\"isResolved\":false,\"path\":\"README.md\",\"line\":1,\"opening\":{\"nodes\":[{\"databaseId\":506,\"body\":\"**Nit:** In the readme.\",\"viewerDidAuthor\":true}]},\"latest\":{\"nodes\":[{\"databaseId\":506,\"body\":\"**Nit:** In the readme.\",\"viewerDidAuthor\":true}]}},{\"id\":\"PRRT_g\",\"isResolved\":false,\"path\":\"src/a.ts\",\"line\":1,\"opening\":{\"nodes\":[{\"databaseId\":507,\"body\":\"**Should fix:** Argued.\",\"viewerDidAuthor\":true}]},\"latest\":{\"nodes\":[{\"databaseId\":507,\"body\":\"**Should fix:** Argued.\",\"viewerDidAuthor\":true},{\"databaseId\":607,\"body\":\"This is intentional.\",\"viewerDidAuthor\":false}]}}]}}}}}"), answer(200, "{\"id\":9003}"), answer(201, "{\"id\":601}"), answer(200, "{\"data\":{\"resolveReviewThread\":{\"thread\":{\"isResolved\":true}}}}"), answer(201, "{\"id\":602}")]
+	stub AnthropicHttp.post(_, _, _) returns each [listing(), replying("[{\"type\":\"tool_use\",\"id\":\"tu_2\",\"name\":\"submit_review\",\"input\":{\"summary\":\"The fix is in.\",\"findings\":[],\"resolved\":[{\"thread\":\"t1\",\"reply\":\"Fixed: it checks @null now.\"},{\"thread\":\"t3\",\"reply\":\"The guard is there.\"},{\"thread\":\"t4\",\"reply\":\"Done.\"},{\"thread\":\"t9\",\"reply\":\"No such thread.\"}]}}]", "tool_use")]
+	let seeded <- Deliveries.batch(
+		[
+			SqlStatement {
+				sql: "INSERT INTO reviews (repo, number, head_sha, delivery, requested_at, status) VALUES ('bynk-lang/vscode', 12, 'old', 'd-0', 'x', 'posted'), ('bynk-lang/vscode', 12, 'abc123', 'd-1', 'x', 'queued')",
+				params: [],
+			},
+		]
+	)
+	expect seeded is Ok(_)
+	let r <- reviewer.message(ReviewJob { review: 2, installation: 42 })
+	expect r is Ack
+	// The App's own open threads nobody has answered, labelled for Claude, without GitHub's ids:
+	// not someone else's, not a resolved one, and not one the author has replied to.
+	expect AnthropicHttp.post called with body.contains("\\\"open_threads\\\":[{\\\"thread\\\":\\\"t1\\\",\\\"path\\\":\\\"src/a.ts\\\",\\\"line\\\":2,\\\"comment\\\":\\\"**Should fix:** The old finding.\\\"},{\\\"thread\\\":\\\"t2\\\",\\\"path\\\":\\\"src/a.ts\\\",\\\"line\\\":null")
+	expect AnthropicHttp.post called with !body.contains("Someone else's") && !body.contains("Already resolved") && !body.contains("Argued") && !body.contains("PRRT_")
+	// Changed since the earlier review: src/a.ts, not README.md.
+	expect GitHubHttp.get called with url == "https://api.github.com/repos/bynk-lang/vscode/compare/old...abc123"
+	// t1 is answered, made safe, and resolved.
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/vscode/pulls/12/comments/501/replies" && body == "{\"body\":\"Resolved: Fixed: it checks @\u{200B}null now.\"}"
+	expect GitHubHttp.post called once with url == "https://api.github.com/graphql" && body.contains("resolveReviewThread") && body.contains("\"variables\":{\"thread\":\"PRRT_a\"}")
+	// t3 was blocking: answered, and left for a maintainer.
+	expect GitHubHttp.post called once with url == "https://api.github.com/repos/bynk-lang/vscode/pulls/12/comments/505/replies" && body.contains("Looks addressed: The guard is there.") && body.contains("left the thread for a maintainer")
+	// t4's file hasn't changed, t2 wasn't named, and t9 isn't a thread: none is touched.
+	expect GitHubHttp.post called 5 times
+	let rows <- Deliveries.select[ReviewRow](ROWS, [])
+	expect rows.map(
+		(rs) => rs.map((x) => [x.status, "\(x.review_id.getOrElse(0))"])
+	) == Ok([["posted", "0"], ["posted", "9003"]])
+	let resolved <- Deliveries.all("SELECT resolved FROM reviews WHERE id = 2", [])
+	expect resolved == Ok("[{\"resolved\":1}]")
+	expect threadsOf("{\"data\":{\"repository\":{\"pullRequest\":null}}}") == []
+	expect threadsOf("not json") == []
 }

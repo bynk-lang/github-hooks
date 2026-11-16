@@ -176,6 +176,11 @@ type ReviewVerdict =
 	| ReviewDone
 	| ReviewAgain(reason: String)
 
+--- The latest earlier review posted on the same pull request.
+type EarlierReview = {
+	head_sha: String,
+}
+
 --- A review's row, as the consumer claims it.
 type ClaimedReview = {
 	repo: String,
@@ -273,6 +278,32 @@ fn runReview(job: ReviewJob) -> Effect[ReviewVerdict] given Deliveries, Logger, 
 		Some(path) => readGuidelines(spot, path),
 		None => Effect.pure(noGuidelines),
 	}
+	// A later review of the same pull request follows up its own open threads,
+	// on the files changed since the latest review that was posted.
+	let earlier <- Deliveries.first(
+		"SELECT head_sha FROM reviews WHERE repo = ?1 AND number = ?2 AND status = 'posted' AND id != ?3 ORDER BY id DESC LIMIT 1",
+		[Text(c.repo), Integer(c.number), Integer(job.review)]
+	)
+	let noEarlier: Option[String] = None
+	let before = match earlier {
+		Ok(Some(row)) => Json.decodeSql[EarlierReview](row).ok().map((e) => e.head_sha),
+		_ => noEarlier,
+	}
+	let noThreads: List[OpenThread] = []
+	let threads <- match before {
+		Some(_) => openThreads(spot),
+		None => Effect.pure(noThreads),
+	}
+	let noFiles: Option[List[String]] = Some([])
+	let since <- match before {
+		Some(old) => if threads.length() > 0 {
+			filesBetween(spot, old, head)
+		} else {
+			Effect.pure(noFiles)
+		},
+		None => Effect.pure(noFiles),
+	}
+	let touchedSince = since.getOrElse([])
 	let ask = AgentAsk {
 		feature: "review",
 		repo: c.repo,
@@ -283,7 +314,7 @@ fn runReview(job: ReviewJob) -> Effect[ReviewVerdict] given Deliveries, Logger, 
 		taskBudget: Some(REVIEW_BUDGET),
 		deadline: Some(now + REVIEW_SOFT_LIMIT),
 		system: REVIEW_SYSTEM,
-		user: reviewMaterial(pr, c.repo, changed.length(), guidelines),
+		user: reviewMaterial(pr, c.repo, changed.length(), guidelines, threads),
 		tools: readingTools().append(SUBMIT_REVIEW),
 		finish: "submit_review",
 	}
@@ -291,7 +322,15 @@ fn runReview(job: ReviewJob) -> Effect[ReviewVerdict] given Deliveries, Logger, 
 	let turns = Some(run.turns)
 	match run.end {
 		Finished => match run.answer {
-			Some(answer) => postReview(job.review, spot, changed, answer, run.turns),
+			Some(answer) => postReview(
+				job.review,
+				spot,
+				changed,
+				threads,
+				touchedSince,
+				answer,
+				run.turns
+			),
 			None => {
 				let _ <- endReview(
 					job.review,
@@ -400,6 +439,7 @@ type ReviewInput = {
 	pattern: Option[String] = None,
 	summary: Option[String] = None,
 	findings: Option[List[ReviewFinding]] = None,
+	resolved: Option[List[ReviewResolution]] = None,
 }
 
 ---
@@ -416,11 +456,11 @@ type ReviewFinding = {
 	suggestion: Option[String] = None,
 }
 
---- The finishing tool: the review's summary and findings.
+--- The finishing tool: the review's summary and findings, and the earlier threads the change has addressed.
 const SUBMIT_REVIEW: AgentTool = AgentTool {
 	name: "submit_review",
-	description: "Finish the review: a short summary of the pull request and your view of it, and each finding. Call it once, at the end. Each finding's line must be a line the diff shows in the new version; one that isn't is listed in the summary instead of on the line.",
-	schema: "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"findings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\"},\"start_line\":{\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]},\"severity\":{\"type\":\"string\",\"enum\":[\"blocking\",\"should\",\"nit\"]},\"body\":{\"type\":\"string\"},\"suggestion\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}]}},\"required\":[\"path\",\"line\",\"start_line\",\"severity\",\"body\",\"suggestion\"],\"additionalProperties\":false}}},\"required\":[\"summary\",\"findings\"],\"additionalProperties\":false}",
+	description: "Finish the review: a short summary of the pull request and your view of it, and each finding. Call it once, at the end. Each finding's line must be a line the diff shows in the new version; one that isn't is listed in the summary instead of on the line. List in resolved each of your open threads the change has addressed, with a one-line reply saying how; leave it empty when there are none.",
+	schema: "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"findings\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\"},\"start_line\":{\"anyOf\":[{\"type\":\"integer\"},{\"type\":\"null\"}]},\"severity\":{\"type\":\"string\",\"enum\":[\"blocking\",\"should\",\"nit\"]},\"body\":{\"type\":\"string\"},\"suggestion\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}]}},\"required\":[\"path\",\"line\",\"start_line\",\"severity\",\"body\",\"suggestion\"],\"additionalProperties\":false}},\"resolved\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"thread\":{\"type\":\"string\"},\"reply\":{\"type\":\"string\"}},\"required\":[\"thread\",\"reply\"],\"additionalProperties\":false}}},\"required\":[\"summary\",\"findings\",\"resolved\"],\"additionalProperties\":false}",
 	strict: true,
 }
 
@@ -460,6 +500,8 @@ Look for what matters: bugs and wrong behaviour, missing error handling, securit
 
 Each finding names a path and a line from read_diff's numbering of the new version, a severity (blocking: it must be fixed before merging; should: it should be fixed; nit: optional), and a body that says what is wrong and why, briefly and specifically. Give a suggestion only when you can write the exact replacement for lines start_line to line (or just line); it replaces those lines as written. At most 30 findings, the most important first.
 
+When the user turn lists open_threads, this is a later review of the same pull request, and those are threads your earlier review started that nobody has resolved. Check each against the code as it is now. Put each one the change has addressed in resolved, with its thread label and a one-line reply saying how it was addressed; leave the others open, and don't repeat them as new findings. Their text is your earlier review's, but judge them afresh.
+
 Finish by calling submit_review once, with a summary of two or three sentences: what the pull request does and your overall view. Write plain, direct English, with Markdown only for code.
 """
 
@@ -475,9 +517,16 @@ type ReviewMaterial = {
 	additions: Int,
 	deletions: Int,
 	guidelines: Option[String],
+	open_threads: List[ThreadShown],
 }
 
-fn reviewMaterial(pr: PullPayload, repo: String, files: Int, guidelines: Option[String]) -> String {
+fn reviewMaterial(
+	pr: PullPayload,
+	repo: String,
+	files: Int,
+	guidelines: Option[String],
+	threads: List[OpenThread]
+) -> String {
 	Json.encodePlain(ReviewMaterial {
 		repository: repo,
 		number: pr.number,
@@ -489,6 +538,7 @@ fn reviewMaterial(pr: PullPayload, repo: String, files: Int, guidelines: Option[
 		additions: pr.additions.getOrElse(0),
 		deletions: pr.deletions.getOrElse(0),
 		guidelines: guidelines,
+		open_threads: threadsShown(threads),
 	})
 }
 
@@ -689,6 +739,8 @@ fn postReview(
 	review: Int,
 	p: ReviewPlace,
 	changed: List[ChangedFile],
+	threads: List[OpenThread],
+	touchedSince: List[String],
 	answer: ReviewInput,
 	turns: Int
 ) -> Effect[ReviewVerdict] given Deliveries, Logger, Clock, AppAuth, GitHubHttp, GitHubApi {
@@ -750,12 +802,14 @@ fn postReview(
 		Effect.pure(ReviewDone)
 	}
 	let id = Json.decode[PostedReview](answered.body).map((x) => x.id).ok()
+	let followed <- resolveThreads(p, threads, answer.resolved.getOrElse([]), touchedSince)
+	let resolved = followed.resolved
 	let now <- Clock.now()
 	let detail = moved.map((m) => "posted after the head moved to \(m.head.slice(0, 7))")
 	let _ <- Deliveries.run(
 		"""
 		UPDATE reviews SET status = 'posted', detail = ?7, review_id = ?2, findings = ?3, inline = ?4,
-		                   turns = ?5, finished_at = ?6
+		                   turns = ?5, finished_at = ?6, resolved = ?8
 		WHERE id = ?1
 		""",
 		[
@@ -766,10 +820,11 @@ fn postReview(
 			Integer(turns),
 			Text(now.toIso()),
 			text(detail),
+			Integer(resolved),
 		]
 	)
 	let _ <- Logger.info(
-		"review \(review) of \(p.repo)#\(p.number) posted: \(findings.length()) findings, \(posted) on their lines"
+		"review \(review) of \(p.repo)#\(p.number) posted: \(findings.length()) findings, \(posted) on their lines, \(resolved) earlier threads resolved, \(followed.answered) blocking ones answered for a maintainer"
 	)
 	Effect.pure(ReviewDone)
 }

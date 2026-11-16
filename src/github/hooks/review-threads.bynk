@@ -1,0 +1,317 @@
+context github.hooks
+
+consumes bynk { Logger }
+
+// The follow-up (#129, step 3): on a later review of the same pull request,
+// Claude is shown the App's own open threads, and the ones it judges the
+// change has addressed are answered and resolved. Only threads the App
+// started are shown: GraphQL says so of each first comment
+// (`viewerDidAuthor`, asked as the App's installation), so a thread anyone
+// else started is never shown, answered or resolved.
+//
+// Resolving is an action nobody approves, and the code under review is
+// anyone's text, which may try to steer Claude into it (#132's review). So:
+// - a thread anyone has replied to is a conversation for people, and isn't
+//   shown;
+// - a thread is resolved only if its file has changed since the earlier
+//   review: if it hasn't, nothing can have fixed it;
+// - a blocking thread is never resolved by the App: it's answered, saying it
+//   looks addressed, and left for a maintainer to resolve.
+
+---
+The pull request's review threads, each with its first comment and its last
+few. The first page is the oldest threads, which matters only past 100.
+---
+const THREADS_QUERY: String = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved path line opening: comments(first: 1) { nodes { databaseId body viewerDidAuthor } } latest: comments(last: 3) { nodes { databaseId body viewerDidAuthor } } } } } } }"
+
+--- Resolves one thread.
+const RESOLVE_MUTATION: String = "mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }"
+
+type ThreadsVariables = {
+	owner: String,
+	name: String,
+	number: Int,
+}
+
+type ResolveVariables = {
+	thread: String,
+}
+
+type ThreadsAnswer = {
+	data: Option[ThreadsData] = None,
+}
+
+type ThreadsData = {
+	repository: Option[ThreadsRepository] = None,
+}
+
+type ThreadsRepository = {
+	pullRequest: Option[ThreadsPull] = None,
+}
+
+type ThreadsPull = {
+	reviewThreads: ThreadPage,
+}
+
+type ThreadPage = {
+	nodes: List[ThreadNode],
+}
+
+type ThreadNode = {
+	id: String,
+	isResolved: Bool,
+	path: String,
+	line: Option[Int] = None,
+	opening: ThreadComments,
+	latest: ThreadComments,
+}
+
+type ThreadComments = {
+	nodes: List[ThreadComment],
+}
+
+type ThreadComment = {
+	databaseId: Int,
+	body: String,
+	viewerDidAuthor: Bool,
+}
+
+---
+One of the App's own open threads, as a review's follow-up knows it:
+`label` is what Claude calls it (`t1`, `t2`, …), and `id` and `comment` are
+GitHub's ids for the thread and its first comment, which Claude never sees.
+`blocking` is whether the finding that started it was.
+---
+type OpenThread = {
+	label: String,
+	id: String,
+	comment: Int,
+	path: String,
+	line: Option[Int],
+	body: String,
+	blocking: Bool,
+}
+
+--- An open thread as Claude is shown it, in the material.
+type ThreadShown = {
+	thread: String,
+	path: String,
+	line: Option[Int],
+	comment: String,
+}
+
+---
+What Claude says of a thread the change has addressed: its label, and a
+one-line reply saying how.
+---
+type ReviewResolution = {
+	thread: String,
+	reply: String,
+}
+
+---
+The App's own open threads on the pull request that nobody has replied to,
+labelled in order. A thread anyone else started, one already resolved, or
+one with a reply from anyone but the App, isn't among them. If GitHub can't
+be asked, or doesn't answer them, there are none: the review goes on
+without a follow-up.
+---
+fn openThreads(p: ReviewPlace) -> Effect[List[OpenThread]] given AppAuth, GitHubHttp, Logger {
+	let none: List[OpenThread] = []
+	let parts = p.repo.split("/")
+	let body = Json.encodePlain(GraphQLRequest {
+		query: THREADS_QUERY,
+		variables: ThreadsVariables {
+			owner: parts.get(0).getOrElse(""),
+			name: parts.get(1).getOrElse(""),
+			number: p.number,
+		},
+	})
+	let Ok(res) <- asApp(
+		p.installation,
+		(token) => GitHubHttp.post(token, GRAPHQL_URL, body)
+	) else match {
+		Err(why) => {
+			let _ <- Logger.warn("\(p.repo)#\(p.number)'s threads could not be read: \(why)")
+			Effect.pure(none)
+		},
+	}
+	let true = res.status == 200 else {
+		let _ <- Logger.warn("\(p.repo)#\(p.number)'s threads could not be read (\(res.status))")
+		Effect.pure(none)
+	}
+	Effect.pure(threadsOf(res.body))
+}
+
+--- The App's own open, unanswered threads in a GraphQL answer, labelled `t1`, `t2`, … in order.
+fn threadsOf(body: String) -> List[OpenThread] {
+	let nodes = Json
+		.decode[ThreadsAnswer](body)
+		.ok()
+		.andThen((a) => a.data)
+		.andThen((d) => d.repository)
+		.andThen((r) => r.pullRequest)
+		.map((p) => p.reviewThreads.nodes)
+		.getOrElse([])
+	let ours = nodes.filter((t) => !t.isResolved).filter((t) => t.opening.nodes
+		.first()
+		.map((c) => c.viewerDidAuthor)
+		.getOrElse(false)).filter((t) => t.latest.nodes.all((c) => c.viewerDidAuthor))
+	ours.fold(Labelling { next: 1, threads: [] }, (l, t) => {
+		let first = t.opening.nodes.first()
+		let said = first.map((c) => c.body).getOrElse("")
+		Labelling {
+			next: l.next + 1,
+			threads: l.threads.append(OpenThread {
+				label: "t\(l.next)",
+				id: t.id,
+				comment: first.map((c) => c.databaseId).getOrElse(0),
+				path: t.path,
+				line: t.line,
+				body: said,
+				blocking: said.startsWith("**Blocking:**"),
+			}),
+		}
+	}).threads
+}
+
+type Labelling = {
+	next: Int,
+	threads: List[OpenThread],
+}
+
+--- The threads as Claude is shown them.
+fn threadsShown(threads: List[OpenThread]) -> List[ThreadShown] {
+	threads.map((t) => ThreadShown { thread: t.label, path: t.path, line: t.line, comment: t.body })
+}
+
+---
+The files changed between two commits, or `None` when GitHub can't say,
+which counts as none: nothing is resolved on a guess.
+---
+fn filesBetween(
+	p: ReviewPlace,
+	base: String,
+	head: String
+) -> Effect[Option[List[String]]] given AppAuth, GitHubHttp {
+	let unknown: Option[List[String]] = None
+	let true = base != head else { Effect.pure(Some([])) }
+	let url = "https://api.github.com/repos/\(p.repo)/compare/\(base)...\(head)"
+	let Ok(res) <- asApp(p.installation, (token) => GitHubHttp.get(token, url)) else {
+		Effect.pure(unknown)
+	}
+	let true = res.status == 200 else { Effect.pure(unknown) }
+	Effect.pure(Json
+		.decode[ComparedFiles](res.body)
+		.ok()
+		.andThen((c) => c.files)
+		.map((fs) => fs.map((f) => f.filename)))
+}
+
+--- What came of the follow-up: threads resolved, and blocking ones answered but left for a maintainer.
+type FollowUp = {
+	resolved: Int,
+	answered: Int,
+}
+
+---
+Follows up each thread Claude says the change has addressed, of the App's
+own open ones whose file is among `changed` (the files changed since the
+earlier review). A label that isn't one of them, or a thread on a file that
+hasn't changed, is ignored. A blocking thread is answered, saying it looks
+addressed, and left open for a maintainer; any other is answered and
+resolved. Every answer is made safe, as everything the App posts is.
+---
+fn resolveThreads(
+	p: ReviewPlace,
+	threads: List[OpenThread],
+	resolutions: List[ReviewResolution],
+	changed: List[String]
+) -> Effect[FollowUp] given AppAuth, GitHubHttp, Logger {
+	let chosen = threads
+		.filter((t) => resolutions.any((r) => r.thread == t.label))
+		.filter((t) => changed.any((f) => f == t.path))
+	chosen.foldEff(FollowUp { resolved: 0, answered: 0 }, (done, t) => followUpOne(
+		p,
+		t,
+		resolutions,
+		done
+	))
+}
+
+fn followUpOne(
+	p: ReviewPlace,
+	t: OpenThread,
+	resolutions: List[ReviewResolution],
+	done: FollowUp
+) -> Effect[FollowUp] given AppAuth, GitHubHttp, Logger {
+	let reply = resolutions
+		.filter((r) => r.thread == t.label)
+		.first()
+		.map((r) => r.reply)
+		.getOrElse("")
+	let said = if t.blocking {
+		"Looks addressed: \(defused(reply))\n\nThis was a blocking finding, so I've left the thread for a maintainer to resolve."
+	} else {
+		"Resolved: \(defused(reply))"
+	}
+	let replied <- answerThread(p, t, said)
+	let true = replied else { Effect.pure(done) }
+	let true = !t.blocking else { Effect.pure(FollowUp { ...done, answered: done.answered + 1 }) }
+	let resolved <- resolveThread(p, t)
+	Effect.pure(if resolved { FollowUp { ...done, resolved: done.resolved + 1 } } else { done })
+}
+
+--- Replies on a thread's first comment; `true` when GitHub took it.
+fn answerThread(
+	p: ReviewPlace,
+	t: OpenThread,
+	said: String
+) -> Effect[Bool] given AppAuth, GitHubHttp, Logger {
+	let url = "https://api.github.com/repos/\(p.repo)/pulls/\(p.number)/comments/\(t.comment)/replies"
+	let body = Json.encodePlain(ReplyBody { body: said })
+	let Ok(answered) <- asApp(p.installation, (token) => GitHubHttp.post(token, url, body)) else match {
+		Err(why) => {
+			let _ <- Logger.warn(
+				"could not answer thread \(t.label) on \(p.repo)#\(p.number): \(why)"
+			)
+			Effect.pure(false)
+		},
+	}
+	let true = answered.status == 201 else {
+		let _ <- Logger.warn(
+			"GitHub refused the answer to thread \(t.label) on \(p.repo)#\(p.number) (\(answered.status))"
+		)
+		Effect.pure(false)
+	}
+	Effect.pure(true)
+}
+
+--- Resolves a thread; `true` when GitHub did, with no GraphQL errors.
+fn resolveThread(p: ReviewPlace, t: OpenThread) -> Effect[Bool] given AppAuth, GitHubHttp, Logger {
+	let mutation = Json.encodePlain(GraphQLRequest {
+		query: RESOLVE_MUTATION,
+		variables: ResolveVariables { thread: t.id },
+	})
+	let Ok(resolved) <- asApp(p.installation, (token) => GitHubHttp.post(
+		token,
+		GRAPHQL_URL,
+		mutation
+	)) else match {
+		Err(why) => {
+			let _ <- Logger.warn(
+				"could not resolve thread \(t.label) on \(p.repo)#\(p.number): \(why)"
+			)
+			Effect.pure(false)
+		},
+	}
+	let true = resolved.status == 200 && graphqlErrors(resolved.body).isNone() else {
+		let _ <- Logger.warn("GitHub refused to resolve thread \(t.label) on \(p.repo)#\(p.number)")
+		Effect.pure(false)
+	}
+	Effect.pure(true)
+}
+
+type ReplyBody = {
+	body: String,
+}
