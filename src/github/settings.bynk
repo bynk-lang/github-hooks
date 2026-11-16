@@ -18,6 +18,9 @@ release_notes:
 weekly_summary:
   enabled: true
   category: Announcements
+review:
+  enabled: true
+  guidelines: .github/review-guidelines.md
 ```
 ---
 type RepoSettings = {
@@ -33,6 +36,10 @@ type RepoSettings = {
 	weekly_summary: WeeklySummarySettings = WeeklySummarySettings {
 		enabled: false,
 		category: "Announcements",
+	},
+	review: ReviewSettings = ReviewSettings {
+		enabled: false,
+		guidelines: None,
 	},
 }
 
@@ -62,6 +69,16 @@ in the category named `category` (matched without regard to case).
 type WeeklySummarySettings = {
 	enabled: Bool = false,
 	category: String = "Announcements",
+}
+
+---
+Pull request reviews (#129): Claude Opus 5.5 reviews a pull request each time
+it becomes ready. `guidelines` names a file on the default branch whose text
+is given to Claude as the maintainers' own review notes.
+---
+type ReviewSettings = {
+	enabled: Bool = false,
+	guidelines: Option[String] = None,
 }
 
 --- Where the settings live in a repository.
@@ -105,6 +122,10 @@ fn offSettings() -> RepoSettings {
 		weekly_summary: WeeklySummarySettings {
 			enabled: false,
 			category: "Announcements",
+		},
+		review: ReviewSettings {
+			enabled: false,
+			guidelines: None,
 		},
 	}
 }
@@ -206,7 +227,11 @@ fn unquoted(key: String) -> String {
 }
 
 fn knownSection(key: String) -> Bool {
-	key == "triage" || key == "nudges" || key == "release_notes" || key == "weekly_summary"
+	key == "triage"
+		|| key == "nudges"
+		|| key == "release_notes"
+		|| key == "weekly_summary"
+		|| key == "review"
 }
 
 fn knownKey(section: String, key: String) -> Bool {
@@ -214,6 +239,7 @@ fn knownKey(section: String, key: String) -> Bool {
 		|| (section == "triage" && key == "labels")
 		|| (section == "nudges" && key == "after_days")
 		|| (section == "weekly_summary" && key == "category")
+		|| (section == "review" && key == "guidelines")
 }
 
 --- An `Invalid` settings file, for a context (which can't build a commons sum itself).
