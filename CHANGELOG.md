@@ -6,12 +6,16 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-17
+
 ### Changed
 
 - Pull request reviews (#129): the per-repository daily cap,
   `CLAUDE_REVIEW_DAILY_CAP_REPO`, now defaults to 20 reviews a repository,
   up from 10, with reviews on in four repositories. The total cap stays at
   40, and either secret still overrides its default.
+- Built with Bynk v0.639.1 (#140), after the Bynk canary passed with it.
+  `BYNK_VERSION` moves from v0.614.0.
 
 ## [0.8.1] - 2026-11-16
 
@@ -917,7 +921,8 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/bynk-lang/github-hooks/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/bynk-lang/github-hooks/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bynk-lang/github-hooks/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/bynk-lang/github-hooks/compare/v0.6.0...v0.7.0
