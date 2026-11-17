@@ -178,7 +178,7 @@ jobs:
             row ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" "optional: Claude features (#69); without it none calls Claude"
             row CLAUDE_DAILY_CAP_REPO "$CLAUDE_DAILY_CAP_REPO" "optional: default 50"
             row CLAUDE_DAILY_CAP_TOTAL "$CLAUDE_DAILY_CAP_TOTAL" "optional: default 200"
-            row CLAUDE_REVIEW_DAILY_CAP_REPO "$CLAUDE_REVIEW_DAILY_CAP_REPO" "optional: pull request reviews (#129), default 10"
+            row CLAUDE_REVIEW_DAILY_CAP_REPO "$CLAUDE_REVIEW_DAILY_CAP_REPO" "optional: pull request reviews (#129), default 20"
             row CLAUDE_REVIEW_DAILY_CAP_TOTAL "$CLAUDE_REVIEW_DAILY_CAP_TOTAL" "optional: pull request reviews (#129), default 40"
             row BUMP_APP_ID "$BUMP_APP_ID" "the lock pull request (an organisation secret)"
             row BUMP_APP_KEY "$BUMP_APP_KEY" "the lock pull request (an organisation secret)"

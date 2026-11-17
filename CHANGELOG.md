@@ -6,6 +6,13 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Pull request reviews (#129): the per-repository daily cap,
+  `CLAUDE_REVIEW_DAILY_CAP_REPO`, now defaults to 20 reviews a repository,
+  up from 10, with reviews on in four repositories. The total cap stays at
+  40, and either secret still overrides its default.
+
 ## [0.8.1] - 2026-11-16
 
 ### Fixed

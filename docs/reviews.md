@@ -207,7 +207,7 @@ comments.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CLAUDE_REVIEW_DAILY_CAP_REPO` | 10 | reviews one repository may have in a UTC day. `0` stops them |
+| `CLAUDE_REVIEW_DAILY_CAP_REPO` | 20 | reviews one repository may have in a UTC day. `0` stops them |
 | `CLAUDE_REVIEW_DAILY_CAP_TOTAL` | 40 | reviews across every repository in a UTC day |
 
 **The claim.** A review is claimed against these caps once, when it starts.

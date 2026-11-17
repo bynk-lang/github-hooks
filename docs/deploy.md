@@ -51,7 +51,7 @@ Set these under *Settings → Environments → production → Environment secret
 | `ANTHROPIC_API_KEY` | optional: the Claude API key for #69's features. Without it no feature calls Claude. Give the key a spend limit in the Anthropic Console too |
 | `CLAUDE_DAILY_CAP_REPO` | optional: Claude calls a repository may make in a UTC day (default 50; 0 stops them) |
 | `CLAUDE_DAILY_CAP_TOTAL` | optional: Claude calls across every repository in a UTC day (default 200) |
-| `CLAUDE_REVIEW_DAILY_CAP_REPO` | optional: pull request [reviews](reviews.md) a repository may have in a UTC day (default 10; 0 stops them) |
+| `CLAUDE_REVIEW_DAILY_CAP_REPO` | optional: pull request [reviews](reviews.md) a repository may have in a UTC day (default 20; 0 stops them) |
 | `CLAUDE_REVIEW_DAILY_CAP_TOTAL` | optional: reviews across every repository in a UTC day (default 40) |
 
 Enter each value exactly as it is in `.secrets.env`, on one line, without
