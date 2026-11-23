@@ -337,7 +337,7 @@ case "a pull request past the limits gets a note in place of a review, and past 
 			},
 		].append(
 			SqlStatement {
-				sql: "INSERT INTO claude_reviews_daily (repo, day, reviews) VALUES ('bynk-lang/vscode', '2026-11-05', 20)",
+				sql: "INSERT INTO claude_reviews_daily (repo, day, reviews) VALUES ('bynk-lang/vscode', '2026-11-05', 200)",
 				params: [],
 			}
 		)

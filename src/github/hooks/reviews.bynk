@@ -11,9 +11,9 @@ consumes bynk { Secrets }
 // arrive in step 2.
 
 --- The daily caps on reviews when `CLAUDE_REVIEW_DAILY_CAP_REPO` and `CLAUDE_REVIEW_DAILY_CAP_TOTAL` aren't set.
-const REVIEW_CAP_REPO: Int = 20
+const REVIEW_CAP_REPO: Int = 200
 
-const REVIEW_CAP_TOTAL: Int = 40
+const REVIEW_CAP_TOTAL: Int = 240
 
 --- The day's caps on reviews, per repository and in total, from their settings.
 type ReviewCaps = {
