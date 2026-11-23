@@ -6,6 +6,14 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Pull request reviews (#129): the daily caps now default to 200 reviews a
+  repository (`CLAUDE_REVIEW_DAILY_CAP_REPO`, up from 20) and 240 in total
+  (`CLAUDE_REVIEW_DAILY_CAP_TOTAL`, up from 40), as bynk-lang/bynk moves its
+  reviews to the App and opens up to 79 pull requests a day. Either secret
+  still overrides its default.
+
 ## [0.8.2] - 2026-11-17
 
 ### Changed

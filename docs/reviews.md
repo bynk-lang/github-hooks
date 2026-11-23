@@ -207,8 +207,8 @@ comments.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `CLAUDE_REVIEW_DAILY_CAP_REPO` | 20 | reviews one repository may have in a UTC day. `0` stops them |
-| `CLAUDE_REVIEW_DAILY_CAP_TOTAL` | 40 | reviews across every repository in a UTC day |
+| `CLAUDE_REVIEW_DAILY_CAP_REPO` | 200 | reviews one repository may have in a UTC day. `0` stops them |
+| `CLAUDE_REVIEW_DAILY_CAP_TOTAL` | 240 | reviews across every repository in a UTC day |
 
 **The claim.** A review is claimed against these caps once, when it starts.
 A review that never reaches Claude, for want of a key, gives its claim back.
