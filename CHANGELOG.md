@@ -6,6 +6,8 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-23
+
 ### Changed
 
 - Pull request reviews (#129): the daily caps now default to 200 reviews a
@@ -13,6 +15,7 @@ All notable changes to github-hooks. The format follows
   (`CLAUDE_REVIEW_DAILY_CAP_TOTAL`, up from 40), as bynk-lang/bynk moves its
   reviews to the App and opens up to 79 pull requests a day. Either secret
   still overrides its default.
+- The pinned `wrangler` moves from 4.162.0 to 4.164.0 (#143).
 
 ## [0.8.2] - 2026-11-17
 
@@ -929,7 +932,8 @@ App.
   pinned, checksum-verified Bynk release (v0.492.1).
 - `docs/github-app.md`: registering, permissioning and installing the App.
 
-[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/bynk-lang/github-hooks/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/bynk-lang/github-hooks/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/bynk-lang/github-hooks/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/bynk-lang/github-hooks/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/bynk-lang/github-hooks/compare/v0.7.0...v0.8.0
