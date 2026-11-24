@@ -166,6 +166,19 @@ const LATE_MAX_TOKENS: Int = 4000
 --- What Claude is told with each tool result once the deadline has passed.
 const TIME_UP: String = "Time is up for this task: finish now with what you have, by calling the finishing tool."
 
+---
+How few turns may be left before each tool result says so. A conversation
+that reaches `maxTurns` ends unfinished, and all its reading is lost, so
+Claude is warned in time to call the finishing tool with what it has.
+---
+const TURNS_WARNING: Int = 3
+
+--- What Claude is told with each tool result when only `left` turns remain.
+fn turnsUp(left: Int) -> String {
+	let turns = if left == 1 { "turn is" } else { "turns are" }
+	"Only \(left) more \(turns) left for this task: finish now with what you have, by calling the finishing tool."
+}
+
 --- The model every conversation asks.
 const AGENT_MODEL: String = "claude-opus-5-5"
 
@@ -319,7 +332,11 @@ fn agentTurn[I: Codable](
 	let results <- calls.foldEff(none, (done, c) => runTool(a, run, done, c))
 	let after <- Clock.now()
 	let late = a.deadline.filter((d) => after.toEpochMillis() >= d.toEpochMillis()).isSome()
-	let answer = toolResultsMessage(results, late)
+	let left = a.maxTurns - made
+	let note: Option[String] = if late {
+		Some(TIME_UP)
+	} else if left <= TURNS_WARNING { Some(turnsUp(left)) } else { None }
+	let answer = toolResultsMessage(results, note)
 	agentTurn(a, apiKey, run, messages.concat([assistant, answer]), made, reminded)
 }
 
@@ -334,15 +351,15 @@ fn agentEnded[I: Codable](end: AgentEnd, turns: Int) -> AgentRun[I] {
 }
 
 ---
-The user turn that answers a turn's tool calls: their results, and once the
-deadline has passed, a note after them saying time is up.
+The user turn that answers a turn's tool calls: their results, then a note
+when Claude must finish: once the deadline has passed, that time is up, or
+else, when few turns are left, how many.
 ---
-fn toolResultsMessage(results: List[AgentToolResultBlock], late: Bool) -> String {
+fn toolResultsMessage(results: List[AgentToolResultBlock], note: Option[String]) -> String {
 	let blocks = results.map((r) => Json.encodePlain(r))
-	let all = if late {
-		blocks.append(Json.encodePlain(AgentTextBlock { type: "text", text: TIME_UP }))
-	} else {
-		blocks
+	let all = match note {
+		Some(text) => blocks.append(Json.encodePlain(AgentTextBlock { type: "text", text: text })),
+		None => blocks,
 	}
 	"{\"role\":\"user\",\"content\":[\(joined(all, ","))]}"
 }

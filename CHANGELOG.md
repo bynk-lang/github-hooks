@@ -6,6 +6,15 @@ All notable changes to github-hooks. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Pull request reviews (#129) no longer lose a long review to the turn limit.
+  A review of bynk-lang/bynk#4182, 92 files, read one file a turn and used all
+  40 turns without submitting, so nothing was posted. Claude is now told to
+  read several files in one turn, and when 3 turns are left, each tool result
+  says so and asks it to submit what it has, as it already does once time is
+  up ([reviews.md](docs/reviews.md)).
+
 ## [0.8.3] - 2026-11-23
 
 ### Changed
