@@ -54,7 +54,9 @@ advisory: `maxTurns` times `maxTokens` is what bounds the spend. One below
 says time is up and asks it to finish now, and each request's replies are
 held to `LATE_MAX_TOKENS`; `DEADLINE_GRACE` after it, no further request is
 made. So the last request starts by `deadline + DEADLINE_GRACE` and is a
-short one.
+short one. Before then, once `TURNS_WARNING` or fewer turns are left, each
+tool result says how many and asks Claude to finish, so a conversation near
+`maxTurns` ends with its answer rather than unfinished.
 ---
 type AgentAsk = {
 	feature: String,
