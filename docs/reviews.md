@@ -131,6 +131,13 @@ reviews on, as for the other Claude features
 - No request starts after 9 minutes. So the last reply, and posting, fit
   inside the 15.
 
+**Turns.** A conversation has at most 40 requests, and a request counts once
+however many tools Claude calls in it, so the instructions ask Claude to read
+several files at a time. When only 3 requests are left, each tool result says
+how many, and asks Claude to submit what it has. A review that reaches the
+40th request without submitting is recorded as `unwritten`, and nothing is
+posted.
+
 ## What is posted
 
 One review, at the commit it reviewed:

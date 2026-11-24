@@ -133,10 +133,14 @@ case "a reply without a tool call is reminded once to finish, then ends unfinish
 
 case "a conversation that runs out of turns, or of time, ends unfinished, without another request" {
 	stub AnthropicHttp.post(_, _, _) returns replying(READ_CALL, "tool_use")
-	let r <- converse[DemoInput](ask(3), (c) => Effect.pure(reading(c)))
-	expect r.end == Unfinished("it used all 3 turns")
-	expect r.turns == 3
-	expect AnthropicHttp.post called 3 times
+	let r <- converse[DemoInput](ask(4), (c) => Effect.pure(reading(c)))
+	expect r.end == Unfinished("it used all 4 turns")
+	expect r.turns == 4
+	expect AnthropicHttp.post called 4 times
+	// From 3 turns left, each tool result says how many; one is singular.
+	expect AnthropicHttp.post called with body.contains("\"is_error\":false},{\"type\":\"text\",\"text\":\"Only 3 more turns are left for this task: finish now with what you have, by calling the finishing tool.\"}]}")
+	expect AnthropicHttp.post called with body.contains("\"is_error\":false},{\"type\":\"text\",\"text\":\"Only 2 more turns are left for this task: finish now with what you have, by calling the finishing tool.\"}]}")
+	expect AnthropicHttp.post called with body.contains("\"is_error\":false},{\"type\":\"text\",\"text\":\"Only 1 more turn is left for this task: finish now with what you have, by calling the finishing tool.\"}]}")
 	// Past its deadline, each tool result says time is up; past the grace after it, nothing more is asked.
 	let now = Instant.fromEpochMillis(1793880000000)
 	let late <- converse[DemoInput](
@@ -157,7 +161,7 @@ case "a conversation that runs out of turns, or of time, ends unfinished, withou
 	)
 	expect over.end == Unfinished("it ran out of time")
 	expect over.turns == 0
-	expect AnthropicHttp.post called 5 times
+	expect AnthropicHttp.post called 6 times
 }
 
 case "arguments that don't decode get an error result, and the tool isn't run" {
